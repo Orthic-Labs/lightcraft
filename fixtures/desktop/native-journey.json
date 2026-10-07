@@ -13,6 +13,6 @@
     { "id": "arwImport", "control": "lc_native", "params": { "action": "import" }, "assert": "ARW source hash survives import and reload" },
     { "id": "lightroomImport", "control": "lc_native", "params": { "action": "importLightroom" }, "assert": "virtual copies, collections, warnings & recovery archive" },
     { "id": "engineExport", "control": "lc_run", "params": { "id": "photo.export" }, "assert": "read decoded exported bytes; source hash unchanged" },
-    { "id": "catalogRecovery", "control": "lc_run", "params": { "id": "library.restore" }, "assert": "mutated catalog restores logical photo state from unchanged backup" }
+    { "id": "catalogRecovery", "control": "lc_run", "params": { "id": "library.restore" }, "assert": "sourceBackup and copied restoredPath differ; mutated catalog restores logical state; openLibrary changes path/generation and renders selected pixels" }
   ]
 }

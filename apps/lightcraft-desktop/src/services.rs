@@ -22,9 +22,9 @@ pub fn run(action: &str, params: &Value) -> Result<Value, String> {
             Some(paths) => Ok(paths_value(paths)),
             None => pick_files_with_params(params),
         },
-        "pickFolder" | "chooseFolder" | "importFolder" | "openLibrary" => Ok(provided_path(params)
+        "pickFolder" | "chooseFolder" | "importFolder" | "openLibrary" => Ok(provided_path(params)?
             .map_or_else(|| path_value(rfd::FileDialog::new().set_title("Open Folder").pick_folder()), |path| path_value(Some(path)))),
-        "pickLightroomCatalog" | "importLightroom" => Ok(provided_path(params).map_or_else(
+        "pickLightroomCatalog" | "importLightroom" => Ok(provided_path(params)?.map_or_else(
             || {
                 path_value(
                     rfd::FileDialog::new().set_title("Import Lightroom Catalog").add_filter("Lightroom Classic Catalog", &["lrcat"]).pick_file(),
@@ -32,18 +32,20 @@ pub fn run(action: &str, params: &Value) -> Result<Value, String> {
             },
             |path| path_value(Some(path)),
         )),
-        "pickDevice" | "chooseDevice" | "importDevice" => Ok(provided_path(params)
+        "pickDevice" | "chooseDevice" | "importDevice" => Ok(provided_path(params)?
             .map_or_else(|| path_value(rfd::FileDialog::new().set_title("Import from Device").pick_folder()), |path| path_value(Some(path)))),
         "pickPresetFiles" => pick_files("Import Presets & Profiles", PRESET_EXTENSIONS),
         "openFile" => match provided_paths(params)? {
             Some(paths) => Ok(paths_value(paths)),
             None => pick_files_with_params(params),
         },
-        "saveFile" | "saveExport" | "exportFile" => params
-            .get("path")
-            .and_then(Value::as_str)
-            .map(|path| Ok(path_value(Some(PathBuf::from(path)))))
-            .unwrap_or_else(|| save_file_with_params(params)),
+        "saveFile" | "saveExport" | "exportFile" => {
+            if params.get("path").is_some() {
+                Ok(path_value(provided_path(params)?))
+            } else {
+                save_file_with_params(params)
+            }
+        }
         "pickCurvePresetFiles" => pick_files("Import Point Curve Presets", &["lccurve", "json"]),
         "pickTracklog" => {
             Ok(path_value(rfd::FileDialog::new().set_title("Auto-Tag from Tracklog").add_filter("GPS Track Log", &["gpx"]).pick_file()))
@@ -87,6 +89,9 @@ fn pick_files_with_params(params: &Value) -> Result<Value, String> {
 
 fn save_file(params: &Value, title: &str, filter: &str, extension: &str) -> Result<Value, String> {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("LightCraft Preset");
+    if name.is_empty() || name.contains('\0') {
+        return Err("invalid file name".into());
+    }
     if name.len() > 240 {
         return Err("file name is too long".into());
     }
@@ -107,7 +112,7 @@ fn drop_import(params: &Value) -> Result<Value, String> {
     let mut output = Vec::with_capacity(paths.len());
     for value in paths {
         let path = value.as_str().ok_or_else(|| "drop path must be a string".to_string())?;
-        if path.is_empty() || path.len() > 8_192 {
+        if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
             return Err("invalid dropped path".into());
         }
         output.push(path.to_string());
@@ -134,7 +139,7 @@ fn provided_paths(params: &Value) -> Result<Option<Vec<String>>, String> {
     let mut output = Vec::with_capacity(paths.len());
     for value in paths {
         let path = value.as_str().ok_or_else(|| "path must be a string".to_string())?;
-        if path.is_empty() || path.len() > 8_192 {
+        if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
             return Err("invalid path".into());
         }
         output.push(path.to_string());
@@ -142,13 +147,18 @@ fn provided_paths(params: &Value) -> Result<Option<Vec<String>>, String> {
     Ok(Some(output))
 }
 
-fn provided_path(params: &Value) -> Option<PathBuf> {
-    params.get("path").and_then(Value::as_str).filter(|path| !path.is_empty() && path.len() <= 8_192).map(PathBuf::from)
+fn provided_path(params: &Value) -> Result<Option<PathBuf>, String> {
+    let Some(value) = params.get("path") else { return Ok(None) };
+    let path = value.as_str().ok_or_else(|| "path must be a string".to_string())?;
+    if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
+        return Err("invalid path".into());
+    }
+    Ok(Some(PathBuf::from(path)))
 }
 
 fn required_string(params: &Value, key: &str) -> Result<String, String> {
     let value = params.get(key).and_then(Value::as_str).ok_or_else(|| format!("native action requires {key}"))?;
-    if value.is_empty() || value.len() > 8_192 {
+    if value.is_empty() || value.len() > 8_192 || value.contains('\0') {
         return Err(format!("invalid {key}"));
     }
     Ok(value.to_string())

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ControlSpec, DesktopSnapshot, JsonObject, Panel, UiState } from '../types';
 import { useDesktop } from '../desktop';
+import { Icon, type IconName } from '../icons';
 import './Inspector.css';
 
 type Run = (id: string, params?: JsonObject) => Promise<unknown>;
@@ -14,18 +15,18 @@ type InspectorDesktop = {
   setHistogram: (histogram: unknown) => void;
 };
 
-const PANEL_ITEMS: Array<{ id: Exclude<Panel, null>; label: string; glyph: string }> = [
-  { id: 'edit', label: 'Edit', glyph: '◐' },
-  { id: 'profiles', label: 'Profiles', glyph: '◉' },
-  { id: 'crop', label: 'Crop', glyph: '⌗' },
-  { id: 'remove', label: 'Remove', glyph: '⌁' },
-  { id: 'masking', label: 'Masking', glyph: '◒' },
-  { id: 'redeye', label: 'Red Eye', glyph: '⊙' },
-  { id: 'presets', label: 'Presets', glyph: '✦' },
-  { id: 'versions', label: 'Versions', glyph: '◫' },
-  { id: 'activity', label: 'History', glyph: '◷' },
-  { id: 'keywords', label: 'Keywords', glyph: '#' },
-  { id: 'info', label: 'Info', glyph: 'ⓘ' },
+const PANEL_ITEMS: Array<{ id: Exclude<Panel, null>; label: string; icon: IconName }> = [
+  { id: 'edit', label: 'Edit', icon: 'develop' },
+  { id: 'profiles', label: 'Profiles', icon: 'profiles' },
+  { id: 'crop', label: 'Crop', icon: 'crop' },
+  { id: 'remove', label: 'Remove', icon: 'remove' },
+  { id: 'masking', label: 'Masking', icon: 'masking' },
+  { id: 'redeye', label: 'Red Eye', icon: 'redeye' },
+  { id: 'presets', label: 'Presets', icon: 'presets' },
+  { id: 'versions', label: 'Versions', icon: 'versions' },
+  { id: 'activity', label: 'History', icon: 'history' },
+  { id: 'keywords', label: 'Keywords', icon: 'keywords' },
+  { id: 'info', label: 'Info', icon: 'info' },
 ];
 
 const SECTION_LABELS: Record<string, string> = {
@@ -69,7 +70,7 @@ export default function Inspector({ className = '' }: { className?: string }) {
 
 function ToolStrip({ active, choose }: { active: Panel; choose: (panel: Exclude<Panel, null>) => void }) {
   return <nav className="lc-inspector__tools" aria-label="Inspector tools">
-    {PANEL_ITEMS.map(item => <button key={item.id} type="button" className="lc-inspector__tool" aria-label={item.label} aria-pressed={active === item.id} title={item.label} onClick={() => choose(item.id)}><span aria-hidden="true">{item.glyph}</span><span>{item.label}</span></button>)}
+    {PANEL_ITEMS.map(item => <button key={item.id} type="button" className="lc-inspector__tool" aria-label={item.label} aria-pressed={active === item.id} title={item.label} onClick={() => choose(item.id)}><span className="lc-inspector__tool-icon" aria-hidden="true"><Icon name={item.icon} size={16} /></span><span>{item.label}</span></button>)}
   </nav>;
 }
 
@@ -165,7 +166,7 @@ function RedEyePanel({ desktop }: { desktop: InspectorDesktop }) { const { run, 
 
 function VersionsPanel({ desktop }: { desktop: InspectorDesktop }) { const { run } = desktop; const [versions, setVersions] = useState<Json[]>([]); const [editing, setEditing] = useState<number | null>(null); const [name, setName] = useState(''); useEffect(() => { let live = true; void run('history.list', {}).then((v: unknown) => { if (live) setVersions(array(object(v).versions).map(object)); }); return () => { live = false; }; }, [run]); const reload = async () => { const v = await run('history.list', {}); setVersions(array(object(v).versions).map(object)); }; const rename = async (index: number) => { const trimmed = name.trim(); if (!trimmed) return; await run('version.rename', { index, name: trimmed }); setEditing(null); setName(''); await reload(); }; return <><Header title="Versions" detail={`${versions.length} saved`} /><div className="lc-inspector__actions"><button className="lc-inspector__button primary" type="button" onClick={() => void run('version.create', {}).then(reload)}>Create version</button></div><div className="lc-list">{versions.map((v, i) => <div className="lc-list__item" key={`${text(v.name)}-${i}`}>{editing === i ? <><input value={name} onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') void rename(i); }} /><button type="button" className="lc-inspector__button" onClick={() => void rename(i)}>Save</button></> : <><strong>{text(v.name, `Version ${i + 1}`)}</strong><small>{text(v.created)}</small><button type="button" className="lc-inspector__button" onClick={() => void run('version.restore', { index: i })}>Restore</button><button type="button" className="lc-inspector__button" onClick={() => { setEditing(i); setName(text(v.name)); }}>Rename</button><button type="button" className="lc-inspector__button" onClick={() => void run('version.update', { index: i })}>Update</button><button type="button" className="lc-inspector__button" onClick={() => void run('version.delete', { index: i }).then(reload)}>×</button></>}</div>)}</div></>; }
 
-function HistoryPanel({ desktop }: { desktop: InspectorDesktop }) { const { run } = desktop; const [history, setHistory] = useState<string[]>([]); useEffect(() => { let live = true; void run('history.list', {}).then((v: unknown) => { if (live) setHistory(array(object(v).history).map(x => text(x))); }); return () => { live = false; }; }, [run]); return <><Header title="History" detail={`${history.length} steps`} /><div className="lc-list">{history.map((label, i) => <button type="button" className="lc-list__item" key={`${label}-${i}`} onClick={() => void run('history.restore', { index: i })}><span>◷</span><strong>{label || `Step ${i + 1}`}</strong><small>{i + 1}</small></button>)}</div><div className="lc-inspector__actions"><button type="button" className="lc-inspector__button" onClick={() => void run('history.clear', {})}>Clear history</button></div></>; }
+function HistoryPanel({ desktop }: { desktop: InspectorDesktop }) { const { run } = desktop; const [history, setHistory] = useState<string[]>([]); useEffect(() => { let live = true; void run('history.list', {}).then((v: unknown) => { if (live) setHistory(array(object(v).history).map(x => text(x))); }); return () => { live = false; }; }, [run]); return <><Header title="History" detail={`${history.length} steps`} /><div className="lc-list">{history.map((label, i) => <button type="button" className="lc-list__item" key={`${label}-${i}`} onClick={() => void run('history.restore', { index: i })}><span className="lc-inspector__history-icon" aria-hidden="true"><Icon name="history" size={15} /></span><strong>{label || `Step ${i + 1}`}</strong><small>{i + 1}</small></button>)}</div><div className="lc-inspector__actions"><button type="button" className="lc-inspector__button" onClick={() => void run('history.clear', {})}>Clear history</button></div></>; }
 
 function InfoPanel({ desktop }: { desktop: InspectorDesktop }) { const { snapshot, run } = desktop; const id = snapshot?.active; const [photo, setPhoto] = useState<Json>({}); const [meta, setMeta] = useState<Json>({}); const [all, setAll] = useState<Json>({}); const [metaPresets, setMetaPresets] = useState<Json[]>([]); useEffect(() => { let live = true; if (id == null) return () => { live = false; }; void run('photo.inspect', { id }).then((v: unknown) => { if (live) setPhoto(object(v)); }); void run('photo.allMetadata', { id }).then((v: unknown) => { if (live) setAll(object(v)); }); void run('metadata.presets', {}).then((v: unknown) => { if (live) setMetaPresets(array(v).map(object)); }); return () => { live = false; }; }, [id, run]); useEffect(() => { const m = object(photo.meta); setMeta(m); }, [photo]); const update = (key: string, value: string) => setMeta(current => ({ ...current, [key]: value })); const save = (key: string) => { if (id == null) return; void run('photo.setMeta', { ids: snapshot?.selection?.length ? snapshot.selection : [id], [key]: text(meta[key]) }); }; const savePreset = async () => { const name = text(meta.title).trim() || 'Metadata preset'; const value = await run('metadata.savePreset', { name }); setMetaPresets(array(value).map(object)); }; const targets = snapshot?.selection?.length ? { ids: snapshot.selection } : {}; return <><Header title="Info" detail={id == null ? 'No photo' : `Photo ${id}`} /><dl className="lc-meta"><dt>File</dt><dd>{text(photo.fileName, text(photo.file_name, '—'))}</dd><dt>Dimensions</dt><dd>{photo.width && photo.height ? `${photo.width} × ${photo.height}` : '—'}</dd><dt>Title</dt><dd><input value={text(meta.title)} onChange={e => update('title', e.target.value)} onBlur={() => save('title')} /></dd><dt>Caption</dt><dd><textarea value={text(meta.caption)} onChange={e => update('caption', e.target.value)} onBlur={() => save('caption')} /></dd><dt>Creator</dt><dd><input value={text(meta.creator)} onChange={e => update('creator', e.target.value)} onBlur={() => save('creator')} /></dd><dt>Location</dt><dd><input value={text(meta.location)} onChange={e => update('location', e.target.value)} onBlur={() => save('location')} /></dd><dt>Camera</dt><dd>{text(meta.camera, text(photo.camera, '—'))}</dd></dl><div className="lc-inspector__empty">Metadata presets</div><div className="lc-list">{metaPresets.map(p => <div className="lc-list__item" key={text(p.name)}><strong>{text(p.name)}</strong><button type="button" className="lc-inspector__button" onClick={() => void run('metadata.applyPreset', { name: text(p.name), ...targets })}>Apply</button><button type="button" className="lc-inspector__button danger" onClick={() => void run('metadata.deletePreset', { name: text(p.name) }).then(() => setMetaPresets(current => current.filter(x => text(x.name) !== text(p.name))))}>×</button></div>)}</div><div className="lc-inspector__actions"><button type="button" className="lc-inspector__button" onClick={() => void savePreset()}>Save current as preset</button></div><MetadataTable data={all} /></>; }
 

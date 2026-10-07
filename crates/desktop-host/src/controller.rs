@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 
@@ -11,6 +11,7 @@ use crate::{HostOptions, PreviewDescriptor, PreviewRequest, PreviewStore, Render
 
 const TICK: Duration = Duration::from_millis(250);
 const COMMAND_POLL: Duration = Duration::from_millis(20);
+const PREVIEW_SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 
 pub struct Controller {
     session: Session,
@@ -26,13 +27,13 @@ impl Controller {
     pub(crate) fn new(options: HostOptions, store: PreviewStore) -> Result<Self, String> {
         let HostOptions { library_path, demo, demo_count } = options;
         let mut session = if let Some(path) = library_path {
-            let mut session = Session::new();
+            let mut session = Session::new().with_system_clock();
             session.open_library(&path, demo).map_err(|error| error.to_string())?;
             session
         } else if demo {
-            Session::with_demo()
+            Session::with_demo().with_system_clock()
         } else {
-            Session::new()
+            Session::new().with_system_clock()
         };
         if demo_count > 0 {
             let visible = session.visible_cloned();
@@ -82,6 +83,10 @@ impl Controller {
                     while self.tasks.running() {
                         self.poll();
                         std::thread::sleep(Duration::from_millis(10));
+                    }
+                    if let Err(error) = cancel_preview_build(&self.session, PREVIEW_SHUTDOWN_WAIT) {
+                        log::error!("desktop owner disconnected before preview build stopped: {error}");
+                        break;
                     }
                     self.renderer.cancel_all();
                     let _ = self.session.close_library();
@@ -140,6 +145,7 @@ impl Controller {
             }
             "library.import" => self.tasks.start_import(&mut self.session, params),
             "library.backup" => self.backup(params),
+            "library.open" => self.open(params),
             "library.restore" => self.restore(params),
             "library.save" => self.persist().map(|()| Value::Null),
             "app.export.cancel" | "task.cancel" => self.tasks.cancel(params.get("taskId").or_else(|| params.get("id")).and_then(Value::as_str)),
@@ -232,6 +238,7 @@ impl Controller {
         if self.tasks.running() {
             return Err("background tasks are still stopping; retry shutdown after progress completes".into());
         }
+        cancel_preview_build(&self.session, PREVIEW_SHUTDOWN_WAIT)?;
         self.renderer.cancel_all();
         self.session.persist().map_err(|error| {
             let message = error.to_string();
@@ -243,6 +250,44 @@ impl Controller {
             self.last_error = Some(message.clone());
             message
         })
+    }
+
+    fn open(&mut self, params: &Value) -> Result<Value, String> {
+        let path = library_path(params, "library.open")?;
+        let (path, photos) = self.switch_library(path)?;
+        Ok(json!({"path": path.to_string_lossy(), "photos": photos}))
+    }
+
+    /// Replace the owner session only after the requested library has loaded successfully.
+    /// Keeping the old session alive through the load preserves its lock and in-memory edits
+    /// when opening a bad path or a library held by another process fails.
+    fn switch_library(&mut self, path: PathBuf) -> Result<(PathBuf, usize), String> {
+        if self.tasks.running() {
+            return Err("cannot change libraries while a background task is running; wait for it to finish".into());
+        }
+        if preview_build_running(&self.session) {
+            return Err("cannot change libraries while a preview build is running; run library.cancelPreviews, wait for library.previewProgress running=false, then retry".into());
+        }
+        if self.session.library.as_ref().is_some_and(|library| same_library_path(&library.dir, &path)) {
+            return Ok((path, self.session.catalog.len()));
+        }
+
+        self.persist().map_err(|error| format!("current library must be saved before opening another library: {error}"))?;
+
+        let mut fresh = Session::new().with_system_clock();
+        fresh.open_library(&path, false).map_err(|error| format!("could not open library: {error}"))?;
+        let notices = fresh.take_library_warnings();
+        let photos = fresh.catalog.len();
+
+        self.session.close_library().map_err(|error| format!("could not close current library: {error}"))?;
+        self.renderer.cancel_all();
+        let store = self.renderer.store();
+        self.session = fresh;
+        self.renderer = Renderer::new(store);
+        self.snapshot_cache = crate::snapshot::CatalogSnapshotCache::default();
+        self.notices = notices;
+        self.last_error = None;
+        Ok((path, photos))
     }
 
     fn backup(&mut self, params: &Value) -> Result<Value, String> {
@@ -273,28 +318,55 @@ impl Controller {
     }
 
     fn restore(&mut self, params: &Value) -> Result<Value, String> {
-        let path = params.get("path").and_then(Value::as_str).ok_or_else(|| "library.restore requires path".to_string())?;
-        if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
-            return Err("invalid library backup path".into());
-        }
+        let path = library_path(params, "library.restore")?;
         if self.tasks.running() {
             return Err("cannot restore while a background task is running; wait for it to finish".into());
         }
-        if !Path::new(path).is_dir() {
+        let path_metadata = std::fs::symlink_metadata(&path).map_err(|error| format!("library restore path: {error}"))?;
+        if path_metadata.file_type().is_symlink() {
+            return Err("library restore refuses symlink backup directory".into());
+        }
+        if !path_metadata.is_dir() {
             return Err("library restore expects a backup directory".into());
         }
-        let backup = std::fs::canonicalize(path).map_err(|error| format!("library restore path: {error}"))?;
-        self.session.persist().map_err(|error| format!("library must be saved before restore: {error}"))?;
-        self.renderer.cancel_all();
-        self.session.close_library().map_err(|error| format!("could not close current library before restore: {error}"))?;
-        if let Err(error) = self.session.open_library(&backup, false) {
-            let message = format!("could not open restored library: {error}");
-            self.last_error = Some(message.clone());
-            return Err(message);
+        let backup = std::fs::canonicalize(&path).map_err(|error| format!("library restore path: {error}"))?;
+        let destination = restore_destination(&backup)?;
+        let metadata = std::fs::symlink_metadata(&backup).map_err(|error| format!("library restore read {}: {error}", backup.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("library restore expects a regular backup directory".into());
         }
-        self.snapshot_cache = crate::snapshot::CatalogSnapshotCache::default();
-        self.notices.extend(self.session.take_library_warnings());
-        Ok(json!({"path": backup.to_string_lossy(), "libraryPath": backup.to_string_lossy()}))
+        if let Err(error) = std::fs::create_dir(&destination) {
+            return Err(format!("could not claim restore destination {}: {error}", destination.display()));
+        }
+        if let Err(error) = copy_tree_entries(&backup, &destination, 0) {
+            let _ = std::fs::remove_dir_all(&destination);
+            return Err(format!("could not stage restored library: {error}"));
+        }
+        if let Err(error) = self.switch_library(destination.clone()) {
+            let _ = std::fs::remove_dir_all(&destination);
+            return Err(error);
+        }
+        Ok(json!({
+            "path": destination.to_string_lossy(),
+            "libraryPath": destination.to_string_lossy(),
+            "restoredPath": destination.to_string_lossy(),
+            "sourceBackup": path.to_string_lossy(),
+        }))
+    }
+}
+
+fn library_path(params: &Value, command: &str) -> Result<PathBuf, String> {
+    let path = params.get("path").and_then(Value::as_str).ok_or_else(|| format!("{command} requires path"))?;
+    if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
+        return Err(format!("invalid {command} path"));
+    }
+    Ok(PathBuf::from(path))
+}
+
+fn same_library_path(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
     }
 }
 
@@ -310,6 +382,44 @@ fn backup_destination(path: &Path, source: &Path) -> Result<PathBuf, String> {
     Ok(destination)
 }
 
+fn restore_destination(backup: &Path) -> Result<PathBuf, String> {
+    let parent = backup.parent().ok_or_else(|| "backup path has no parent".to_string())?;
+    let parent = std::fs::canonicalize(parent).map_err(|error| format!("restore destination parent: {error}"))?;
+    let name = backup.file_name().ok_or_else(|| "backup path has no file name".to_string())?.to_string_lossy();
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_nanos()).unwrap_or_default();
+    let pid = std::process::id();
+    for attempt in 0..32u32 {
+        let destination = parent.join(format!("{name}.restored-{pid}-{stamp}-{attempt}"));
+        if std::fs::symlink_metadata(&destination).is_err() {
+            let destination = backup_destination(&destination, backup)?;
+            if std::fs::symlink_metadata(&destination).is_err() {
+                return Ok(destination);
+            }
+        }
+    }
+    Err("could not allocate a unique restore destination".into())
+}
+
+fn preview_build_running(session: &Session) -> bool {
+    session.preview_build.as_ref().is_some_and(|build| !build.finished.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn cancel_preview_build(session: &Session, timeout: Duration) -> Result<(), String> {
+    let Some(build) = session.preview_build.as_ref().filter(|build| !build.finished.load(std::sync::atomic::Ordering::Relaxed)) else {
+        return Ok(());
+    };
+    build.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    let deadline = Instant::now() + timeout;
+    while !build.finished.load(std::sync::atomic::Ordering::Relaxed) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if build.finished.load(std::sync::atomic::Ordering::Relaxed) {
+        Ok(())
+    } else {
+        Err("preview build is still stopping; retry shutdown after library.previewProgress reports running=false".into())
+    }
+}
+
 fn copy_tree(source: &Path, destination: &Path, depth: usize) -> Result<(), String> {
     if depth > 64 {
         return Err("library backup directory nesting is too deep".into());
@@ -320,10 +430,7 @@ fn copy_tree(source: &Path, destination: &Path, depth: usize) -> Result<(), Stri
     }
     if metadata.is_dir() {
         std::fs::create_dir(destination).map_err(|error| format!("backup create {}: {error}", destination.display()))?;
-        for entry in std::fs::read_dir(source).map_err(|error| format!("backup list {}: {error}", source.display()))? {
-            let entry = entry.map_err(|error| format!("backup entry {}: {error}", source.display()))?;
-            copy_tree(&entry.path(), &destination.join(entry.file_name()), depth.saturating_add(1))?;
-        }
+        copy_tree_entries(source, destination, depth)?;
         Ok(())
     } else if metadata.is_file() {
         std::fs::copy(source, destination).map(|_| ()).map_err(|error| format!("backup copy {}: {error}", source.display()))
@@ -332,15 +439,40 @@ fn copy_tree(source: &Path, destination: &Path, depth: usize) -> Result<(), Stri
     }
 }
 
+fn copy_tree_entries(source: &Path, destination: &Path, depth: usize) -> Result<(), String> {
+    for entry in std::fs::read_dir(source).map_err(|error| format!("backup list {}: {error}", source.display()))? {
+        let entry = entry.map_err(|error| format!("backup entry {}: {error}", source.display()))?;
+        if depth == 0 && matches!(entry.file_name().to_str(), Some("catalog.lock" | "catalog.lock.owner")) {
+            continue;
+        }
+        copy_tree(&entry.path(), &destination.join(entry.file_name()), depth.saturating_add(1))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::atomic::Ordering;
 
     use super::*;
 
+    fn temp_library(label: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_nanos()).unwrap_or_default();
+        std::env::temp_dir().join(format!("lightcraft-host-{label}-{}-{stamp}", std::process::id()))
+    }
+
+    fn seed_library(path: &Path) {
+        let mut session = Session::new().with_system_clock();
+        assert!(session.open_library(path, true).is_ok(), "demo library should open");
+        assert!(session.close_library().is_ok(), "demo library should close");
+    }
+
     #[test]
     fn failed_shutdown_keeps_owner_available_until_task_finishes() {
-        let mut controller = Controller::new(HostOptions { demo: true, ..HostOptions::default() }, PreviewStore::default()).expect("demo controller");
+        let controller_result = Controller::new(HostOptions { demo: true, ..HostOptions::default() }, PreviewStore::default());
+        assert!(controller_result.is_ok(), "demo controller should start");
+        let Ok(mut controller) = controller_result else { return };
         let (started, release) = controller.tasks.hold_for_test();
         while !started.load(Ordering::Acquire) {
             std::thread::yield_now();
@@ -353,5 +485,88 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(controller.shutdown().is_ok());
+    }
+
+    #[test]
+    fn failed_open_keeps_old_session_and_lock() {
+        let old = temp_library("open-old");
+        let held = temp_library("open-held");
+        let controller_result = Controller::new(HostOptions { library_path: Some(old.clone()), ..HostOptions::default() }, PreviewStore::default());
+        assert!(controller_result.is_ok());
+        let Ok(mut controller) = controller_result else { return };
+        let mut blocker = Session::new().with_system_clock();
+        assert!(blocker.open_library(&held, false).is_ok());
+
+        let result = controller.run("library.open", &json!({"path": held}));
+        assert!(result.is_err());
+        assert_eq!(controller.session.library.as_ref().map(|library| &library.dir), Some(&old));
+
+        let mut second = Session::new().with_system_clock();
+        assert!(second.open_library(&old, false).is_err(), "failed open must retain old lock");
+        drop(blocker);
+        assert!(controller.shutdown().is_ok());
+        let _ = fs::remove_dir_all(old);
+        let _ = fs::remove_dir_all(held);
+    }
+
+    #[test]
+    fn open_refuses_running_background_task() {
+        let controller_result = Controller::new(HostOptions { demo: true, ..HostOptions::default() }, PreviewStore::default());
+        assert!(controller_result.is_ok());
+        let Ok(mut controller) = controller_result else { return };
+        let (started, release) = controller.tasks.hold_for_test();
+        while !started.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        let result = controller.run("library.open", &json!({"path": temp_library("running")}));
+        assert!(matches!(result, Err(ref error) if error.contains("background task")));
+        release.store(true, Ordering::Release);
+        while controller.tasks.running() {
+            controller.poll();
+            std::thread::yield_now();
+        }
+        assert!(controller.shutdown().is_ok());
+    }
+
+    #[test]
+    fn equal_revision_catalog_switch_gets_fresh_generation() {
+        let old = temp_library("same-old");
+        let next = temp_library("same-next");
+        seed_library(&old);
+        seed_library(&next);
+        let controller_result = Controller::new(HostOptions { library_path: Some(old.clone()), ..HostOptions::default() }, PreviewStore::default());
+        assert!(controller_result.is_ok());
+        let Ok(mut controller) = controller_result else { return };
+        let before_result = controller.snapshot();
+        assert!(before_result.is_ok());
+        let Ok(before) = before_result else { return };
+        let Some(before_generation) = before.get("viewGeneration").and_then(Value::as_u64) else { return };
+        let before_revision = before.get("revision").and_then(Value::as_u64);
+        let before_slice_result = controller.slice(Some(before_generation), 0, 1);
+        assert!(before_slice_result.is_ok());
+        let Ok(before_slice) = before_slice_result else { return };
+        let before_id =
+            before_slice.get("photos").and_then(Value::as_array).and_then(|photos| photos.first()).and_then(|photo| photo.get("id")).cloned();
+
+        let opened_result = controller.run("library.open", &json!({"path": next}));
+        assert!(opened_result.is_ok());
+        let Ok(opened) = opened_result else { return };
+        assert!(opened.get("photos").and_then(Value::as_u64).is_some_and(|count| count > 0));
+        let after_result = controller.snapshot();
+        assert!(after_result.is_ok());
+        let Ok(after) = after_result else { return };
+        assert_eq!(after.get("revision").and_then(Value::as_u64), before_revision);
+        assert_ne!(after.get("viewGeneration").and_then(Value::as_u64), Some(before_generation));
+        let Some(after_generation) = after.get("viewGeneration").and_then(Value::as_u64) else { return };
+        let after_slice_result = controller.slice(Some(after_generation), 0, 1);
+        assert!(after_slice_result.is_ok());
+        let Ok(after_slice) = after_slice_result else { return };
+        let after_id =
+            after_slice.get("photos").and_then(Value::as_array).and_then(|photos| photos.first()).and_then(|photo| photo.get("id")).cloned();
+        assert_eq!(after_id, before_id, "equal-revision catalogs should retain same photo ids");
+
+        assert!(controller.shutdown().is_ok());
+        let _ = fs::remove_dir_all(old);
+        let _ = fs::remove_dir_all(next);
     }
 }

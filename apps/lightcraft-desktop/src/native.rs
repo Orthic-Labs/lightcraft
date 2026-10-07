@@ -105,6 +105,11 @@ async fn lc_preferences(state: State<'_, AppState>, patch: Option<Value>) -> Res
 
 #[tauri::command]
 async fn lc_native(action: String, params: Value, app: AppHandle<Wry>, state: State<'_, AppState>) -> Result<Value, String> {
+    if action == "openLibrary" {
+        let host = state.host.clone();
+        let startup_error = state.startup_error.clone();
+        return blocking(move || open_library_action(host, startup_error, params)).await;
+    }
     if matches!(action.as_str(), "backupLibrary" | "restoreLibrary") {
         let host = state.host.clone();
         let startup_error = state.startup_error.clone();
@@ -159,6 +164,18 @@ async fn lc_native(action: String, params: Value, app: AppHandle<Wry>, state: St
         return native_window_action(&app, &action, &params);
     }
     blocking(move || services::run(&action, &params)).await
+}
+
+fn open_library_action(host: Option<DesktopHandle>, startup_error: Option<String>, params: Value) -> Result<Value, String> {
+    let picked = services::run("openLibrary", &params)?;
+    let Some(path) = picked.get("path").and_then(Value::as_str) else {
+        return Ok(json!({"cancelled": true}));
+    };
+    if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
+        return Err("invalid library path".into());
+    }
+    let host = host.ok_or_else(|| startup_error.unwrap_or_else(|| "desktop host is unavailable".into()))?;
+    host.run("library.open".into(), json!({"path": path}))
 }
 
 fn native_window_action(app: &AppHandle<Wry>, action: &str, params: &Value) -> Result<Value, String> {
@@ -287,7 +304,10 @@ fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<Strin
             let object = args.as_object().ok_or_else(|| "lc_native expects an object".to_string())?;
             let action = object.get("action").and_then(Value::as_str).ok_or_else(|| "lc_native requires action".to_string())?;
             let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
-            if matches!(action, "backupLibrary" | "restoreLibrary") {
+            if action == "openLibrary" {
+                let state = app.try_state::<AppState>().ok_or_else(|| "desktop state is unavailable".to_string())?;
+                open_library_action(state.host.clone(), state.startup_error.clone(), params)?
+            } else if matches!(action, "backupLibrary" | "restoreLibrary") {
                 let path = params.get("path").and_then(Value::as_str).ok_or_else(|| format!("{action} requires path in QA control mode"))?;
                 control_host(app)?.run(if action == "backupLibrary" { "library.backup" } else { "library.restore" }.into(), json!({"path": path}))?
             } else if action == "preferences.patch" {

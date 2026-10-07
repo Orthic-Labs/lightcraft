@@ -1,6 +1,6 @@
 import type { SVGProps } from 'react';
 
-export type IconName = 'library' | 'develop' | 'compare' | 'survey' | 'people' | 'search' | 'settings' | 'import' | 'export' | 'chevron';
+export type IconName = 'library' | 'develop' | 'compare' | 'survey' | 'people' | 'search' | 'settings' | 'import' | 'export' | 'chevron' | 'crop' | 'remove' | 'masking' | 'redeye' | 'presets' | 'versions' | 'history' | 'keywords' | 'info' | 'profiles';
 
 const paths: Record<IconName, string> = {
   library: 'M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v13A1.5 1.5 0 0 1 18.5 20h-13A1.5 1.5 0 0 1 4 18.5zM8 4v16M4 9h16M13 4v5M13 14v6',
@@ -13,6 +13,16 @@ const paths: Record<IconName, string> = {
   import: 'M12 4v11m0 0 4-4m-4 4-4-4M5 19h14',
   export: 'M12 20V9m0 0 4 4m-4-4-4 4M5 5h14',
   chevron: 'm7 10 5 5 5-5',
+  crop: 'M6 3v12a3 3 0 0 0 3 3h12M3 6h12a3 3 0 0 1 3 3v12',
+  remove: 'm4 7 5-4h8l3 4-8 14H8L4 17zM4 7h16M8 17h8',
+  masking: 'M12 3a9 9 0 1 0 9 9M12 7a5 5 0 1 0 5 5M12 11a1 1 0 1 0 1 1',
+  redeye: 'M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
+  presets: 'M4 5h16v14H4zM7 8h10M7 12h7M7 16h5',
+  versions: 'M5 5h13M5 9h13M5 13h9M5 17h6M19 15v6m-3-3h6',
+  history: 'M3 12a9 9 0 1 0 3-6.7M3 4v8h8M12 7v5l3 2',
+  keywords: 'M8 3v18M16 3v18M3 9h18M3 15h18',
+  info: 'M12 11v6M12 7h.01M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0z',
+  profiles: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0',
 };
 
 export function Icon({ name, size = 18, strokeWidth = 1.7, ...props }: SVGProps<SVGSVGElement> & { name: IconName; size?: number; strokeWidth?: number }) {

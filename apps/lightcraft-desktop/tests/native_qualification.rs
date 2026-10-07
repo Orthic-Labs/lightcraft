@@ -232,6 +232,20 @@ fn tree_fingerprint(path: &Path) -> String {
     sha256_hex(rows.join("\n").as_bytes())
 }
 
+fn copy_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("copy destination must be created");
+    let entries = fs::read_dir(source).expect("copy source must be readable").collect::<Result<Vec<_>, _>>().expect("copy entries must be readable");
+    for entry in entries {
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        if from.is_dir() {
+            copy_tree(&from, &to);
+        } else {
+            fs::copy(&from, &to).unwrap_or_else(|error| panic!("copy {}: {error}", from.display()));
+        }
+    }
+}
+
 fn with_control<T>(
     binary: &Path,
     scenario: &rightkit_qa::harness::Scenario,
@@ -288,16 +302,41 @@ fn run_catalog_recovery(
         let mutated = snapshot(control);
         assert_ne!(mutated["develop"]["light"]["exposure"].as_f64(), Some(expected_exposure), "current catalog must differ before restore");
     });
+    assert_eq!(tree_fingerprint(&backup), backup_fingerprint, "backup must remain unchanged while current catalog is mutated");
 
     with_control(binary, scenario, catalog, |control, _data| {
         let restored = run(control, "library.restore", json!({"path": backup}));
         let backup_text = backup.to_string_lossy().to_string();
-        assert_eq!(restored["libraryPath"].as_str(), Some(backup_text.as_str()));
+        let source_backup = restored["sourceBackup"].as_str().expect("restore must report original source backup");
+        let restored_path = restored["restoredPath"].as_str().expect("restore must report copied restored path");
+        assert_eq!(source_backup, backup_text, "restore sourceBackup must identify original backup");
+        assert_eq!(restored["libraryPath"].as_str(), Some(restored_path), "restore libraryPath must identify copied restored path");
+        assert_ne!(source_backup, restored_path, "restore must open a fresh owned copy");
         assert_eq!(tree_fingerprint(&backup), backup_fingerprint, "backup must remain unchanged immediately after restore");
         let after = snapshot(control);
         assert_eq!(after["counts"], before_counts, "restore must recover catalog counts");
         assert_eq!(after["active"].as_u64(), Some(active), "restore must recover active photo identity");
         assert_eq!(after["develop"]["light"]["exposure"].as_f64(), Some(expected_exposure), "restore must recover edited photo state");
+
+        let open_library = scenario.dir().join("open-library");
+        copy_tree(&backup, &open_library);
+        let generation_before_open = after["viewGeneration"].as_u64().expect("restore generation must be numeric");
+        let opened = control
+            .command("lc_native", &json!({"action": "openLibrary", "params": {"path": open_library}}))
+            .expect("native openLibrary command must execute");
+        let open_library_text = open_library.to_string_lossy().to_string();
+        assert_eq!(opened["path"].as_str(), Some(open_library_text.as_str()), "openLibrary must report copied path");
+        let opened_snapshot = snapshot(control);
+        assert_eq!(opened_snapshot["libraryPath"].as_str(), Some(open_library_text.as_str()), "snapshot must expose newly opened library path");
+        assert!(
+            opened_snapshot["viewGeneration"].as_u64().is_some_and(|generation| generation > generation_before_open),
+            "openLibrary must advance view generation"
+        );
+        control.key("G").expect("library route key must execute after openLibrary");
+        wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
+        wait_for_rendered_preview(control, ".lc-photo-cell.is-active img.lc-photo-preview", None);
+        assert_active_grid_identity(control, "procedural-rgb-01.png");
+        assert_eq!(tree_fingerprint(&backup), backup_fingerprint, "original backup must remain unchanged after copied openLibrary journey");
         control.screenshot_to(baseline_capture).expect("catalog recovery screenshot must be captured");
         assert!(baseline_capture.is_file());
         let receipt = scenario.dir().join("catalog-recovery.json");
@@ -312,7 +351,9 @@ fn run_catalog_recovery(
                 "beforeCounts": before_counts,
                 "afterCounts": after["counts"],
                 "backupFingerprint": backup_fingerprint,
-                "restoredLibraryPath": restored["libraryPath"],
+                "sourceBackup": source_backup,
+                "restoredLibraryPath": restored_path,
+                "openLibraryPath": opened_snapshot["libraryPath"],
                 "expectedExposure": expected_exposure,
             }))
             .expect("catalog recovery receipt must serialize"),

@@ -158,9 +158,9 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
           return nativeAction('openUrl', { url: HELP_URLS[id] });
         }
         if (id === 'app.openLibrary') {
-          const selected = firstPath(params.path) || firstPath(await nativeAction('pickFolder', params));
-          if (!selected) return null;
-          const value = await runCommand('library.browse', { ...params, path: selected });
+          // Native host owns quiescence, persistence & Session replacement. `library.browse`
+          // only changes Local source, so it must never back this menu action.
+          const value = await nativeAction('openLibrary', params);
           await refresh();
           return value;
         }

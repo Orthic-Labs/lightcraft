@@ -4,6 +4,8 @@ import { PhotoPreview } from "../preview/PhotoPreview";
 import Filmstrip from "../library/Filmstrip";
 import { useDesktop } from "../desktop";
 import type { DesktopSnapshot, PhotoSummary, UiState, ViewMode } from "../types";
+import { Icon } from "../icons";
+import type { IconName } from "../icons";
 import "./StageWorkspace.css";
 
 type Point = { x: number; y: number };
@@ -18,17 +20,17 @@ const views: Array<{ id: ViewMode; label: string; key: string }> = [
   { id: "people", label: "People", key: "P" },
 ];
 
-const tools: Array<{ id: UiState["panel"]; label: string; glyph: string }> = [
-  { id: "edit", label: "Edit", glyph: "☷" },
-  { id: "crop", label: "Crop", glyph: "⌗" },
-  { id: "remove", label: "Remove", glyph: "✦" },
-  { id: "masking", label: "Masking", glyph: "◌" },
-  { id: "redeye", label: "Red Eye", glyph: "⊙" },
-  { id: "presets", label: "Presets", glyph: "▦" },
-  { id: "versions", label: "Versions", glyph: "◷" },
-  { id: "activity", label: "History", glyph: "≡" },
-  { id: "keywords", label: "Keywords", glyph: "⌘" },
-  { id: "info", label: "Info", glyph: "ⓘ" },
+const tools: Array<{ id: UiState["panel"]; label: string; icon: IconName }> = [
+  { id: "edit", label: "Edit", icon: "develop" },
+  { id: "crop", label: "Crop", icon: "crop" },
+  { id: "remove", label: "Remove", icon: "remove" },
+  { id: "masking", label: "Masking", icon: "masking" },
+  { id: "redeye", label: "Red Eye", icon: "redeye" },
+  { id: "presets", label: "Presets", icon: "presets" },
+  { id: "versions", label: "Versions", icon: "versions" },
+  { id: "activity", label: "History", icon: "history" },
+  { id: "keywords", label: "Keywords", icon: "keywords" },
+  { id: "info", label: "Info", icon: "info" },
 ];
 
 const maskTools = [
@@ -222,7 +224,7 @@ function Navigator({ zoom, pan, onChange }: { zoom: number; pan: Point; onChange
 }
 
 function ToolStrip({ ui, setUi }: { ui: UiState; setUi: (patch: Partial<UiState>) => void }) {
-  return <nav className="stage-toolstrip" aria-label="Develop tools">{tools.map((tool) => <button key={tool.id ?? "none"} type="button" className={ui.panel === tool.id ? "selected" : ""} onClick={() => setUi({ panel: tool.id, view: tool.id && ["edit", "crop", "remove", "masking", "redeye", "presets", "versions", "activity", "keywords", "info"].includes(tool.id) && tool.id !== "info" ? "detail" : ui.view })} title={tool.label} aria-label={tool.label}><span aria-hidden="true">{tool.glyph}</span><small>{tool.label}</small></button>)}</nav>;
+  return <nav className="stage-toolstrip" aria-label="Develop tools">{tools.map((tool) => <button key={tool.id ?? "none"} type="button" className={ui.panel === tool.id ? "selected" : ""} onClick={() => setUi({ panel: tool.id, view: tool.id && ["edit", "crop", "remove", "masking", "redeye", "presets", "versions", "activity", "keywords", "info"].includes(tool.id) && tool.id !== "info" ? "detail" : ui.view })} title={tool.label} aria-label={tool.label}><span className="stage-tool-icon" aria-hidden="true"><Icon name={tool.icon} size={19} /></span><small>{tool.label}</small></button>)}</nav>;
 }
 
 function MaskToolbar({ ui, setUi, run }: { ui: UiState; setUi: (patch: Partial<UiState>) => void; run: (id: string, params?: Record<string, unknown>) => Promise<unknown> }) {
