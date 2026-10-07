@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { repoRoot, fail, readJson, requireFile } from "./lib.mjs";
@@ -29,7 +28,7 @@ function checkPins() {
     "@rightkit/shell": "0.1.0",
     "@rightkit/theme": "0.2.1",
     "@rightkit/qa-chrome": "0.1.0",
-    "@rightkit/git": "0.2.25",
+    "@rightkit/git": "0.2.26",
     "@rightkit/release": "0.2.124",
   };
   for (const [name, version] of Object.entries(pins)) {
@@ -55,15 +54,12 @@ function checkNativeConfig() {
 
 function checkFixtures() {
   const catalog = readJson("fixtures/desktop/catalog.json");
-  if (catalog.schema !== 1 || catalog.kind !== "synthetic-catalog") fail("synthetic catalog fixture schema mismatch");
+  if (catalog.schema !== 2 || catalog.kind !== "synthetic-catalog" || catalog.generator !== "lightcraft-desktop-fixture-v2") fail("synthetic catalog recipe schema mismatch");
   if (!Array.isArray(catalog.photos) || catalog.photos.length < 3) fail("synthetic catalog needs at least three photos");
-  if (catalog.photos.some((photo) => !/^sha256:[0-9a-f]{64}$/.test(photo.sourceHash))) fail("every fixture photo needs source SHA-256");
-  if (new Set(catalog.photos.map((photo) => photo.sourceHash)).size !== catalog.photos.length) fail("fixture source hashes must be unique");
-  for (const photo of catalog.photos) {
-    const bytes = Buffer.from(`lightcraft-desktop-fixture-v1\n${photo.fileName}\n${photo.pattern}\n`, "utf8");
-    const expected = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-    if (photo.sourceHash !== expected) fail(`fixture source hash does not match procedural input ${photo.fileName}`);
-  }
+  if (catalog.photos.some((photo) => photo.sourceHash !== "runtime-generated" || !/^fixture_inputs::[a-z_]+:v2$/.test(photo.sourceRecipe))) fail("fixture recipes must use real media builders & runtime SHA-256");
+  if (new Set(catalog.photos.map((photo) => photo.sourceRecipe)).size !== catalog.photos.length) fail("fixture source recipes must be unique");
+  for (const format of ["ARW", "PNG", "LRCAT"]) if (!catalog.photos.some((photo) => photo.format === format)) fail(`fixture recipes missing ${format}`);
+  if (catalog.expected.sourceFilesReadOnly !== true) fail("native qualification must preserve source fixture bytes");
   if (catalog.photos.some((photo) => photo.inputLicense !== "CC0")) fail("fixture inputs must declare CC0 license");
   const journey = readJson("fixtures/desktop/native-journey.json");
   if (journey.schema !== 1 || journey.kind !== "native-control-journey" || journey.hidden !== true) fail("native journey must be hidden-control schema 1");

@@ -83,7 +83,7 @@ jobs:
 
       - name: RightKit ownership (protected registry roots)
         shell: bash
-        run: test "$(git rev-parse HEAD)" = "${{ github.event_name == 'workflow_dispatch' && inputs.source_revision || github.sha }}" && pnpm exec right-release ownership --app .
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.source_revision }}" && pnpm exec right-release ownership --app .
       - name: Admit exact main revision & version
         id: admit
         run: pnpm run release:admit

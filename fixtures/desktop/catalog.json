@@ -1,18 +1,19 @@
 {
-  "schema": 1,
+  "schema": 2,
   "kind": "synthetic-catalog",
-  "generator": "lightcraft-desktop-fixture-v1",
+  "generator": "lightcraft-desktop-fixture-v2",
   "license": "CC0",
   "photos": [
-    { "id": 1, "fileName": "procedural-rgb-01.raw", "format": "RAW", "width": 640, "height": 480, "sourceHash": "sha256:be323f38c2bfeb8c5377bc0648762c09e20f791cef5b1e9ae9ad193bf6a7b57f", "inputLicense": "CC0", "pattern": "gradient-red-blue" },
-    { "id": 2, "fileName": "procedural-rgb-02.raw", "format": "RAW", "width": 800, "height": 600, "sourceHash": "sha256:abf0b82392197e0c640d7d74512f4d6d166fc915be9d1709297d3cf2012ffb54", "inputLicense": "CC0", "pattern": "checker-green-yellow" },
-    { "id": 3, "fileName": "synthetic-arw-01.arw", "format": "ARW", "width": 1024, "height": 682, "sourceHash": "sha256:90684d67d8c0187af6f6935fa493eddd31af64a44a5d409d7f7055c90e9fe974", "inputLicense": "CC0", "pattern": "cfa-procedural" },
-    { "id": 4, "fileName": "synthetic-lightroom-catalog.lrcat", "format": "LRCAT", "width": 0, "height": 0, "sourceHash": "sha256:7fe0586dcf15565c7fa06cc271e42ba0506c24548aca909622db7c211e06ceb6", "inputLicense": "CC0", "pattern": "catalog-fixture" }
+    { "id": 1, "fileName": "synthetic-sonya-01.arw", "format": "ARW", "width": 32, "height": 16, "sourceHash": "runtime-generated", "sourceRecipe": "fixture_inputs::synthetic_sony_arw:v2", "inputLicense": "CC0", "pattern": "sony-rggb-gradient" },
+    { "id": 2, "fileName": "procedural-rgb-01.png", "format": "PNG", "width": 96, "height": 64, "sourceHash": "runtime-generated", "sourceRecipe": "fixture_inputs::procedural_png:v2", "inputLicense": "CC0", "pattern": "srgb-checker-gradient" },
+    { "id": 3, "fileName": "synthetic-lightroom.lrcat", "format": "LRCAT", "width": 0, "height": 0, "sourceHash": "runtime-generated", "sourceRecipe": "fixture_inputs::synthetic_lightroom_catalog:v2", "inputLicense": "CC0", "pattern": "sqlite-master-virtual-copy-nested-collections" }
   ],
   "expected": {
-    "noDuplicateSourceHashes": true,
-    "arwImport": "preserve-source-hash",
+    "sourceHashes": "sha256-generated-from-runtime-inputs",
+    "noDuplicateSourceRecipes": true,
+    "arwImport": "decode-preview-preserve-source-hash",
     "lightroomImport": "preserve-virtual-copy-and-collection-ids",
-    "cliExport": "engine-encoded-output"
+    "cliExport": "engine-decoded-pixels",
+    "sourceFilesReadOnly": true
   }
 }

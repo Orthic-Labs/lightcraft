@@ -28,8 +28,8 @@ importers:
         version: 19.3.0(react@19.3.0)
     devDependencies:
       '@rightkit/git':
-        specifier: 0.2.25
-        version: 0.2.25
+        specifier: 0.2.26
+        version: 0.2.26
       '@rightkit/qa-chrome':
         specifier: 0.1.0
         version: 0.1.0
@@ -69,8 +69,8 @@ packages:
       '@rightkit/platform-ui': '>=0.1.1 <1'
       react: '>=18 <20'
 
-  '@rightkit/git@0.2.25':
-    resolution: {integrity: sha512-YT/WhDkG3A611wIXi6Eq/byxiRSBiFcg4oPciF8m66gW6BQI3p30Xr1bo2FGWozNIvBu4gM6DD+4FU8p1Tg1rg==}
+  '@rightkit/git@0.2.26':
+    resolution: {integrity: sha512-wwMGjfBOiQ0fbsoQr7iYb9wvkH5MvTeMvre73IKR9hVMsyjPIUlyQZl2Bks80PjS0JT2t8I8fj/AXjzsqP4cIA==}
     hasBin: true
 
   '@rightkit/platform-ui@0.1.2':
@@ -495,7 +495,7 @@ snapshots:
       '@rightkit/platform-ui': 0.1.2(@tauri-apps/plugin-os@2.4.0)(react@19.3.0)
       react: 19.3.0
 
-  '@rightkit/git@0.2.25': {}
+  '@rightkit/git@0.2.26': {}
 
   '@rightkit/platform-ui@0.1.2(@tauri-apps/plugin-os@2.4.0)(react@19.3.0)':
     dependencies:

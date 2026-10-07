@@ -5,9 +5,9 @@ import { readJson } from "./lib.mjs";
 test("synthetic catalog binds unique CC0 inputs & regression expectations", () => {
   const fixture = readJson("fixtures/desktop/catalog.json");
   assert.equal(fixture.kind, "synthetic-catalog");
-  assert.equal(new Set(fixture.photos.map((photo) => photo.sourceHash)).size, fixture.photos.length);
+  assert.equal(new Set(fixture.photos.map((photo) => photo.sourceRecipe)).size, fixture.photos.length);
   assert.ok(fixture.photos.some((photo) => photo.format === "ARW"));
-  assert.equal(fixture.expected.noDuplicateSourceHashes, true);
+  assert.equal(fixture.expected.noDuplicateSourceRecipes, true);
 });
 
 test("native journey covers hidden WKWebView/WebView2 control contracts", () => {

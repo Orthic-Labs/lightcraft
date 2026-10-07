@@ -3,16 +3,17 @@
 mod fixture_inputs;
 
 use std::fs;
-use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+use std::io::Cursor;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::Duration;
 
-use rightkit_qa::control::{launch, LaunchSpec, Mode};
+use rightkit_qa::control::{LaunchSpec, Mode, launch};
 use rightkit_qa::harness::Harness;
 use rightkit_qa::util::sha256_hex;
 use rightkit_qa::workspace;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn required_env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} is required for native qualification"))
@@ -66,6 +67,29 @@ fn snapshot(control: &rightkit_qa::control::Control) -> Value {
     control.command("lc_snapshot", &Value::Null).expect("native snapshot must reply")
 }
 
+fn source_hash(path: &Path) -> String {
+    sha256_hex(&fs::read(path).unwrap_or_else(|error| panic!("fixture {} must be readable: {error}", path.display())))
+}
+
+fn assert_sources_unchanged(paths: &[(&str, &Path)], expected: &[(&str, String)]) {
+    assert_eq!(paths.len(), expected.len(), "fixture hash inventory must match source inventory");
+    for ((label, path), (expected_label, before)) in paths.iter().zip(expected.iter()) {
+        assert_eq!(label, expected_label, "fixture hash inventory labels must match");
+        assert_eq!(source_hash(path), before.as_str(), "native journey mutated source fixture {label}");
+    }
+}
+
+fn wait_for_dom(control: &rightkit_qa::control::Control, expression: &str) -> Value {
+    for _ in 0..100 {
+        let value = control.eval(expression).expect("DOM route query must execute");
+        if value.as_bool() == Some(true) {
+            return value;
+        }
+        sleep(Duration::from_millis(50));
+    }
+    panic!("DOM route condition did not become true: {expression}");
+}
+
 fn wait_task(control: &rightkit_qa::control::Control, task_id: &str) -> Value {
     for _ in 0..900 {
         let value = snapshot(control);
@@ -109,6 +133,18 @@ fn preview_imported(control: &rightkit_qa::control::Control, snapshot: &Value) -
     assert!(descriptor["handle"].as_str().is_some_and(|handle| !handle.is_empty()), "preview must return stored handle: {descriptor}");
     assert_eq!(descriptor["viewGeneration"], snapshot["viewGeneration"]);
     descriptor
+}
+
+fn assert_png_pixels(path: &Path, expected_width: u32, expected_height: u32) {
+    let bytes = fs::read(path).expect("exported PNG must be readable");
+    let decoder = png::Decoder::new(Cursor::new(bytes));
+    let mut reader = decoder.read_info().expect("exported PNG must decode");
+    let mut pixels = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut pixels).expect("exported PNG frame must decode");
+    assert_eq!(info.width, expected_width, "exported PNG width must match requested long edge");
+    assert_eq!(info.height, expected_height, "exported PNG height must match source aspect");
+    assert!(info.buffer_size() > 0, "exported PNG must contain decoded pixels");
+    assert!(pixels[..info.buffer_size()].iter().any(|pixel| *pixel != 0), "exported PNG pixels must not be all zero");
 }
 
 fn tree_fingerprint(path: &Path) -> String {
@@ -169,9 +205,27 @@ fn native_hidden_control_journeys() {
     let input_dir = evidence.join("fixture-inputs");
     fs::create_dir_all(&input_dir).expect("fixture input directory must exist");
     let inputs = fixture_inputs::write_fixture_inputs(&input_dir).expect("real ARW/PNG/Lightroom fixtures must be generated");
+    let source_paths = [("arw", inputs.arw.as_path()), ("png", inputs.png.as_path()), ("catalog", inputs.catalog.as_path())];
+    let source_hashes = source_paths.map(|(label, path)| (label, source_hash(path)));
+    let source_manifest = input_dir.join("manifest.json");
+    fs::write(
+        &source_manifest,
+        serde_json::to_vec_pretty(&json!({
+            "schema": 2,
+            "generator": "fixture_inputs:v2",
+            "sourceRevision": revision,
+            "installedArtifactSha256": installed_hash,
+            "platform": platform,
+            "architecture": architecture,
+            "inputs": source_hashes.iter().map(|(label, hash)| json!({"label": label, "sha256": hash})).collect::<Vec<_>>(),
+        }))
+        .expect("source manifest must serialize"),
+    )
+    .expect("source manifest must be writable");
     let harness = qa_harness(&binary, &evidence, &revision, platform, &architecture);
 
-    let scenario_names = ["ipc", "stalePreview", "cache", "preferences", "gesture", "arwImport", "lightroomImport", "cliExport", "rollback"];
+    let scenario_names =
+        ["ipc", "stalePreview", "cache", "preferences", "gesture", "editingTools", "arwImport", "lightroomImport", "cliExport", "rollback"];
     for name in scenario_names {
         let outcome = harness.scenario(name, "fast", &[], |scenario| {
             let baseline_capture = scenario.dir().join("baseline.png");
@@ -206,14 +260,24 @@ fn native_hidden_control_journeys() {
                         assert!(snapshot["controls"].is_array());
                         let viewport =
                             control.eval("return {width: window.innerWidth, height: window.innerHeight};").expect("viewport query must execute");
-                        assert!(viewport["width"].as_u64().is_some_and(|width| width >= 1280));
+                        let width = viewport["width"].as_u64().expect("viewport width must be numeric");
+                        assert!(matches!(width, 1280 | 1600), "native qualification viewport must be 1280 or 1600 pixels: {viewport}");
                         assert!(viewport["height"].as_u64().is_some_and(|height| height >= 800));
-                        let library = scenario.dir().join("route-library.png");
+                        wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
+                        let library = scenario.dir().join(format!("route-library-{width}.png"));
                         control.screenshot_to(&library).expect("library route screenshot must be captured");
+                        assert!(library.is_file());
                         control.key("D").expect("develop route key must execute");
-                        let develop = scenario.dir().join("route-develop.png");
+                        wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
+                        let route = control
+                            .eval("return document.querySelector('.stage-route-tabs button.selected span')?.textContent?.trim() || '';")
+                            .expect("develop route readback must execute");
+                        assert_eq!(route.as_str(), Some("Detail"), "D must select Detail route");
+                        let develop = scenario.dir().join(format!("route-develop-{width}.png"));
                         control.screenshot_to(&develop).expect("develop route screenshot must be captured");
+                        assert!(develop.is_file());
                         control.key("G").expect("library route key must execute");
+                        wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
                     }
                     "stalePreview" => {
                         let snapshot = control.command("lc_snapshot", &Value::Null).expect("snapshot must reply");
@@ -236,26 +300,73 @@ fn native_hidden_control_journeys() {
                     "gesture" => {
                         let imported = import_file(control, &inputs.png);
                         let before = imported["undo"].as_u64().expect("snapshot undo count required");
-                        let active = imported["active"].as_u64().expect("import must select active photo");
-                        run(control, "develop.beginInteraction", json!({"label": "Qualification exposure drag"}));
-                        run(control, "develop.set", json!({"control": "light.exposure", "value": 1.25, "ids": [active]}));
-                        run(control, "develop.endInteraction", json!({}));
+                        control.key("D").expect("develop route key must execute");
+                        wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
+                        control.click(".stage-toolstrip button[aria-label='Edit']").expect("edit tool click must execute");
+                        wait_for_dom(control, "return document.querySelector('input[aria-label=\\\"Exposure\\\"]') !== null;");
+                        let slider = control
+                            .eval("return (() => { const e = document.querySelector('input[aria-label=\\\"Exposure\\\"]'); const r = e.getBoundingClientRect(); return {x:r.x, y:r.y, width:r.width, height:r.height}; })();")
+                            .expect("exposure slider geometry query must execute");
+                        let x = slider["x"].as_f64().expect("exposure slider x must be numeric");
+                        let y = slider["y"].as_f64().expect("exposure slider y must be numeric") + slider["height"].as_f64().unwrap_or(16.0) / 2.0;
+                        let width = slider["width"].as_f64().expect("exposure slider width must be numeric");
+                        control.drag((x + width * 0.45, y), (x + width * 0.7, y), 8).expect("exposure slider drag must execute");
                         let edited = snapshot(control);
-                        assert_eq!(edited["undo"].as_u64(), Some(before + 1), "one gesture must create one undo step");
-                        run(control, "develop.beginInteraction", json!({"label": "Cancelled exposure drag"}));
-                        run(control, "develop.set", json!({"control": "light.exposure", "value": -1.25, "ids": [active]}));
-                        run(control, "develop.cancelInteraction", json!({}));
+                        assert_ne!(edited["develop"]["light"]["exposure"], imported["develop"]["light"]["exposure"], "pointer drag must change exposure through UI");
+                        assert_eq!(edited["undo"].as_u64(), Some(before + 1), "one pointer gesture must create one undo step");
+                        let edited_exposure = edited["develop"]["light"]["exposure"].clone();
+                        control.click("input[aria-label='Exposure']").expect("exposure slider focus must execute");
+                        control.key("ArrowLeft").expect("exposure keyboard adjustment must execute");
+                        control.key("Escape").expect("exposure Escape cancellation must execute");
                         let cancelled = snapshot(control);
+                        assert_eq!(cancelled["develop"]["light"]["exposure"], edited_exposure, "Escape must cancel active slider gesture");
                         assert_eq!(cancelled["undo"].as_u64(), edited["undo"].as_u64(), "cancelled gesture must not create undo step");
                         control.move_to(300.0, 300.0).expect("pointer move must execute");
                         control.drag((300.0, 300.0), (420.0, 320.0), 8).expect("pointer drag must execute");
                         control.wheel(420.0, 320.0, 0.0, -120.0).expect("wheel must execute");
                         control.key("Escape").expect("Escape must execute");
-                        assert!(control
-                            .eval("return document.activeElement !== null;")
-                            .expect("active element query must execute")
-                            .as_bool()
-                            .unwrap_or(false));
+                        assert!(
+                            control
+                                .eval("return document.activeElement !== null;")
+                                .expect("active element query must execute")
+                                .as_bool()
+                                .unwrap_or(false)
+                        );
+                    }
+                    "editingTools" => {
+                        let imported = import_file(control, &inputs.png);
+                        let active = imported["active"].as_u64().expect("import must select active photo");
+                        let before = snapshot(control);
+                        control.key("D").expect("develop route key must execute");
+                        wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
+                        run(control, "crop.set", json!({"rect": [0.1, 0.1, 0.9, 0.9], "angle": 3.0}));
+                        let crop = snapshot(control);
+                        assert_ne!(crop["develop"]["crop"], before["develop"]["crop"], "crop command must change crop geometry");
+                        control.click(".stage-toolstrip button[aria-label='Crop']").expect("crop tool click must execute");
+                        wait_for_dom(control, "return document.querySelector('.stage-toolstrip button[aria-label=\\\"Crop\\\"]')?.classList.contains('selected') === true;");
+                        control.screenshot_to(&scenario.dir().join("tool-crop.png")).expect("crop tool screenshot must be captured");
+
+                        run(control, "mask.add", json!({"kind": "radial", "center": [0.5, 0.5], "rx": 0.2, "ry": 0.2}));
+                        let masked = snapshot(control);
+                        assert_eq!(masked["develop"]["masks"].as_array().map(Vec::len), Some(1), "mask command must create mask state");
+                        control.click(".stage-toolstrip button[aria-label='Masking']").expect("masking tool click must execute");
+                        wait_for_dom(control, "return document.querySelector('.stage-toolstrip button[aria-label=\\\"Masking\\\"]')?.classList.contains('selected') === true;");
+                        control.screenshot_to(&scenario.dir().join("tool-masking.png")).expect("masking tool screenshot must be captured");
+
+                        run(control, "spot.add", json!({"mode": "remove", "points": [[0.5, 0.5]], "size": 0.05, "source": [0.1, 0.0]}));
+                        let spotted = snapshot(control);
+                        assert_eq!(spotted["develop"]["spots"].as_array().map(Vec::len), Some(1), "remove tool command must create spot state");
+                        control.click(".stage-toolstrip button[aria-label='Remove']").expect("remove tool click must execute");
+                        wait_for_dom(control, "return document.querySelector('.stage-toolstrip button[aria-label=\\\"Remove\\\"]')?.classList.contains('selected') === true;");
+                        control.screenshot_to(&scenario.dir().join("tool-remove.png")).expect("remove tool screenshot must be captured");
+
+                        run(control, "redeye.add", json!({"center": [0.5, 0.5], "rx": 0.1, "ry": 0.1}));
+                        let red_eye = snapshot(control);
+                        assert_eq!(red_eye["develop"]["red_eye"].as_array().map(Vec::len), Some(1), "red-eye command must create correction state");
+                        control.click(".stage-toolstrip button[aria-label='Red Eye']").expect("red-eye tool click must execute");
+                        wait_for_dom(control, "return document.querySelector('.stage-toolstrip button[aria-label=\\\"Red Eye\\\"]')?.classList.contains('selected') === true;");
+                        control.screenshot_to(&scenario.dir().join("tool-red-eye.png")).expect("red-eye tool screenshot must be captured");
+                        assert_eq!(red_eye["active"].as_u64(), Some(active));
                     }
                     "arwImport" => {
                         let imported = import_file(control, &inputs.arw);
@@ -289,42 +400,64 @@ fn native_hidden_control_journeys() {
                             .map(|entry| entry.path())
                             .find(|path| path.is_file())
                             .expect("export must write file");
-                        let bytes = fs::read(exported).expect("exported pixels must be readable");
-                        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "CLI export must contain PNG pixels");
+                        assert_png_pixels(&exported, 96, 64);
                     }
                     "rollback" => {
                         let before = import_file(control, &inputs.png);
                         let before_counts = before["counts"].clone();
+                        let active = before["active"].as_u64().expect("import must select active photo");
+                        run(control, "develop.beginInteraction", json!({"label": "Backup baseline edit"}));
+                        run(control, "develop.set", json!({"control": "light.exposure", "value": 1.25, "ids": [active]}));
+                        run(control, "develop.endInteraction", json!({}));
+                        let edited = snapshot(control);
+                        let expected_exposure = edited["develop"]["light"]["exposure"].as_f64().expect("edited exposure must be numeric");
                         let backup = scenario.dir().join("library-backup");
                         let backup_result = run(control, "library.backup", json!({"path": backup}));
                         assert!(backup_result["path"].as_str().is_some(), "backup must return destination: {backup_result}");
                         assert!(backup.is_dir(), "backup directory must exist");
                         let backup_fingerprint = tree_fingerprint(&backup);
-                        let restored = run(control, "library.restore", json!({"path": backup}));
                         let backup_text = backup.to_string_lossy().to_string();
-                        assert_eq!(restored["libraryPath"].as_str(), Some(backup_text.as_str()));
-                        let after = snapshot(control);
-                        assert_eq!(after["counts"], before_counts, "restore must recover catalog counts");
-                        assert_eq!(tree_fingerprint(&backup), backup_fingerprint, "restore must leave backup bytes unchanged");
-                        control.screenshot_to(&baseline_capture).expect("baseline screenshot must be captured");
-                        assert!(baseline_capture.is_file());
-                        let receipt = scenario.dir().join("rollback.json");
-                        fs::write(
-                            &receipt,
-                            serde_json::to_vec_pretty(&json!({
-                                "schema": 1,
-                                "sourceRevision": revision,
-                                "installedArtifactSha256": installed_hash,
-                                "baseline": baseline["baseline"],
-                                "beforeCounts": before_counts,
-                                "afterCounts": after["counts"],
-                                "backupFingerprint": backup_fingerprint,
-                                "restoredLibraryPath": restored["libraryPath"],
-                            }))
-                            .expect("rollback receipt must serialize"),
-                        )
-                        .expect("rollback receipt must be writable");
-                        scenario.keep("rollback.json", &receipt);
+                        let catalog = inputs.catalog.clone();
+                        let backup_for_mutation = backup.clone();
+                        with_control(&binary, scenario, &catalog, |control, _data| {
+                            let current = snapshot(control);
+                            assert_eq!(current["counts"]["catalog"].as_u64(), before_counts["catalog"].as_u64(), "current catalog must reopen before mutation");
+                            let current_active = current["active"].as_u64().expect("reopened catalog must select active photo");
+                            run(control, "develop.beginInteraction", json!({"label": "Mutate before restore"}));
+                            run(control, "develop.set", json!({"control": "light.exposure", "value": -1.25, "ids": [current_active]}));
+                            run(control, "develop.endInteraction", json!({}));
+                            let mutated = snapshot(control);
+                            assert_ne!(mutated["develop"]["light"]["exposure"].as_f64(), Some(expected_exposure), "current catalog must differ before restore");
+                        });
+                        with_control(&binary, scenario, &catalog, |control, _data| {
+                            let restored = run(control, "library.restore", json!({"path": backup_for_mutation}));
+                            assert_eq!(restored["libraryPath"].as_str(), Some(backup_text.as_str()));
+                            assert_eq!(tree_fingerprint(&backup_for_mutation), backup_fingerprint, "backup must remain unchanged immediately after restore");
+                            let after = snapshot(control);
+                            assert_eq!(after["counts"], before_counts, "restore must recover catalog counts");
+                            assert_eq!(after["active"].as_u64(), Some(active), "restore must recover active photo identity");
+                            assert_eq!(after["develop"]["light"]["exposure"].as_f64(), Some(expected_exposure), "restore must recover edited photo state");
+                            control.screenshot_to(&baseline_capture).expect("baseline screenshot must be captured");
+                            assert!(baseline_capture.is_file());
+                            let receipt = scenario.dir().join("rollback.json");
+                            fs::write(
+                                &receipt,
+                                serde_json::to_vec_pretty(&json!({
+                                    "schema": 1,
+                                    "sourceRevision": revision,
+                                    "installedArtifactSha256": installed_hash,
+                                    "baseline": baseline["baseline"],
+                                    "beforeCounts": before_counts,
+                                    "afterCounts": after["counts"],
+                                    "backupFingerprint": backup_fingerprint,
+                                    "restoredLibraryPath": restored["libraryPath"],
+                                    "expectedExposure": expected_exposure,
+                                }))
+                                .expect("rollback receipt must serialize"),
+                            )
+                            .expect("rollback receipt must be writable");
+                            scenario.keep("rollback.json", &receipt);
+                        });
                     }
                     _ => unreachable!("scenario inventory is static"),
                 });
@@ -332,5 +465,6 @@ fn native_hidden_control_journeys() {
             scenario.note(format!("executed hidden {platform} control journey: {name}"));
         });
         assert!(!outcome.is_skipped(), "native journey {name} must execute, not skip");
+        assert_sources_unchanged(&source_paths, &source_hashes);
     }
 }

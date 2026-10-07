@@ -349,12 +349,18 @@ fn startup_options(app: &AppHandle<Wry>) -> (HostOptions, PathBuf) {
         .and_then(|pair| pair.get(1))
         .map(PathBuf::from)
         .or_else(|| args.iter().find_map(|arg| arg.strip_prefix("--library=")).map(PathBuf::from));
-    let qa = args.iter().any(|arg| arg == "--qa")
-        || std::env::var_os("LIGHTCRAFT_DESKTOP_QA").is_some()
-        || std::env::var_os("RIGHTKIT_QA_HIDDEN").is_some();
-    let demo = qa || args.iter().any(|arg| arg == "--demo") || std::env::var_os("LIGHTCRAFT_DESKTOP_DEMO").is_some();
-    let app_dir = std::env::var_os("RIGHTKIT_QA_DATA_DIR")
-        .map(PathBuf::from)
+    #[cfg(feature = "qa-native")]
+    let qa_env = std::env::var_os("LIGHTCRAFT_DESKTOP_QA").is_some() || std::env::var_os("RIGHTKIT_QA_HIDDEN").is_some();
+    #[cfg(not(feature = "qa-native"))]
+    let qa_env = false;
+    let qa = args.iter().any(|arg| arg == "--qa") || qa_env;
+    let demo = args.iter().any(|arg| arg == "--demo") || std::env::var_os("LIGHTCRAFT_DESKTOP_DEMO").is_some();
+    #[cfg(feature = "qa-native")]
+    let qa_data_dir = std::env::var_os("RIGHTKIT_QA_DATA_DIR").map(PathBuf::from);
+    #[cfg(not(feature = "qa-native"))]
+    let qa_data_dir = None;
+    let app_dir = qa_data_dir
+        .or_else(|| qa.then(|| std::env::temp_dir().join("lightcraft-preview-qa")))
         .or_else(|| app.path().app_data_dir().ok())
         .unwrap_or_else(|| std::env::temp_dir().join("lightcraft-preview"));
     let library = explicit.unwrap_or_else(|| app_dir.join("Preview Library"));

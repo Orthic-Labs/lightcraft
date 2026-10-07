@@ -45,7 +45,7 @@ jobs:
               changed=false
               while IFS= read -r changed_path; do
                 case "$changed_path" in
-                  *.rs|Cargo.toml|*/Cargo.toml|Cargo.lock|*/Cargo.lock|build.rs|*/build.rs|rust-toolchain|*/rust-toolchain|rust-toolchain.toml|*/rust-toolchain.toml|.cargo/*|*/.cargo/*|.rightgit.json|.github/workflows/*.yml|.github/workflows/*.yaml|scripts/desktop/gate.sh)
+                  *.rs|Cargo.toml|*/Cargo.toml|Cargo.lock|*/Cargo.lock|rust-toolchain|*/rust-toolchain|rust-toolchain.toml|*/rust-toolchain.toml|.cargo/*|*/.cargo/*|.rightgit.json|.github/workflows/*.yml|.github/workflows/*.yaml|scripts/desktop/gate.sh)
                     changed=true
                     break
                     ;;
@@ -70,7 +70,7 @@ jobs:
 
       - name: RightKit ownership (protected registry roots)
         shell: bash
-        run: test "$(git rev-parse HEAD)" = "${{ github.event_name == 'workflow_dispatch' && inputs.source_revision || github.sha }}" && pnpm exec right-release ownership --app .
+        run: test "$(git rev-parse HEAD)" = "${{ github.sha }}" && pnpm exec right-release ownership --app .
       - uses: dtolnay/rust-toolchain@f8be11a05b1d4f3fcebe6410cc16743212b999b0
         if: steps.rust-changes.outputs.required == 'true'
         with:
