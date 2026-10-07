@@ -11,3 +11,10 @@ plan/
 # model weights are never committed (SAM 3: docs/ai-masks.md)
 *.safetensors
 *.safetensors.part
+
+# React/Tauri desktop generated inputs
+/node_modules/
+/apps/lightcraft-desktop/web/dist/
+/.cache/
+/artifacts/
+*.tsbuildinfo

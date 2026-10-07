@@ -1,0 +1,8 @@
+minimumReleaseAgeExclude:
+  - '@rightkit/app-shell@0.2.1'
+  - '@rightkit/git@0.2.25'
+  - '@rightkit/platform-ui@0.1.2'
+  - '@rightkit/qa-chrome@0.1.0'
+  - '@rightkit/release@0.2.124'
+  - '@rightkit/shell@0.1.0'
+  - '@rightkit/theme@0.2.1'

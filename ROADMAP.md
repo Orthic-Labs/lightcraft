@@ -162,6 +162,9 @@ The milestone estimates in the table above were made before work started and are
 
 ## Raw format coverage and known gaps
 
+Sony ILCE-7M4 downsized lossless ARW (subsampled YCbCr 4:2:0 / 4:2:2 tiles) now decodes to linear RGB;
+private 3:2 & 4:3 examples verified through native rendering & full-resolution 16-bit export.
+
 Decoded (CC0 corpus from raw.pixls.us, `cargo xtask corpus --download`, `crates/raw/tests/corpus.rs`): DNG (uncompressed,
 LJ92, lossy JPEG / Smart Previews, Deflate, float, linear), CR2, ARW (uncompressed, ARW2, LJ92; as-shot white balance and black level of pre-2017 bodies from the enciphered
 maker-note `Tag2010` and the encrypted `SR2SubIFD`, both recovered by black-box analysis, `crates/raw/src/vendor/arw.rs`), NEF/NRW uncompressed and Huffman-compressed (lossless, lossy type 1/2, 12/14-bit), RAF uncompressed (Bayer and
@@ -183,6 +186,18 @@ Not decoded yet — preview only (no permissively licensed description; black-bo
 `matrix_is_fallback`) with the file's as-shot white-balance multipliers. Clean sources to evaluate next: manufacturer
 matrices stored in the files themselves (Olympus ImageProcessing `ColorMatrix`, Pentax/Panasonic equivalents) and our
 own chart-based calibration (M11.4). Adobe matrices are never used.
+
+## Lightroom Classic catalog migration
+
+File → Import Lightroom Catalog… reads `.lrcat` plus committed WAL pages directly through a pure-Rust
+SQLite reader. Originals stay in place; ratings, flags, labels, XMP metadata, hierarchical keywords,
+collections/sets, virtual copies and supported develop settings migrate into LightCraft. Existing edits
+are preserved by default, reimport identities are persistent, and source settings/history/snapshots are
+archived before catalog mutation. Missing originals remain available for relinking.
+
+Rendering is approximate: unsupported Adobe profiles/AI/process settings are reported and archived;
+history/snapshots remain source data, and smart collections import current membership. The Lightroom
+database is read-only; LightCraft owns subsequent edits. See `docs/lightroom-catalog-import.md`.
 
 ## Log
 - 2026-09-30: roadmap created; M0 in progress; research docs (Lightroom reference, Rust imaging ecosystem) complete.

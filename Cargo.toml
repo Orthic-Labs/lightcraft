@@ -28,6 +28,7 @@ lightcraft-preview = { path = "crates/preview" }
 lightcraft-merge = { path = "crates/merge" }
 lightcraft-engine = { path = "crates/engine" }
 lightcraft-ui-egui = { path = "crates/ui-egui" }
+lightcraft-desktop-host = { path = "crates/desktop-host" }
 lightcraft-mcp = { path = "crates/mcp" }
 lightcraft-segment = { path = "crates/segment" }
 
@@ -140,3 +141,10 @@ jpeg-decoder = { opt-level = 3 }
 jpeg-encoder = { opt-level = 3 }
 png = { opt-level = 3 }
 miniz_oxide = { opt-level = 3 }
+
+# RightKit unsigned development candidates use this profile on native CI.
+[profile.release-iterate]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug = false

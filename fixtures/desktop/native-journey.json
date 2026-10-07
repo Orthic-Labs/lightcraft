@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "kind": "native-control-journey",
+  "hidden": true,
+  "webviews": ["WKWebView", "WebView2"],
+  "viewports": [[1280, 800], [1600, 1000]],
+  "scenarios": [
+    { "id": "ipc", "control": "lc_snapshot", "assert": "version=1,revision,viewGeneration,controls" },
+    { "id": "stalePreview", "control": "lc_preview", "assert": "older viewGeneration or sequence never becomes visible" },
+    { "id": "cache", "control": "lc_view_slice", "assert": "generation mismatch refreshes slice; limit<=512" },
+    { "id": "preferences", "control": "lc_preferences", "assert": "unknown fields survive atomic reopen" },
+    { "id": "gesture", "control": "lc_run", "assert": "one pointer gesture creates one undo step; Escape cancels" },
+    { "id": "arwImport", "control": "lc_native", "params": { "action": "import" }, "assert": "ARW source hash survives import and reload" },
+    { "id": "lightroomImport", "control": "lc_native", "params": { "action": "importLightroom" }, "assert": "virtual copies, collections, warnings & recovery archive" },
+    { "id": "cliExport", "control": "lc_run", "params": { "id": "photo.export" }, "assert": "read exported bytes; source hash unchanged" },
+    { "id": "rollback", "control": "installed", "assert": "qualified baseline restores after failed candidate install" }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "kind": "installed-baseline-contract",
+  "artifact": { "record": "compiler-artifact-record", "sha256": "artifact-record-required-at-run" },
+  "source": { "revision": "RIGHT_GIT_SOURCE_REVISION", "hash": "source-tree-hash-from-right-release" },
+  "baseline": { "capture": "RightKit QA evidence before candidate install", "required": true },
+  "rollback": { "required": true, "method": "restore-baseline-after-failed-install", "assert": "installed version and preferences match baseline" },
+  "qualification": { "runner": "rightkit-qa", "control": "rightkit-control", "hidden": true, "webviews": ["WKWebView", "WebView2"] }
+}

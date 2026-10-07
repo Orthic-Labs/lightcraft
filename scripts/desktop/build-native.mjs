@@ -1,0 +1,62 @@
+import { spawnSync } from 'node:child_process';
+import { cpSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { resolvePnpmCli } from '@rightkit/release/development.mjs';
+import { runCargoSync } from '@rightkit/release/managed-cargo.mjs';
+import { resolveTauriBundleDirectory } from '@rightkit/release/development.mjs';
+import { artifactRoot, currentPlatform, fail, repoRoot, sha256 } from './lib.mjs';
+
+if (process.env.GITHUB_ACTIONS !== 'true') fail('native build requires generated RightKit Actions');
+const platform = currentPlatform();
+if ((platform === 'macos' && process.platform !== 'darwin') || (platform === 'windows' && process.platform !== 'win32')) fail('candidate requires target-native runner');
+const target = platform === 'macos' ? 'aarch64-apple-darwin' : 'x86_64-pc-windows-msvc';
+const root = path.resolve(artifactRoot());
+mkdirSync(root, { recursive: true });
+const pnpm = resolvePnpmCli({ root: repoRoot });
+function run(args, cwd = repoRoot, env = process.env) {
+  const result = spawnSync(process.execPath, [pnpm, ...args], { cwd, env, stdio: 'inherit', windowsHide: true });
+  if (result.error || result.status !== 0) fail(`pnpm ${args[0]} failed: ${result.error?.message || result.status}`);
+}
+// Existing engine embeds licensed craft-fonts; every candidate supplies pinned input.
+const fonts = path.join(process.env.RUNNER_TEMP, 'lightcraft-build-fonts');
+const clone = spawnSync('git', ['clone', '--quiet', 'https://github.com/storytold/craft-fonts.git', fonts], { stdio: 'inherit', windowsHide: true });
+if (clone.error || clone.status !== 0) fail('craft-fonts clone failed');
+const checkout = spawnSync('git', ['-C', fonts, 'checkout', '--quiet', 'abb83316d96aa59c1cf64784289e378fe9fa5695'], { stdio: 'inherit', windowsHide: true });
+if (checkout.error || checkout.status !== 0) fail('pinned craft-fonts checkout failed');
+const env = { ...process.env, CRAFT_FONTS_DIR: fonts, CRAFT_FONTS_REQUIRED: '1' };
+run(['run', 'build'], repoRoot, env);
+const compiler = runCargoSync(['build', '--locked', '--manifest-path', 'apps/lightcraft-desktop/Cargo.toml', '--features', 'qa-native,custom-protocol', '--target', target, '--profile', 'release-iterate', '--message-format=json'], { cwd: repoRoot, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true });
+if (compiler.stderr) process.stderr.write(compiler.stderr);
+if (compiler.error || compiler.status !== 0) {
+  if (compiler.stdout) process.stdout.write(compiler.stdout);
+  fail(`RightKit candidate Cargo failed: ${compiler.error?.message || compiler.status}`);
+}
+writeFileSync(path.join(root, 'cargo-artifacts.jsonl'), compiler.stdout);
+const nativeRoot = path.join(repoRoot, 'apps/lightcraft-desktop');
+run(['exec', 'tauri', 'build', '--ci', '--no-sign', '--target', target, '--features', 'qa-native,custom-protocol', '--bundles', platform === 'macos' ? 'app,dmg' : 'nsis', '--', '--profile=release-iterate', '--locked'], nativeRoot, env);
+const descriptor = { productName: 'LightCraft Preview', targetTriple: target, manifestPath: 'apps/lightcraft-desktop/Cargo.toml' };
+const bundle = resolveTauriBundleDirectory(descriptor, { root: repoRoot, platform: platform === 'macos' ? 'mac' : 'win', env });
+const destination = path.join(root, 'packages', path.basename(bundle.installer));
+mkdirSync(path.dirname(destination), { recursive: true });
+cpSync(bundle.installer, destination, { recursive: true });
+writeFileSync(path.join(root, 'bundle-record.json'), JSON.stringify({ schema: 1, path: path.relative(root, destination).replaceAll('\\', '/'), kind: platform === 'macos' ? 'app' : 'installer', sourceRevision: process.env.RIGHT_GIT_SOURCE_REVISION }, null, 2) + '\n');
+
+if (platform === 'macos') {
+  const dmgRoot = path.join(path.dirname(bundle.bundleRoot), 'dmg');
+  const dmgs = readdirSync(dmgRoot).filter(name => name.endsWith('.dmg'));
+  if (dmgs.length !== 1) fail('candidate must produce exactly one DMG');
+  const dmg = path.join(dmgRoot, dmgs[0]);
+  cpSync(dmg, path.join(root, 'packages', dmgs[0]));
+}
+const licenses = path.join(root, 'licenses');
+mkdirSync(licenses, { recursive: true });
+cpSync(path.join(repoRoot, 'assets/fonts/OFL-Inter.txt'), path.join(licenses, 'OFL-Inter.txt'));
+for (const name of ['ATTRIBUTION.md', 'LICENSE-APACHE', 'LICENSE-MIT']) {
+  const source = name === 'ATTRIBUTION.md' ? path.join(repoRoot, 'assets', name) : path.join(repoRoot, name);
+  cpSync(source, path.join(licenses, name));
+}
+for (const dir of readdirSync(fonts, { withFileTypes: true }).filter(entry => entry.isDirectory())) {
+  const fontDir = path.join(fonts, dir.name);
+  const ofls = readdirSync(fontDir).filter(name => /OFL|LICENSE/i.test(name));
+  for (const name of ofls) cpSync(path.join(fontDir, name), path.join(licenses, `${dir.name}-${name}`));
+}

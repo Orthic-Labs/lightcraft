@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "LightCraft Preview",
+  "version": "0.2.1",
+  "identifier": "ai.storyteller.lightcraft.preview",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://127.0.0.1:18483",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "web/dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "LightCraft",
+        "width": 1600,
+        "height": 1000,
+        "minWidth": 960,
+        "minHeight": 640,
+        "decorations": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' blob: data: lightcraft-preview: http://lightcraft-preview.localhost; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost lightcraft-preview: http://lightcraft-preview.localhost; font-src 'self'; script-src 'self'",
+      "capabilities": [
+        "main"
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg",
+      "nsis"
+    ],
+    "icon": [
+      "../../assets/app-icon/lightcraft.icns",
+      "../../assets/app-icon/lightcraft.ico"
+    ],
+    "copyright": "LightCraft contributors",
+    "category": "Photography",
+    "shortDescription": "Photo library & non-destructive RAW developer",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    }
+  }
+}
