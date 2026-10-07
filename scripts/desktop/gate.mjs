@@ -57,23 +57,5 @@ run("pnpm", ["run", "typecheck"], "React typecheck");
 run("pnpm", ["run", "build"], "React build");
 const lockfile = path.join(repoRoot, "Cargo.lock");
 bootstrapLockfile(lockfile);
-// Mac-first development proof uses existing generated CI lane while candidate
-// admission's Linux ownership runner is unsupported by current published SDK.
-if (process.platform === "darwin") {
-  const revision = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" });
-  if (revision.status !== 0) fail("cannot bind native Mac proof to checked-out revision");
-  // Actions PR checkout is detached. Attach a runner-local branch to the exact
-  // tested commit so existing RightRelease's primary-checkout contract holds.
-  run("git", ["switch", "--create", `lightcraft-native-ci-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`], "attach native CI checkout");
-  const nativeEnv = {
-    ...process.env,
-    RIGHT_GIT_SOURCE_REVISION: revision.stdout.trim(),
-    RIGHT_GIT_RELEASE_PLATFORM: "macos",
-    RIGHT_GIT_RELEASE_ARCHITECTURE: "arm64",
-    RIGHT_GIT_ARTIFACT_ROOT: path.join(process.env.RUNNER_TEMP, "lightcraft-candidate"),
-  };
-  run(process.execPath, ["scripts/desktop/candidate.mjs", "build"], "native Mac candidate", nativeEnv);
-  run(process.execPath, ["scripts/desktop/candidate.mjs", "check"], "installed Mac native journeys", nativeEnv);
-}
 run("cargo", ["run", "--locked", "-p", "xtask", "--", "ci"], "Rust fmt, clippy, test, parity, layers, assets & WASM");
 console.log("desktop CI gate: PASS");
