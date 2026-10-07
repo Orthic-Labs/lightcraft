@@ -1,7 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { cpSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { resolvePnpmCli } from '@rightkit/release/development.mjs';
 import { runCargoSync } from '@rightkit/release/managed-cargo.mjs';
 import { resolveTauriBundleDirectory } from '@rightkit/release/development.mjs';
 import { artifactRoot, currentPlatform, fail, repoRoot, sha256 } from './lib.mjs';
@@ -12,9 +11,8 @@ if ((platform === 'macos' && process.platform !== 'darwin') || (platform === 'wi
 const target = platform === 'macos' ? 'aarch64-apple-darwin' : 'x86_64-pc-windows-msvc';
 const root = path.resolve(artifactRoot());
 mkdirSync(root, { recursive: true });
-const pnpm = resolvePnpmCli({ root: repoRoot });
 function run(args, cwd = repoRoot, env = process.env) {
-  const result = spawnSync(process.execPath, [pnpm, ...args], { cwd, env, stdio: 'inherit', windowsHide: true });
+  const result = spawnSync('pnpm', args, { cwd, env, stdio: 'inherit', windowsHide: true, shell: process.platform === 'win32' });
   if (result.error || result.status !== 0) fail(`pnpm ${args[0]} failed: ${result.error?.message || result.status}`);
 }
 // Existing engine embeds licensed craft-fonts; every candidate supplies pinned input.
