@@ -475,6 +475,8 @@ fn native_hidden_control_journeys() {
 
     let scenario_names = [
         "ipc",
+        // Capture core import/edit/undo/export proof before broader parity journeys.
+        "engineExport",
         "stalePreview",
         "cache",
         "scalability",
@@ -483,7 +485,6 @@ fn native_hidden_control_journeys() {
         "editingTools",
         "arwImport",
         "lightroomImport",
-        "engineExport",
         "catalogRecovery",
     ];
     for name in scenario_names {
