@@ -628,7 +628,10 @@ fn native_hidden_control_journeys() {
                         let descending_before = snapshot(control);
                         let descending_generation = descending_before["viewGeneration"].as_u64().expect("descending generation must be numeric");
                         assert!(descending_generation > generation, "descending sort must advance view generation");
-                        let descending_name = wait_for_dom(control, "return Boolean(document.querySelector('.lc-grid-window .lc-photo-caption span:first-child')?.textContent?.trim());")
+                        wait_for_dom(control, "return Boolean(document.querySelector('.lc-grid-window .lc-photo-caption span:first-child')?.textContent?.trim());");
+                        let descending_name = control
+                            .eval("return document.querySelector('.lc-grid-window .lc-photo-caption span:first-child')?.textContent?.trim() || '';")
+                            .expect("descending sort filename query must execute")
                             .as_str()
                             .unwrap_or_default()
                             .to_string();
@@ -637,7 +640,10 @@ fn native_hidden_control_journeys() {
                         let ascending_snapshot = snapshot(control);
                         let ascending_generation = ascending_snapshot["viewGeneration"].as_u64().expect("ascending generation must be numeric");
                         assert!(ascending_generation > descending_generation, "ascending sort must advance view generation");
-                        let ascending_name = wait_for_dom(control, &format!("return (document.querySelector('.lc-grid-window .lc-photo-caption span:first-child')?.textContent?.trim() || '') !== {descending_name:?};"))
+                        wait_for_dom(control, &format!("return (document.querySelector('.lc-grid-window .lc-photo-caption span:first-child')?.textContent?.trim() || '') !== {descending_name:?};"));
+                        let ascending_name = control
+                            .eval("return document.querySelector('.lc-grid-window .lc-photo-caption span:first-child')?.textContent?.trim() || '';")
+                            .expect("ascending sort filename query must execute")
                             .as_str()
                             .unwrap_or_default()
                             .to_string();
@@ -660,9 +666,9 @@ fn native_hidden_control_journeys() {
                         control.key("D").expect("develop route key must execute");
                         wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
                         control.click(".stage-toolstrip button[aria-label='Edit']").expect("edit tool click must execute");
-                        wait_for_dom(control, "return document.querySelector('input[aria-label=\\\"Exposure\\\"]') !== null;");
+                        wait_for_dom(control, r#"return document.querySelector("input[aria-label='Exposure']") !== null;"#);
                         let slider = control
-                            .eval("return (() => { const e = document.querySelector('input[aria-label=\\\"Exposure\\\"]'); const r = e.getBoundingClientRect(); return {x:r.x, y:r.y, width:r.width, height:r.height}; })();")
+                            .eval(r#"return (() => { const e = document.querySelector("input[aria-label='Exposure']"); const r = e.getBoundingClientRect(); return {x:r.x, y:r.y, width:r.width, height:r.height}; })();"#)
                             .expect("exposure slider geometry query must execute");
                         let x = slider["x"].as_f64().expect("exposure slider x must be numeric");
                         let y = slider["y"].as_f64().expect("exposure slider y must be numeric") + slider["height"].as_f64().unwrap_or(16.0) / 2.0;
@@ -700,28 +706,28 @@ fn native_hidden_control_journeys() {
                         let crop = snapshot(control);
                         assert_ne!(crop["develop"]["crop"], before["develop"]["crop"], "crop command must change crop geometry");
                         control.click(".stage-toolstrip button[aria-label='Crop']").expect("crop tool click must execute");
-                        wait_for_dom(control, "return document.querySelector('.stage-toolstrip button[aria-label=\\\"Crop\\\"]')?.classList.contains('selected') === true;");
+                        wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Crop']")?.classList.contains('selected') === true;"#);
                         control.screenshot_to(&scenario.dir().join("tool-crop.png")).expect("crop tool screenshot must be captured");
 
                         run(control, "mask.add", json!({"kind": "radial", "center": [0.5, 0.5], "rx": 0.2, "ry": 0.2}));
                         let masked = snapshot(control);
                         assert_eq!(masked["develop"]["masks"].as_array().map(Vec::len), Some(1), "mask command must create mask state");
                         control.click(".stage-toolstrip button[aria-label='Masking']").expect("masking tool click must execute");
-                        wait_for_dom(control, "return document.querySelector('.stage-toolstrip button[aria-label=\\\"Masking\\\"]')?.classList.contains('selected') === true;");
+                        wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Masking']")?.classList.contains('selected') === true;"#);
                         control.screenshot_to(&scenario.dir().join("tool-masking.png")).expect("masking tool screenshot must be captured");
 
                         run(control, "spot.add", json!({"mode": "remove", "points": [[0.5, 0.5]], "size": 0.05, "source": [0.1, 0.0]}));
                         let spotted = snapshot(control);
                         assert_eq!(spotted["develop"]["spots"].as_array().map(Vec::len), Some(1), "remove tool command must create spot state");
                         control.click(".stage-toolstrip button[aria-label='Remove']").expect("remove tool click must execute");
-                        wait_for_dom(control, "return document.querySelector('.stage-toolstrip button[aria-label=\\\"Remove\\\"]')?.classList.contains('selected') === true;");
+                        wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Remove']")?.classList.contains('selected') === true;"#);
                         control.screenshot_to(&scenario.dir().join("tool-remove.png")).expect("remove tool screenshot must be captured");
 
                         run(control, "redeye.add", json!({"center": [0.5, 0.5], "rx": 0.1, "ry": 0.1}));
                         let red_eye = snapshot(control);
                         assert_eq!(red_eye["develop"]["red_eye"].as_array().map(Vec::len), Some(1), "red-eye command must create correction state");
                         control.click(".stage-toolstrip button[aria-label='Red Eye']").expect("red-eye tool click must execute");
-                        wait_for_dom(control, "return document.querySelector('.stage-toolstrip button[aria-label=\\\"Red Eye\\\"]')?.classList.contains('selected') === true;");
+                        wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Red Eye']")?.classList.contains('selected') === true;"#);
                         control.screenshot_to(&scenario.dir().join("tool-red-eye.png")).expect("red-eye tool screenshot must be captured");
                         assert_eq!(red_eye["active"].as_u64(), Some(active));
                     }
@@ -755,6 +761,31 @@ fn native_hidden_control_journeys() {
                     "engineExport" => {
                         let imported = import_file(control, &inputs.png);
                         let id = imported["active"].as_u64().expect("PNG import must select photo");
+                        control.key("D").expect("develop route key must execute for engine export journey");
+                        wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
+                        let decoded_before = wait_for_rendered_preview(control, "img.stage-preview", None);
+                        assert!(decoded_before["naturalWidth"].as_u64().is_some_and(|width| width > 0));
+                        assert!(decoded_before["naturalHeight"].as_u64().is_some_and(|height| height > 0));
+                        let decoded_before_src = decoded_before["src"].as_str().expect("decoded stage preview must expose source handle").to_string();
+                        let before = snapshot(control);
+                        let before_exposure = before["develop"]["light"]["exposure"].clone();
+                        let before_undo = before["undo"].as_u64().expect("engine export journey must expose undo count");
+                        run(control, "develop.beginInteraction", json!({"label": "Qualification edit"}));
+                        run(control, "develop.set", json!({"control": "light.exposure", "value": 0.75, "ids": [id]}));
+                        run(control, "develop.endInteraction", json!({}));
+                        let edited = snapshot(control);
+                        assert_ne!(edited["develop"]["light"]["exposure"], before_exposure, "develop.set must change exposure state");
+                        assert!(edited["undo"].as_u64().is_some_and(|undo| undo > before_undo), "develop.set must create undo state");
+                        let decoded_edited = wait_for_rendered_preview(control, "img.stage-preview", Some(&decoded_before_src));
+                        let decoded_edited_src = decoded_edited["src"].as_str().expect("edited stage preview must expose source handle").to_string();
+                        run(control, "edit.undo", json!({}));
+                        let undone = snapshot(control);
+                        assert_eq!(undone["develop"]["light"]["exposure"], before_exposure, "edit.undo must restore exposure state");
+                        assert_eq!(undone["undo"].as_u64(), Some(before_undo), "edit.undo must remove qualification edit");
+                        let decoded_undone = wait_for_rendered_preview(control, "img.stage-preview", Some(&decoded_edited_src));
+                        let screenshot = scenario.dir().join("engine-export-stage.png");
+                        control.screenshot_to(&screenshot).expect("engine export stage screenshot must be captured");
+                        assert!(screenshot.is_file());
                         let output = scenario.dir().join("export");
                         fs::create_dir_all(&output).expect("export directory must exist");
                         let started = run(control, "app.export", json!({"ids": [id], "dir": output, "format": "png", "longEdge": 96}));
@@ -767,6 +798,26 @@ fn native_hidden_control_journeys() {
                             .find(|path| path.is_file())
                             .expect("export must write file");
                         assert_png_pixels(&exported, 96, 64);
+                        let receipt = scenario.dir().join("engine-export.json");
+                        fs::write(
+                            &receipt,
+                            serde_json::to_vec_pretty(&json!({
+                                "schema": 1,
+                                "journey": "import-decoded-preview-edit-undo-export",
+                                "photoId": id,
+                                "decodedPreviewBefore": decoded_before,
+                                "decodedPreviewEdited": decoded_edited,
+                                "decodedPreviewUndone": decoded_undone,
+                                "beforeExposure": before_exposure.clone(),
+                                "editedExposure": edited["develop"]["light"]["exposure"].clone(),
+                                "undoRestored": undone["develop"]["light"]["exposure"] == before_exposure,
+                                "exportedPng": exported,
+                            }))
+                            .expect("engine export receipt must serialize"),
+                        )
+                        .expect("engine export receipt must be writable");
+                        scenario.keep("engine-export-stage.png", &screenshot);
+                        scenario.keep("engine-export.json", &receipt);
                     }
                     _ => unreachable!("scenario inventory is static"),
                 });
