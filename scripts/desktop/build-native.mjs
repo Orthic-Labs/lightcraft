@@ -24,12 +24,20 @@ if (checkout.error || checkout.status !== 0) fail('pinned craft-fonts checkout f
 const env = { ...process.env, CRAFT_FONTS_DIR: fonts, CRAFT_FONTS_REQUIRED: '1' };
 run(['run', 'build'], repoRoot, env);
 const compiler = runCargoSync(['build', '--locked', '--manifest-path', 'apps/lightcraft-desktop/Cargo.toml', '--features', 'qa-native,custom-protocol', '--target', target, '--profile', 'release-iterate', '--message-format=json'], { cwd: repoRoot, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true });
+// Retain compiler records on failures too. A large asynchronous stdout write
+// followed by process failure can drop diagnostics near the end of JSON output.
+writeFileSync(path.join(root, 'cargo-artifacts.jsonl'), compiler.stdout || '');
 if (compiler.stderr) process.stderr.write(compiler.stderr);
 if (compiler.error || compiler.status !== 0) {
-  if (compiler.stdout) process.stdout.write(compiler.stdout);
+  for (const line of (compiler.stdout || '').split('\n')) {
+    let entry;
+    try { entry = JSON.parse(line); } catch { continue; }
+    if (entry.reason === 'compiler-message' && entry.message?.level === 'error') {
+      process.stderr.write(entry.message.rendered || entry.message.message + '\n');
+    }
+  }
   fail(`RightKit candidate Cargo failed: ${compiler.error?.message || compiler.status}`);
 }
-writeFileSync(path.join(root, 'cargo-artifacts.jsonl'), compiler.stdout);
 const nativeRoot = path.join(repoRoot, 'apps/lightcraft-desktop');
 run(['exec', 'tauri', 'build', '--ci', '--no-sign', '--target', target, '--features', 'qa-native,custom-protocol', '--bundles', platform === 'macos' ? 'app,dmg' : 'nsis', '--', '--profile=release-iterate', '--locked'], nativeRoot, env);
 const descriptor = { productName: 'LightCraft Preview', targetTriple: target, manifestPath: 'apps/lightcraft-desktop/Cargo.toml' };

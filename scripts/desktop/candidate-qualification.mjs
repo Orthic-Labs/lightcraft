@@ -1,5 +1,6 @@
 import { runDevelopment } from '@rightkit/release/development.mjs';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { runCargoSync } from '@rightkit/release/managed-cargo.mjs';
 import { fail, loadReleaseConfig, repoRoot, safeRelative } from './lib.mjs';
@@ -18,4 +19,14 @@ export async function qualify(record, root) {
   const env = { ...process.env, RIGHTKIT_QA_HIDDEN: '1', RIGHTKIT_QA_UI_BINARY: installed, RIGHTKIT_QA_EVIDENCE: path.join(root, 'qa-evidence'), RIGHTKIT_QA_SOURCE_REVISION: record.sourceRevision, RIGHTKIT_QA_ARCHITECTURE: record.architecture, RIGHTKIT_QA_INSTALLED_ARTIFACT_SHA256: installedHash };
   const result = runCargoSync(['test', '--locked', '-p', 'lightcraft-desktop', '--test', 'native_qualification', '--features', 'qa-native', '--', '--ignored', '--nocapture'], { cwd: repoRoot, env, stdio: 'inherit', windowsHide: true });
   if (result.error || result.status !== 0) fail(`native qualification failed: ${result.error?.message || result.status}`);
+  if (record.platform === 'macos') {
+    // GitHub directory artifacts lose Unix modes. Retain the exact installed,
+    // ad-hoc signed bundle exercised above in Apple's resource-preserving ZIP.
+    const archive = path.join(root, 'packages', 'LightCraft-Preview-macos-arm64-qualified.zip');
+    mkdirSync(path.dirname(archive), { recursive: true });
+    const packed = spawnSync('/usr/bin/ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', target.install.destination, archive], { stdio: 'inherit' });
+    if (packed.error || packed.status !== 0) fail(`qualified Mac bundle archive failed: ${packed.error?.message || packed.status}`);
+    const archiveHash = createHash('sha256').update(readFileSync(archive)).digest('hex');
+    writeFileSync(path.join(root, 'qualified-bundle.json'), JSON.stringify({ schema: 1, sourceRevision: record.sourceRevision, platform: record.platform, architecture: record.architecture, path: path.relative(root, archive), sha256: archiveHash, installedExecutableSha256: installedHash, nativeQualification: 'passed' }, null, 2) + '\n');
+  }
 }

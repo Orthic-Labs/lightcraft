@@ -37,6 +37,7 @@
       "nsis"
     ],
     "icon": [
+      "../../assets/app-icon/hicolor/256x256/apps/ai.storyteller.lightcraft.png",
       "../../assets/app-icon/lightcraft.icns",
       "../../assets/app-icon/lightcraft.ico"
     ],

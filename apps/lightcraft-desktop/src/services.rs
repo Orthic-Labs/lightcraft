@@ -54,7 +54,7 @@ pub fn migrate_preferences(source: &Path, destination: &Path) -> Result<bool, St
     let name = destination.file_name().and_then(|name| name.to_str()).unwrap_or("ui.json");
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_nanos()).unwrap_or(0);
     let temporary = parent.join(format!(".{name}.migrate-{}-{stamp}", std::process::id()));
-    let result = (|| {
+    let result: std::io::Result<bool> = (|| {
         let mut file = OpenOptions::new().create_new(true).write(true).open(&temporary)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
