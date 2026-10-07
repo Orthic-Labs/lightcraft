@@ -55,7 +55,9 @@ function candidateRecord() {
 }
 
 if (mode === "build") {
-  runDevelopment({ root: repoRoot, platform: releaseTargetName, config, buildOnly: true });
+  // Right Release binds Windows installer freshness to this call's build start.
+  // Keep its build & install in one invocation, then qualify that installed copy.
+  runDevelopment({ root: repoRoot, platform: releaseTargetName, config });
   const input = configuredRecord();
   const entries = cargoCompilerArtifacts(input);
   const materialized = materializeArtifacts(entries, root, {
@@ -66,6 +68,14 @@ if (mode === "build") {
     unsigned: true,
   });
   writeFileSync(path.join(root, "candidate-artifact-summary.json"), `${JSON.stringify(materialized.record, null, 2)}\n`, "utf8");
+  const install = config.development.targets[releaseTargetName].install;
+  const installed = platform === "macos"
+    ? path.join(install.destination, "Contents/MacOS/lightcraft-desktop")
+    : install.expectedInstalledPath;
+  writeFileSync(path.join(root, "installed-candidate.json"), `${JSON.stringify({
+    schema: 1, sourceRevision: revision, platform, architecture,
+    path: installed, sha256: sha256(installed),
+  }, null, 2)}\n`, "utf8");
   console.log(`desktop candidate build: PASS ${platform}/${architecture} (${materialized.record.artifacts.length} Cargo artifacts)`);
 } else {
   const { record } = candidateRecord();

@@ -12,18 +12,20 @@ pnpm run typecheck
 pnpm exec right-git drift .
 ```
 
-`package.json`, `.rightgit.json` & lockfiles carry exact dependency pins. Workflows are generated with `pnpm exec right-git sync .`; edit shared RightKit templates at their source rather than editing generated YAML.
+`package.json`, `.rightgit.json` & lockfiles carry exact dependency pins. Workflows are generated with `pnpm exec right-git sync .`.
+
+Temporary runner exception: candidate admission uses `macos-15` because published ownership approval rejects Linux, while the pinned generator emits Ubuntu for admission. Ownership checks remain enabled; SDK versions remain unchanged. This one runner correction is a known generated-workflow drift. Regeneration must preserve it until an existing supported template can produce native admission.
 
 ## CI lanes
 
 | Lane | Actual work |
 | --- | --- |
-| Workspace CI, Windows x64 | Source contracts, React typecheck/build, then existing Rust fmt, clippy, tests, parity, layers, assets & WASM gates |
+| Workspace CI, macOS arm64 | Source contracts, React typecheck/build, then existing Rust fmt, clippy, tests, parity, layers, assets & WASM gates; Windows workspace gates follow Mac delivery |
 | Native candidate, macOS arm64 & Windows x64 | Right Release development build, Cargo compiler-artifact records, embedded frontend, Tauri app/DMG or NSIS package, hash verification, installation on CI runner & hidden native QA |
 
 First CI resolves missing Rust dependencies, emits bounded Cargo.lock bytes & SHA-256, then fails until verified lock is committed. Subsequent gates use `--locked`. Cargo commands go through `@rightkit/release/managed-cargo.mjs`.
 
-Candidate scripts use supported `development.targets.mac|win` config in `right-release.config.mjs`. `build-native.mjs` supplies pinned licensed craft-fonts, records compiler outputs, packages target-native app & collects attribution. `candidate-qualification.mjs` installs through Right Release, binds installed executable hash, then runs ignored `native_qualification` with `qa-native` on CI. Native test stays ignored in ordinary workspace tests.
+Candidate scripts use supported `development.targets.mac|win` config in `right-release.config.mjs`. `build-native.mjs` supplies pinned licensed craft-fonts, records compiler outputs, packages target-native app & collects attribution. Candidate build keeps build & installation in one Right Release invocation, preserving its installer freshness check, then records installed executable identity & hash. `candidate-qualification.mjs` verifies that installed copy remains unchanged, then runs ignored `native_qualification` with `qa-native` on CI. Native test stays ignored in ordinary workspace tests.
 
 Current candidate route is unsigned development qualification. macOS receives required ad-hoc signature through Right Release. Candidate run uploads CI artifacts & evidence; it creates no product release, updater publication or release tag. Protected signing/publication requires separately declared RightKit release targets & chain.
 

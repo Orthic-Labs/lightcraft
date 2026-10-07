@@ -1,9 +1,8 @@
-import { runDevelopment } from '@rightkit/release/development.mjs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { runCargoSync } from '@rightkit/release/managed-cargo.mjs';
-import { fail, loadReleaseConfig, repoRoot, safeRelative } from './lib.mjs';
+import { fail, loadReleaseConfig, repoRoot } from './lib.mjs';
 import path from 'node:path';
 export async function qualify(record, root) {
   if (process.env.GITHUB_ACTIONS !== 'true') fail('candidate qualification requires generated Actions');
@@ -12,10 +11,11 @@ export async function qualify(record, root) {
   const { config } = await loadReleaseConfig();
   const targetName = record.platform === 'macos' ? 'mac' : 'win';
   const target = config.development.targets[targetName];
-  const installedConfig = { ...config, development: { targets: { [targetName]: { ...target, build: [{ cmd: 'node', args: ['scripts/desktop/verify-built.mjs'] }] } } } };
-  runDevelopment({ root: repoRoot, platform: targetName, config: installedConfig });
   const installed = record.platform === 'macos' ? path.join(target.install.destination, 'Contents/MacOS/lightcraft-desktop') : target.install.expectedInstalledPath;
+  const installation = JSON.parse(readFileSync(path.join(root, 'installed-candidate.json'), 'utf8'));
+  if (installation.schema !== 1 || installation.sourceRevision !== record.sourceRevision || installation.platform !== record.platform || installation.architecture !== record.architecture || installation.path !== installed) fail('installed candidate identity does not match qualified source & target');
   const installedHash = createHash('sha256').update(readFileSync(installed)).digest('hex');
+  if (installation.sha256 !== installedHash) fail('installed candidate changed after Right Release installation');
   const env = { ...process.env, RIGHTKIT_QA_HIDDEN: '1', RIGHTKIT_QA_UI_BINARY: installed, RIGHTKIT_QA_EVIDENCE: path.join(root, 'qa-evidence'), RIGHTKIT_QA_SOURCE_REVISION: record.sourceRevision, RIGHTKIT_QA_ARCHITECTURE: record.architecture, RIGHTKIT_QA_INSTALLED_ARTIFACT_SHA256: installedHash };
   const result = runCargoSync(['test', '--locked', '-p', 'lightcraft-desktop', '--test', 'native_qualification', '--features', 'qa-native', '--', '--ignored', '--nocapture'], { cwd: repoRoot, env, stdio: 'inherit', windowsHide: true });
   if (result.error || result.status !== 0) fail(`native qualification failed: ${result.error?.message || result.status}`);

@@ -30,46 +30,174 @@ struct AppState {
     closing: Arc<AtomicBool>,
 }
 
-fn blocking<T, F>(work: F) -> impl std::future::Future<Output = Result<T, String>>
+async fn blocking<T, F>(work: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {
-    async move { tauri::async_runtime::spawn_blocking(work).await.map_err(|error| format!("native task failed: {error}"))? }
+    tauri::async_runtime::spawn_blocking(work).await.map_err(|error| format!("native task failed: {error}"))?
 }
 
-#[tauri::command]
-async fn lc_run(state: State<'_, AppState>, id: String, params: Value) -> Result<Value, String> {
-    let host = state.host.clone();
-    let error = state.startup_error.clone();
-    let preferences = state.preferences.clone();
-    let restore = id == "library.restore";
-    blocking(move || {
-        let result =
-            host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into())).and_then(|host| host.run(id, params))?;
-        if restore { persist_library_path(&preferences, host.as_ref(), result, None) } else { Ok(result) }
-    })
-    .await
-}
+// tauri-macros 2.7.1 emits a sibling `const _: () = if false { ... unreachable!() ... }`
+// to typecheck async Result signatures. That branch cannot run. Scope this allowance
+// to these generated bindings; runtime command bodies introduce no panic paths.
+#[allow(clippy::unreachable)]
+mod tauri_commands {
+    use super::*;
 
-#[tauri::command]
-async fn lc_snapshot(state: State<'_, AppState>) -> Result<Value, String> {
-    let host = state.host.clone();
-    let error = state.startup_error.clone();
-    let warnings = state.startup_warnings.clone();
-    blocking(move || {
-        let snapshot =
-            host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into())).and_then(DesktopHandle::snapshot)?;
-        Ok(merge_startup_warnings(snapshot, &warnings))
-    })
-    .await
+    #[tauri::command]
+    pub(super) async fn lc_run(state: State<'_, AppState>, id: String, params: Value) -> Result<Value, String> {
+        let host = state.host.clone();
+        let error = state.startup_error.clone();
+        let preferences = state.preferences.clone();
+        let restore = id == "library.restore";
+        blocking(move || {
+            let result =
+                host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into())).and_then(|host| host.run(id, params))?;
+            if restore { persist_library_path(&preferences, host.as_ref(), result, None) } else { Ok(result) }
+        })
+        .await
+    }
+
+    #[tauri::command]
+    pub(super) async fn lc_snapshot(state: State<'_, AppState>) -> Result<Value, String> {
+        let host = state.host.clone();
+        let error = state.startup_error.clone();
+        let warnings = state.startup_warnings.clone();
+        blocking(move || {
+            let snapshot =
+                host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into())).and_then(DesktopHandle::snapshot)?;
+            Ok(merge_startup_warnings(snapshot, &warnings))
+        })
+        .await
+    }
+
+    #[tauri::command]
+    pub(super) async fn lc_view_slice(state: State<'_, AppState>, generation: Option<u64>, offset: usize, limit: usize) -> Result<Value, String> {
+        let host = state.host.clone();
+        let error = state.startup_error.clone();
+        blocking(move || {
+            host.as_ref()
+                .ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into()))
+                .and_then(|host| host.view_slice(generation, offset, limit))
+        })
+        .await
+    }
+
+    #[tauri::command]
+    pub(super) async fn lc_preview(
+        state: State<'_, AppState>,
+        request: PreviewRequest,
+    ) -> Result<lightcraft_desktop_host::PreviewDescriptor, String> {
+        let host = state.host.clone();
+        let error = state.startup_error.clone();
+        blocking(move || {
+            host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into())).and_then(|host| host.preview(request))
+        })
+        .await
+    }
+
+    #[tauri::command]
+    pub(super) async fn lc_preview_ack(state: State<'_, AppState>, handle: String) -> Result<bool, String> {
+        let host = state.host.clone();
+        let error = state.startup_error.clone();
+        blocking(move || {
+            let host = host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into()))?;
+            Ok(host.preview_store().acknowledge(&handle))
+        })
+        .await
+    }
+
+    #[tauri::command]
+    pub(super) async fn lc_preferences(state: State<'_, AppState>, patch: Option<Value>) -> Result<Value, String> {
+        let preferences = state.preferences.clone();
+        let host = state.host.clone();
+        let startup_error = state.startup_error.clone();
+        blocking(move || {
+            let value = preferences.patch(patch)?;
+            if let Some(host) = host {
+                host.preferences(Some(value.clone()))
+            } else if let Some(error) = startup_error {
+                Err(error)
+            } else {
+                Ok(value.clone())
+            }
+        })
+        .await
+    }
+
+    #[tauri::command]
+    pub(super) async fn lc_native(action: String, params: Value, app: AppHandle<Wry>, state: State<'_, AppState>) -> Result<Value, String> {
+        if action == "openLibrary" {
+            let host = state.host.clone();
+            let startup_error = state.startup_error.clone();
+            let preferences = state.preferences.clone();
+            return blocking(move || open_library_action(host, startup_error, preferences, params)).await;
+        }
+        if matches!(action.as_str(), "backupLibrary" | "restoreLibrary") {
+            let host = state.host.clone();
+            let startup_error = state.startup_error.clone();
+            let preferences = state.preferences.clone();
+            return blocking(move || {
+                let path = if let Some(path) = params.get("path").and_then(Value::as_str) {
+                    path.to_string()
+                } else {
+                    let picker = if action == "backupLibrary" {
+                        services::run("saveFile", &json!({"suggestedName": "LightCraft Library Backup.lclibrary", "extensions": ["lclibrary"]}))
+                    } else {
+                        services::run("chooseFolder", &json!({}))
+                    }?;
+                    picker.get("path").and_then(Value::as_str).map(str::to_string).ok_or_else(|| "no library backup selected".to_string())?
+                };
+                if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
+                    return Err("invalid library backup path".into());
+                }
+                let host = host.as_ref().ok_or_else(|| startup_error.unwrap_or_else(|| "desktop host is unavailable".into()))?;
+                let result = host.run(if action == "backupLibrary" { "library.backup" } else { "library.restore" }.into(), json!({"path": path}))?;
+                if action == "restoreLibrary" { persist_library_path(&preferences, Some(host), result, None) } else { Ok(result) }
+            })
+            .await;
+        }
+        if action == "preferences.patch" {
+            let preferences = state.preferences.clone();
+            let host = state.host.clone();
+            return blocking(move || {
+                let value = preferences.patch(Some(params))?;
+                if let Some(host) = host { host.preferences(Some(value.clone())) } else { Ok(value) }
+            })
+            .await;
+        }
+        if action == "saveBeforeClose" {
+            let host = state.host.clone();
+            let startup_error = state.startup_error.clone();
+            let label = params.get("label").and_then(Value::as_str).unwrap_or("main").to_string();
+            let app_handle = app.clone();
+            return blocking(move || {
+                let host = host.as_ref().ok_or_else(|| startup_error.unwrap_or_else(|| "desktop host is unavailable".into()))?;
+                let snapshot = host.snapshot()?;
+                if let Some(reason) = active_close_reason(&snapshot) {
+                    return Err(reason);
+                }
+                host.persist()?;
+                let window = app_handle.get_webview_window(&label).ok_or_else(|| format!("window {label} is unavailable"))?;
+                window.close().map_err(|error| format!("closing window: {error}"))?;
+                Ok(json!({"closed": true}))
+            })
+            .await;
+        }
+        if matches!(action.as_str(), "secondWindow" | "fullscreen" | "toggleFullscreen" | "confirmClose" | "closeWindow") {
+            let action = if action == "fullscreen" { "toggleFullscreen" } else { action.as_str() };
+            return native_window_action(&app, action, &params);
+        }
+        blocking(move || services::run(&action, &params)).await
+    }
 }
 
 fn merge_startup_warnings(mut snapshot: Value, warnings: &[String]) -> Value {
-    if !snapshot.get("status").is_some_and(Value::is_object) {
-        if let Some(object) = snapshot.as_object_mut() {
-            object.insert("status".into(), json!({}));
-        }
+    if !snapshot.get("status").is_some_and(Value::is_object)
+        && let Some(object) = snapshot.as_object_mut()
+    {
+        object.insert("status".into(), json!({}));
     }
     let Some(status) = snapshot.get_mut("status").and_then(Value::as_object_mut) else { return snapshot };
     let notices = status.entry("notices").or_insert_with(|| json!([]));
@@ -88,123 +216,6 @@ fn merge_startup_warnings(mut snapshot: Value, warnings: &[String]) -> Value {
         }
     }
     snapshot
-}
-
-#[tauri::command]
-async fn lc_view_slice(state: State<'_, AppState>, generation: Option<u64>, offset: usize, limit: usize) -> Result<Value, String> {
-    let host = state.host.clone();
-    let error = state.startup_error.clone();
-    blocking(move || {
-        host.as_ref()
-            .ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into()))
-            .and_then(|host| host.view_slice(generation, offset, limit))
-    })
-    .await
-}
-
-#[tauri::command]
-async fn lc_preview(state: State<'_, AppState>, request: PreviewRequest) -> Result<lightcraft_desktop_host::PreviewDescriptor, String> {
-    let host = state.host.clone();
-    let error = state.startup_error.clone();
-    blocking(move || {
-        host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into())).and_then(|host| host.preview(request))
-    })
-    .await
-}
-
-#[tauri::command]
-async fn lc_preview_ack(state: State<'_, AppState>, handle: String) -> Result<bool, String> {
-    let host = state.host.clone();
-    let error = state.startup_error.clone();
-    blocking(move || {
-        let host = host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into()))?;
-        Ok(host.preview_store().acknowledge(&handle))
-    })
-    .await
-}
-
-#[tauri::command]
-async fn lc_preferences(state: State<'_, AppState>, patch: Option<Value>) -> Result<Value, String> {
-    let preferences = state.preferences.clone();
-    let host = state.host.clone();
-    let startup_error = state.startup_error.clone();
-    blocking(move || {
-        let value = preferences.patch(patch)?;
-        if let Some(host) = host {
-            host.preferences(Some(value.clone()))
-        } else if let Some(error) = startup_error {
-            Err(error)
-        } else {
-            Ok(value.clone())
-        }
-    })
-    .await
-}
-
-#[tauri::command]
-async fn lc_native(action: String, params: Value, app: AppHandle<Wry>, state: State<'_, AppState>) -> Result<Value, String> {
-    if action == "openLibrary" {
-        let host = state.host.clone();
-        let startup_error = state.startup_error.clone();
-        let preferences = state.preferences.clone();
-        return blocking(move || open_library_action(host, startup_error, preferences, params)).await;
-    }
-    if matches!(action.as_str(), "backupLibrary" | "restoreLibrary") {
-        let host = state.host.clone();
-        let startup_error = state.startup_error.clone();
-        let preferences = state.preferences.clone();
-        return blocking(move || {
-            let path = if let Some(path) = params.get("path").and_then(Value::as_str) {
-                path.to_string()
-            } else {
-                let picker = if action == "backupLibrary" {
-                    services::run("saveFile", &json!({"suggestedName": "LightCraft Library Backup.lclibrary", "extensions": ["lclibrary"]}))
-                } else {
-                    services::run("chooseFolder", &json!({}))
-                }?;
-                picker.get("path").and_then(Value::as_str).map(str::to_string).ok_or_else(|| "no library backup selected".to_string())?
-            };
-            if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
-                return Err("invalid library backup path".into());
-            }
-            let host = host.as_ref().ok_or_else(|| startup_error.unwrap_or_else(|| "desktop host is unavailable".into()))?;
-            let result = host.run(if action == "backupLibrary" { "library.backup" } else { "library.restore" }.into(), json!({"path": path}))?;
-            if action == "restoreLibrary" { persist_library_path(&preferences, Some(host), result, None) } else { Ok(result) }
-        })
-        .await;
-    }
-    if action == "preferences.patch" {
-        let preferences = state.preferences.clone();
-        let host = state.host.clone();
-        return blocking(move || {
-            let value = preferences.patch(Some(params))?;
-            if let Some(host) = host { host.preferences(Some(value.clone())) } else { Ok(value) }
-        })
-        .await;
-    }
-    if action == "saveBeforeClose" {
-        let host = state.host.clone();
-        let startup_error = state.startup_error.clone();
-        let label = params.get("label").and_then(Value::as_str).unwrap_or("main").to_string();
-        let app_handle = app.clone();
-        return blocking(move || {
-            let host = host.as_ref().ok_or_else(|| startup_error.unwrap_or_else(|| "desktop host is unavailable".into()))?;
-            let snapshot = host.snapshot()?;
-            if let Some(reason) = active_close_reason(&snapshot) {
-                return Err(reason);
-            }
-            host.persist()?;
-            let window = app_handle.get_webview_window(&label).ok_or_else(|| format!("window {label} is unavailable"))?;
-            window.close().map_err(|error| format!("closing window: {error}"))?;
-            Ok(json!({"closed": true}))
-        })
-        .await;
-    }
-    if matches!(action.as_str(), "secondWindow" | "fullscreen" | "toggleFullscreen" | "confirmClose" | "closeWindow") {
-        let action = if action == "fullscreen" { "toggleFullscreen" } else { action.as_str() };
-        return native_window_action(&app, &action, &params);
-    }
-    blocking(move || services::run(&action, &params)).await
 }
 
 fn open_library_action(host: Option<DesktopHandle>, startup_error: Option<String>, preferences: Preferences, params: Value) -> Result<Value, String> {
@@ -260,16 +271,12 @@ fn native_window_action(app: &AppHandle<Wry>, action: &str, params: &Value) -> R
         }
         "confirmClose" | "closeWindow" => {
             let force = params.get("force").and_then(Value::as_bool).unwrap_or(false);
-            if force {
-                if let Some(state) = app.try_state::<AppState>() {
-                    state.closing.store(true, Ordering::SeqCst);
-                }
+            if force && let Some(state) = app.try_state::<AppState>() {
+                state.closing.store(true, Ordering::SeqCst);
             }
             if let Err(error) = window.close() {
-                if force {
-                    if let Some(state) = app.try_state::<AppState>() {
-                        state.closing.store(false, Ordering::SeqCst);
-                    }
+                if force && let Some(state) = app.try_state::<AppState>() {
+                    state.closing.store(false, Ordering::SeqCst);
                 }
                 return Err(format!("closing window: {error}"));
             }
@@ -448,7 +455,7 @@ fn preview_response(app: &AppHandle<Wry>, request: Request<Vec<u8>>) -> Response
     let Some(bytes) = host.preview_store().get(handle) else {
         return response(404, "preview not found".as_bytes().to_vec(), "text/plain; charset=utf-8");
     };
-    response(200, bytes.bytes.to_vec(), &bytes.content_type)
+    response(200, bytes.bytes.to_vec(), bytes.content_type)
 }
 
 fn response(status: u16, body: Vec<u8>, content_type: &str) -> Response<Vec<u8>> {
@@ -571,7 +578,7 @@ fn prepare_primary_preferences(path: &Path) -> Option<String> {
     if path.exists() {
         return None;
     }
-    let Some(legacy) = services::legacy_preferences_path() else { return None };
+    let legacy = services::legacy_preferences_path()?;
     match services::migrate_preferences(&legacy, path) {
         Ok(true) => log::info!("migrated legacy LightCraft preferences from {}", legacy.display()),
         Ok(false) => {}
@@ -603,9 +610,8 @@ fn startup_options(app: &AppHandle<Wry>) -> (HostOptions, PathBuf, Option<String
 }
 
 fn build_shell() -> rightkit_shell::Shell {
-    let mut hardening = rightkit_shell::Hardening::default();
     // LightCraft owns fit/fill/100% & wheel zoom controls in its stage.
-    hardening.block_zoom = false;
+    let hardening = rightkit_shell::Hardening { block_zoom: false, ..Default::default() };
     let qa = std::env::args().any(|arg| arg == "--qa")
         || std::env::var_os("LIGHTCRAFT_DESKTOP_QA").is_some()
         || std::env::var_os("RIGHTKIT_QA_HIDDEN").is_some();
@@ -653,7 +659,15 @@ pub fn run() {
             let app = ctx.app_handle().clone();
             responder.respond(preview_response(&app, request));
         })
-        .invoke_handler(rightkit_shell::handler![lc_run, lc_snapshot, lc_view_slice, lc_preview, lc_preview_ack, lc_native, lc_preferences])
+        .invoke_handler(rightkit_shell::handler![
+            tauri_commands::lc_run,
+            tauri_commands::lc_snapshot,
+            tauri_commands::lc_view_slice,
+            tauri_commands::lc_preview,
+            tauri_commands::lc_preview_ack,
+            tauri_commands::lc_native,
+            tauri_commands::lc_preferences
+        ])
         .setup(|app| {
             let (options, _library, migration_warning) = startup_options(app.handle());
             let config = preferences_path(app.handle());

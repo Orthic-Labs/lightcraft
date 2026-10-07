@@ -43,7 +43,7 @@ fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, catal
     let run_id = format!("lightcraft-{}", scenario.name());
     let ws = workspace::create(&cache, Some(&run_id), "lightcraft").expect("isolated RightKit workspace must initialize");
     let data = ws.data_dir.clone();
-    let env = ws.env.into_iter().collect::<Vec<_>>();
+    let env = ws.env.clone().into_iter().collect::<Vec<_>>();
     let spec = LaunchSpec {
         binary: binary.to_path_buf(),
         mode: Mode::Hidden,
@@ -65,6 +65,17 @@ fn run(control: &rightkit_qa::control::Control, id: &str, params: Value) -> Valu
 
 fn snapshot(control: &rightkit_qa::control::Control) -> Value {
     control.command("lc_snapshot", &Value::Null).expect("native snapshot must reply")
+}
+
+fn wait_for_snapshot(control: &rightkit_qa::control::Control, ready: impl Fn(&Value) -> bool, message: &str) -> Value {
+    for _ in 0..100 {
+        let value = snapshot(control);
+        if ready(&value) {
+            return value;
+        }
+        sleep(Duration::from_millis(50));
+    }
+    panic!("{message}");
 }
 
 fn source_hash(path: &Path) -> String {
@@ -92,6 +103,17 @@ fn wait_for_dom(control: &rightkit_qa::control::Control, expression: &str) -> Va
         sleep(Duration::from_millis(50));
     }
     panic!("DOM route condition did not become true: {expression}");
+}
+
+fn click_dom(control: &rightkit_qa::control::Control, selector: &str, message: &str) {
+    let geometry = control
+        .eval(&format!(
+            "return (() => {{ const node = document.querySelector({selector:?}); if (!node) return null; const rect = node.getBoundingClientRect(); return {{x: rect.x + rect.width / 2, y: rect.y + rect.height / 2}}; }})();"
+        ))
+        .expect("DOM click geometry query must execute");
+    let x = geometry["x"].as_f64().expect("DOM click x must be numeric");
+    let y = geometry["y"].as_f64().expect("DOM click y must be numeric");
+    control.click(x, y, "left", 1).expect(message);
 }
 
 fn set_native_viewport(control: &rightkit_qa::control::Control, width: u64, height: u64) -> Value {
@@ -248,7 +270,7 @@ fn assert_png_pixels(path: &Path, expected_width: u32, expected_height: u32) {
     let bytes = fs::read(path).expect("exported PNG must be readable");
     let decoder = png::Decoder::new(Cursor::new(bytes));
     let mut reader = decoder.read_info().expect("exported PNG must decode");
-    let mut pixels = vec![0; reader.output_buffer_size()];
+    let mut pixels = vec![0; reader.output_buffer_size().expect("PNG output buffer size must be available")];
     let info = reader.next_frame(&mut pixels).expect("exported PNG frame must decode");
     assert_eq!(info.width, expected_width, "exported PNG width must match requested long edge");
     assert_eq!(info.height, expected_height, "exported PNG height must match source aspect");
@@ -665,7 +687,7 @@ fn native_hidden_control_journeys() {
                         let before = imported["undo"].as_u64().expect("snapshot undo count required");
                         control.key("D").expect("develop route key must execute");
                         wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
-                        control.click(".stage-toolstrip button[aria-label='Edit']").expect("edit tool click must execute");
+                        click_dom(control, ".stage-toolstrip button[aria-label='Edit']", "edit tool click must execute");
                         wait_for_dom(control, r#"return document.querySelector("input[aria-label='Exposure']") !== null;"#);
                         let slider = control
                             .eval(r#"return (() => { const e = document.querySelector("input[aria-label='Exposure']"); const r = e.getBoundingClientRect(); return {x:r.x, y:r.y, width:r.width, height:r.height}; })();"#)
@@ -674,14 +696,36 @@ fn native_hidden_control_journeys() {
                         let y = slider["y"].as_f64().expect("exposure slider y must be numeric") + slider["height"].as_f64().unwrap_or(16.0) / 2.0;
                         let width = slider["width"].as_f64().expect("exposure slider width must be numeric");
                         control.drag((x + width * 0.45, y), (x + width * 0.7, y), 8).expect("exposure slider drag must execute");
-                        let edited = snapshot(control);
+                        let edited = wait_for_snapshot(
+                            control,
+                            |value| {
+                                value["develop"]["light"]["exposure"] != imported["develop"]["light"]["exposure"]
+                                    && value["undo"].as_u64().is_some_and(|undo| undo > before)
+                            },
+                            "pointer drag edit did not settle through host bridge",
+                        );
                         assert_ne!(edited["develop"]["light"]["exposure"], imported["develop"]["light"]["exposure"], "pointer drag must change exposure through UI");
                         assert_eq!(edited["undo"].as_u64(), Some(before + 1), "one pointer gesture must create one undo step");
                         let edited_exposure = edited["develop"]["light"]["exposure"].clone();
-                        control.click("input[aria-label='Exposure']").expect("exposure slider focus must execute");
+                        let focused = control
+                            .eval(r#"return (() => { const node = document.querySelector("input[aria-label='Exposure']"); if (!node) return false; node.focus(); return document.activeElement === node; })();"#)
+                            .expect("exposure slider focus query must execute");
+                        assert_eq!(focused.as_bool(), Some(true), "exposure slider focus must execute");
                         control.key("ArrowLeft").expect("exposure keyboard adjustment must execute");
+                        wait_for_snapshot(
+                            control,
+                            |value| value["develop"]["light"]["exposure"] != edited_exposure,
+                            "keyboard adjustment must reach engine before testing cancellation",
+                        );
                         control.key("Escape").expect("exposure Escape cancellation must execute");
-                        let cancelled = snapshot(control);
+                        let cancelled = wait_for_snapshot(
+                            control,
+                            |value| {
+                                value["develop"]["light"]["exposure"] == edited_exposure
+                                    && value["undo"].as_u64() == edited["undo"].as_u64()
+                            },
+                            "Escape cancellation did not settle through host bridge",
+                        );
                         assert_eq!(cancelled["develop"]["light"]["exposure"], edited_exposure, "Escape must cancel active slider gesture");
                         assert_eq!(cancelled["undo"].as_u64(), edited["undo"].as_u64(), "cancelled gesture must not create undo step");
                         control.move_to(300.0, 300.0).expect("pointer move must execute");
@@ -705,28 +749,28 @@ fn native_hidden_control_journeys() {
                         run(control, "crop.set", json!({"rect": [0.1, 0.1, 0.9, 0.9], "angle": 3.0}));
                         let crop = snapshot(control);
                         assert_ne!(crop["develop"]["crop"], before["develop"]["crop"], "crop command must change crop geometry");
-                        control.click(".stage-toolstrip button[aria-label='Crop']").expect("crop tool click must execute");
+                        click_dom(control, ".stage-toolstrip button[aria-label='Crop']", "crop tool click must execute");
                         wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Crop']")?.classList.contains('selected') === true;"#);
                         control.screenshot_to(&scenario.dir().join("tool-crop.png")).expect("crop tool screenshot must be captured");
 
                         run(control, "mask.add", json!({"kind": "radial", "center": [0.5, 0.5], "rx": 0.2, "ry": 0.2}));
                         let masked = snapshot(control);
                         assert_eq!(masked["develop"]["masks"].as_array().map(Vec::len), Some(1), "mask command must create mask state");
-                        control.click(".stage-toolstrip button[aria-label='Masking']").expect("masking tool click must execute");
+                        click_dom(control, ".stage-toolstrip button[aria-label='Masking']", "masking tool click must execute");
                         wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Masking']")?.classList.contains('selected') === true;"#);
                         control.screenshot_to(&scenario.dir().join("tool-masking.png")).expect("masking tool screenshot must be captured");
 
                         run(control, "spot.add", json!({"mode": "remove", "points": [[0.5, 0.5]], "size": 0.05, "source": [0.1, 0.0]}));
                         let spotted = snapshot(control);
                         assert_eq!(spotted["develop"]["spots"].as_array().map(Vec::len), Some(1), "remove tool command must create spot state");
-                        control.click(".stage-toolstrip button[aria-label='Remove']").expect("remove tool click must execute");
+                        click_dom(control, ".stage-toolstrip button[aria-label='Remove']", "remove tool click must execute");
                         wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Remove']")?.classList.contains('selected') === true;"#);
                         control.screenshot_to(&scenario.dir().join("tool-remove.png")).expect("remove tool screenshot must be captured");
 
                         run(control, "redeye.add", json!({"center": [0.5, 0.5], "rx": 0.1, "ry": 0.1}));
                         let red_eye = snapshot(control);
                         assert_eq!(red_eye["develop"]["red_eye"].as_array().map(Vec::len), Some(1), "red-eye command must create correction state");
-                        control.click(".stage-toolstrip button[aria-label='Red Eye']").expect("red-eye tool click must execute");
+                        click_dom(control, ".stage-toolstrip button[aria-label='Red Eye']", "red-eye tool click must execute");
                         wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Red Eye']")?.classList.contains('selected') === true;"#);
                         control.screenshot_to(&scenario.dir().join("tool-red-eye.png")).expect("red-eye tool screenshot must be captured");
                         assert_eq!(red_eye["active"].as_u64(), Some(active));
