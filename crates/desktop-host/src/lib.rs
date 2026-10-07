@@ -33,6 +33,7 @@ enum Request {
     ViewSlice { generation: Option<u64>, offset: usize, limit: usize, reply: SyncSender<Result<Value, String>> },
     Preview { request: PreviewRequest, reply: Sender<Result<PreviewDescriptor, String>> },
     Preferences { patch: Option<Value>, reply: SyncSender<Result<Value, String>> },
+    Persist { reply: SyncSender<Result<(), String>> },
     Shutdown { reply: SyncSender<Result<(), String>> },
 }
 
@@ -87,6 +88,9 @@ impl DesktopHandle {
     pub fn preferences(&self, patch: Option<Value>) -> Result<Value, String> {
         self.call(|reply| Request::Preferences { patch, reply })
     }
+    pub fn persist(&self) -> Result<(), String> {
+        self.call(|reply| Request::Persist { reply })
+    }
     pub fn shutdown(&self) -> Result<(), String> {
         self.call(|reply| Request::Shutdown { reply })
     }
@@ -137,6 +141,8 @@ mod tests {
         };
         assert_eq!(slice.get("generation").and_then(Value::as_u64), Some(generation));
         assert_eq!(slice.get("photos").and_then(Value::as_array).map(Vec::len), Some(2));
+        assert!(host.persist().is_ok());
+        assert!(host.run("library.save".into(), json!({})).is_ok());
         assert!(host.shutdown().is_ok());
         assert!(host.snapshot().is_err(), "closed owner must reject calls");
     }

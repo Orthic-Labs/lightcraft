@@ -6,6 +6,10 @@ mod preferences;
 mod services;
 
 use std::path::PathBuf;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use lightcraft_desktop_host::{DesktopHandle, HostOptions, PreviewRequest};
 use serde_json::{Value, json};
@@ -20,6 +24,8 @@ struct AppState {
     host: Option<DesktopHandle>,
     preferences: Preferences,
     startup_error: Option<String>,
+    /// One-shot close override set only by an explicit user-facing quit action.
+    closing: Arc<AtomicBool>,
 }
 
 fn blocking<T, F>(work: F) -> impl std::future::Future<Output = Result<T, String>>
@@ -107,9 +113,9 @@ async fn lc_native(action: String, params: Value, app: AppHandle<Wry>, state: St
                 path.to_string()
             } else {
                 let picker = if action == "backupLibrary" {
-                    services::run("saveFile", &json!({"suggestedName": "LightCraft Library Backup.lclibrary", "extensions": ["lclibrary", "zip"]}))
+                    services::run("saveFile", &json!({"suggestedName": "LightCraft Library Backup.lclibrary", "extensions": ["lclibrary"]}))
                 } else {
-                    services::run("openFile", &json!({"multiple": false, "extensions": ["lclibrary", "zip"]}))
+                    services::run("chooseFolder", &json!({}))
                 }?;
                 picker.get("path").and_then(Value::as_str).map(str::to_string).ok_or_else(|| "no library backup selected".to_string())?
             };
@@ -127,6 +133,24 @@ async fn lc_native(action: String, params: Value, app: AppHandle<Wry>, state: St
         return blocking(move || {
             let value = preferences.patch(Some(params))?;
             if let Some(host) = host { host.preferences(Some(value.clone())) } else { Ok(value) }
+        })
+        .await;
+    }
+    if action == "saveBeforeClose" {
+        let host = state.host.clone();
+        let startup_error = state.startup_error.clone();
+        let label = params.get("label").and_then(Value::as_str).unwrap_or("main").to_string();
+        let app_handle = app.clone();
+        return blocking(move || {
+            let host = host.as_ref().ok_or_else(|| startup_error.unwrap_or_else(|| "desktop host is unavailable".into()))?;
+            let snapshot = host.snapshot()?;
+            if let Some(reason) = active_close_reason(&snapshot) {
+                return Err(reason);
+            }
+            host.persist()?;
+            let window = app_handle.get_webview_window(&label).ok_or_else(|| format!("window {label} is unavailable"))?;
+            window.close().map_err(|error| format!("closing window: {error}"))?;
+            Ok(json!({"closed": true}))
         })
         .await;
     }
@@ -158,11 +182,31 @@ fn native_window_action(app: &AppHandle<Wry>, action: &str, params: &Value) -> R
             Ok(json!({"fullscreen": fullscreen}))
         }
         "confirmClose" | "closeWindow" => {
-            window.close().map_err(|error| format!("closing window: {error}"))?;
+            let force = params.get("force").and_then(Value::as_bool).unwrap_or(false);
+            if force {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.closing.store(true, Ordering::SeqCst);
+                }
+            }
+            if let Err(error) = window.close() {
+                if force {
+                    if let Some(state) = app.try_state::<AppState>() {
+                        state.closing.store(false, Ordering::SeqCst);
+                    }
+                }
+                return Err(format!("closing window: {error}"));
+            }
             Ok(Value::Null)
         }
         _ => Err(format!("unknown native window action {action}")),
     }
+}
+
+fn active_close_reason(snapshot: &Value) -> Option<String> {
+    let status = snapshot.get("status")?;
+    let active = ["importing", "exporting", "previewBuild"].into_iter().any(|key| status.get(key).and_then(Value::as_bool).unwrap_or(false))
+        || status.get("jobs").and_then(Value::as_array).is_some_and(|jobs| !jobs.is_empty());
+    active.then(|| "cannot close while a native task is active; wait for cancellation to settle".to_string())
 }
 
 #[cfg(feature = "qa-native")]
@@ -232,6 +276,18 @@ fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<Strin
                     host.preferences(Some(value.clone()))?;
                 }
                 value
+            } else if action == "saveBeforeClose" {
+                let state = app.try_state::<AppState>().ok_or_else(|| "desktop state is unavailable".to_string())?;
+                let host = state.host.clone().ok_or_else(|| state.startup_error.clone().unwrap_or_else(|| "desktop host is unavailable".into()))?;
+                let snapshot = host.snapshot()?;
+                if let Some(reason) = active_close_reason(&snapshot) {
+                    return Err(reason);
+                }
+                host.persist()?;
+                let label = params.get("label").and_then(Value::as_str).unwrap_or("main");
+                let window = app.get_webview_window(label).ok_or_else(|| format!("window {label} is unavailable"))?;
+                window.close().map_err(|error| format!("closing window: {error}"))?;
+                json!({"closed": true})
             } else if matches!(action, "secondWindow" | "fullscreen" | "toggleFullscreen" | "confirmClose" | "closeWindow") {
                 let mapped = if action == "fullscreen" { "toggleFullscreen" } else { action };
                 native_window_action(app, mapped, &params)?
@@ -351,11 +407,11 @@ pub fn run() {
                     if let Ok(value) = preferences.get() {
                         let _ = host.preferences(Some(value));
                     }
-                    app.manage(AppState { host: Some(host), preferences, startup_error: None });
+                    app.manage(AppState { host: Some(host), preferences, startup_error: None, closing: Arc::new(AtomicBool::new(false)) });
                     None
                 }
                 Err(error) => {
-                    app.manage(AppState { host: None, preferences, startup_error: Some(error.clone()) });
+                    app.manage(AppState { host: None, preferences, startup_error: Some(error.clone()), closing: Arc::new(AtomicBool::new(false)) });
                     Some(error)
                 }
             };
@@ -373,11 +429,21 @@ pub fn run() {
             use tauri::Emitter;
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
-                    if let Some(state) = window.app_handle().try_state::<AppState>()
-                        && let Some(host) = &state.host
-                        && let Ok(snapshot) = host.snapshot()
-                        && snapshot.pointer("/status/unsaved").and_then(Value::as_bool).unwrap_or(false)
-                    {
+                    let Some(state) = window.app_handle().try_state::<AppState>() else { return };
+                    let force = state.closing.swap(false, Ordering::SeqCst);
+                    let Some(host) = &state.host else { return };
+                    let snapshot = match host.snapshot() {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            api.prevent_close();
+                            let _ = window.emit("lc://error", json!({"message": error}));
+                            return;
+                        }
+                    };
+                    if let Some(reason) = active_close_reason(&snapshot) {
+                        api.prevent_close();
+                        let _ = window.emit("lc://close-requested", json!({"active": true, "message": reason}));
+                    } else if !force && snapshot.pointer("/status/unsaved").and_then(Value::as_bool).unwrap_or(false) {
                         api.prevent_close();
                         let _ = window.emit("lc://close-requested", json!({"unsaved": true}));
                     }
@@ -392,7 +458,6 @@ pub fn run() {
                         && let Err(error) = host.shutdown()
                     {
                         log::error!("desktop host shutdown failed: {error}");
-                        let _ = window.app_handle().emit("lc://error", json!({"message": format!("saving library on exit: {error}")}));
                     }
                 }
                 _ => {}

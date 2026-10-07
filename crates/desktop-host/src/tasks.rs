@@ -380,3 +380,35 @@ impl Default for Tasks {
         Self::new()
     }
 }
+
+#[cfg(test)]
+impl Tasks {
+    pub(crate) fn hold_for_test(&mut self) -> (Arc<AtomicBool>, Arc<AtomicBool>) {
+        let id = self.new_id("test");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let worker_release = release.clone();
+        let worker_started = started.clone();
+        let tx = self.tx.clone();
+        let worker_id = id.clone();
+        let worker = std::thread::spawn(move || {
+            worker_started.store(true, Ordering::Release);
+            while !worker_release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            let _ = tx.send(Event::Export { id: worker_id, result: Ok(Vec::new()), cancelled: true });
+        });
+        let task = Task {
+            id: id.clone(),
+            kind: "test".into(),
+            label: "Test task".into(),
+            total: Arc::new(AtomicUsize::new(1)),
+            completed: Arc::new(AtomicUsize::new(0)),
+            cancel,
+            worker: Some(worker),
+        };
+        self.jobs.insert(id, task);
+        (started, release)
+    }
+}

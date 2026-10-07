@@ -117,6 +117,11 @@ impl Controller {
                 let _ = reply.send(result);
                 false
             }
+            Request::Persist { reply } => {
+                let result = self.persist();
+                let _ = reply.send(result);
+                false
+            }
             Request::Shutdown { reply } => {
                 let result = self.shutdown();
                 let stop = result.is_ok();
@@ -136,6 +141,7 @@ impl Controller {
             "library.import" => self.tasks.start_import(&mut self.session, params),
             "library.backup" => self.backup(params),
             "library.restore" => self.restore(params),
+            "library.save" => self.persist().map(|()| Value::Null),
             "app.export.cancel" | "task.cancel" => self.tasks.cancel(params.get("taskId").or_else(|| params.get("id")).and_then(Value::as_str)),
             "ui.preferences" => self.preferences(Some(params.clone())),
             _ => self.session.execute(id, params).map_err(|error| error.to_string()),
@@ -188,6 +194,22 @@ impl Controller {
             return Err("preferences patch must be an object".into());
         }
         Ok(Value::Object(self.preferences.clone()))
+    }
+
+    fn persist(&mut self) -> Result<(), String> {
+        self.session.persist_if_dirty();
+        if let Err(error) = self.session.save_prefs() {
+            let message = error.to_string();
+            self.last_error = Some(message.clone());
+            return Err(message);
+        }
+        if let Some((count, error)) = self.session.unsaved() {
+            let message = format!("{count} library change(s) remain unsaved: {error}");
+            self.last_error = Some(message.clone());
+            return Err(message);
+        }
+        self.last_error = None;
+        Ok(())
     }
 
     fn poll(&mut self) {
@@ -307,5 +329,29 @@ fn copy_tree(source: &Path, destination: &Path, depth: usize) -> Result<(), Stri
         std::fs::copy(source, destination).map(|_| ()).map_err(|error| format!("backup copy {}: {error}", source.display()))
     } else {
         Err(format!("unsupported library entry {}", source.display()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+
+    #[test]
+    fn failed_shutdown_keeps_owner_available_until_task_finishes() {
+        let mut controller = Controller::new(HostOptions { demo: true, ..HostOptions::default() }, PreviewStore::default()).expect("demo controller");
+        let (started, release) = controller.tasks.hold_for_test();
+        while !started.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        assert!(controller.shutdown().is_err());
+        assert!(controller.snapshot().is_ok());
+        release.store(true, Ordering::Release);
+        while controller.tasks.running() {
+            controller.poll();
+            std::thread::yield_now();
+        }
+        assert!(controller.shutdown().is_ok());
     }
 }

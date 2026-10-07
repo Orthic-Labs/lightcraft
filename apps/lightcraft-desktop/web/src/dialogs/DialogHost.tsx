@@ -10,6 +10,7 @@ const text = (v: unknown, fallback = '') => typeof v === 'string' ? v : fallback
 const bool = (v: unknown, fallback = false) => typeof v === 'boolean' ? v : fallback;
 const num = (v: unknown, fallback = 0) => typeof v === 'number' && Number.isFinite(v) ? v : fallback;
 const arr = (v: unknown): any[] => Array.isArray(v) ? v : [];
+const errorText = (reason: unknown) => reason instanceof Error ? reason.message : reason && typeof reason === 'object' && 'message' in reason ? text((reason as AnyRecord).message, JSON.stringify(reason)) : String(reason);
 
 function useModalScope(open: boolean, onClose: () => void, dismissible = true) {
   const ref = useRef<HTMLDivElement>(null);
@@ -61,6 +62,35 @@ function JobDialog({ kind, desktop, d }: { kind: string; desktop: DesktopContext
   const reveal = async () => { const files = arr(d.params?.files || d.params?.paths); const path = text(files[0] || d.params?.path || d.params?.dir); if (path) await desktop.native('reveal', { path }); };
   const cancel = async () => { const job = desktop.snapshot?.status?.jobs?.find((j) => j.kind === jobKind); if (job) await desktop.run('task.cancel', { id: job.id }); };
   return <Frame title={kind.includes('import') ? 'Importing Photos' : kind.includes('merge') ? 'Merging Photos' : 'Exporting Photos'} dismissible={done} onClose={() => done && desktop.setDialog(null)} actions={<><Button disabled={!done} onClick={() => desktop.setDialog(null)}>Close</Button>{(kind.includes('export') && done) && <Button primary onClick={() => void reveal()}>Show in Folder</Button>}</>}><Progress snapshot={desktop.snapshot} label={kind.includes('import') ? 'Importing photos' : kind.includes('merge') ? 'Building merged photo' : 'Exporting photos'} onCancel={done ? undefined : () => void cancel()} />{done && <Note>Operation complete. Changes are recorded in library history.</Note>}</Frame>;
+}
+
+function UnsavedQuitDialog({ desktop, d }: { desktop: DesktopContextValue; d: DialogState }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const keepOpen = () => desktop.setDialog(null);
+  const saveAndQuit = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      await desktop.native('saveBeforeClose', d.params || {});
+      desktop.setDialog(null);
+    } catch (reason) {
+      setError(errorText(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const quitAnyway = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      await desktop.native('closeWindow', { force: true });
+    } catch (reason) {
+      setError(errorText(reason));
+      setBusy(false);
+    }
+  };
+  return <Frame title="Quit with unsaved changes?" busy={busy} onClose={keepOpen} actions={<><Button disabled={busy} onClick={keepOpen}>Keep Open</Button><Button disabled={busy} onClick={() => void quitAnyway()}>Quit Anyway</Button><Button primary disabled={busy} onClick={() => void saveAndQuit()}>Retry Save &amp; Quit</Button></>}><Note tone="warning">Some library changes could not be saved. Try saving again before closing.</Note>{typeof d.params?.error === 'string' && !error && <Note>{d.params.error}</Note>}{error && <Note tone="error">{error}</Note>}</Frame>;
 }
 
 async function choose(native: DesktopContextValue['native'], action: string, params: JsonObject = {}) { const result: AnyRecord = await native(action, params) as AnyRecord; if (typeof result === 'string') return [result]; if (Array.isArray(result)) return result.filter((p) => typeof p === 'string'); return arr(result?.paths || result?.files || result?.selected || (result?.path ? [result.path] : [] )).filter((p) => typeof p === 'string'); }
@@ -115,6 +145,7 @@ function LightroomResult({ d, desktop }: { d: DialogState; desktop: DesktopConte
 
 export default function DialogHost({ desktop: provided }: HostProps = {}) {
   const hookContext = useDesktop(); const context = provided || hookContext; const { dialog } = context; if (!dialog) return null; const kind = dialog.kind.toLowerCase();
+  if (kind === 'unsavedquit') return <UnsavedQuitDialog d={dialog} desktop={context} />;
   if (kind === 'import' || kind === 'importphotos' || kind === 'importfolder' || kind === 'importdevice') return <ImportDialog d={dialog} desktop={context} />;
   if (kind === 'lightroom' || kind === 'lightroomimport' || kind === 'importlightroom') return <LightroomDialog d={dialog} desktop={context} />;
   if (kind === 'export') return <ExportDialog d={dialog} desktop={context} />;

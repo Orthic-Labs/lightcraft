@@ -343,7 +343,9 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
       listen<JsonObject>('lc://error', (event) => { if (live) setError(messageOf(event.payload)); }),
       listen<JsonObject>('lc://notice', (event) => { if (live) setNotice(messageOf(event.payload)); }),
       listen<JsonObject>('lc://close-requested', (event) => {
-        if (live && event.payload?.unsaved === true) setNotice('Save changes before quitting.');
+        if (!live || event.payload?.unsaved !== true) return;
+        setDialog({ kind: 'unsavedQuit', params: { ...event.payload } });
+        void refresh();
       }),
     ]).then((stops) => { if (live) unlisten = stops; else stops.forEach((stop) => stop()); }).catch(() => undefined);
     return () => { live = false; unlisten.forEach((stop) => stop()); };

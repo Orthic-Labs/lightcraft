@@ -24,8 +24,8 @@ export interface UsePreviewResult {
   state: PreviewState;
   request: PreviewRequest;
   retry: () => void;
-  onImageLoad: () => void;
-  onImageError: () => void;
+  onImageLoad: (descriptor: PreviewDescriptor) => void;
+  onImageError: (descriptor: PreviewDescriptor) => void;
 }
 
 const MAX_DIMENSION = 8192;
@@ -44,7 +44,9 @@ function boundedDimension(value: number): number {
 /** Request native decoded pixels and ignore any result from an older generation or sequence. */
 export function usePreview(options: UsePreviewOptions): UsePreviewResult {
   const latestSequence = useRef(0);
-  const latestDescriptor = useRef<PreviewDescriptor | null>(null);
+  const activeDescriptor = useRef<PreviewDescriptor | null>(null);
+  const pendingRequest = useRef<PreviewRequest | null>(null);
+  const acknowledgedHandles = useRef<Set<string>>(new Set());
   const lastPhoto = useRef(options.photoId);
   const [retryValue, setRetryValue] = useState(0);
   const [state, setState] = useState<PreviewState>({ status: "idle", descriptor: null, url: null, error: null });
@@ -64,24 +66,36 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
   }, []);
 
   const acknowledge = useCallback((handle: string) => {
+    if (!handle || acknowledgedHandles.current.has(handle)) return;
+    acknowledgedHandles.current.add(handle);
     const bridge = (previewApi as unknown as { acknowledgePreview?: (value: string) => Promise<unknown> | unknown }).acknowledgePreview;
     if (!bridge) return;
     void Promise.resolve(bridge(handle)).catch(() => undefined);
   }, []);
 
-  const onImageLoad = useCallback(() => {
-    const descriptor = latestDescriptor.current;
-    if (descriptor) acknowledge(descriptor.handle);
+  const onImageLoad = useCallback((descriptor: PreviewDescriptor) => {
+    // Handler is bound to descriptor rendered into its <img>. A late event from an old
+    // element must never acknowledge a newer handle or alter current state.
+    if (activeDescriptor.current?.handle === descriptor.handle) acknowledge(descriptor.handle);
   }, [acknowledge]);
 
-  const onImageError = useCallback(() => {
-    const descriptor = latestDescriptor.current;
-    if (descriptor) acknowledge(descriptor.handle);
-    setState((previous) => ({ status: "error", descriptor: previous.descriptor, url: null, error: "Preview could not be decoded" }));
+  const onImageError = useCallback((descriptor: PreviewDescriptor) => {
+    if (activeDescriptor.current?.handle !== descriptor.handle) {
+      acknowledge(descriptor.handle);
+      return;
+    }
+    acknowledge(descriptor.handle);
+    // A request for a newer descriptor may already be replacing this image. Its eventual
+    // result owns error presentation; an old decode error only retires its handle.
+    if (pendingRequest.current && pendingRequest.current.sequence !== descriptor.sequence) return;
+    setState({ status: "error", descriptor, url: null, error: "Preview could not be decoded" });
   }, [acknowledge]);
 
   useEffect(() => {
     if (options.enabled === false || !Number.isSafeInteger(options.photoId) || options.photoId < 0) {
+      if (activeDescriptor.current) acknowledge(activeDescriptor.current.handle);
+      activeDescriptor.current = null;
+      pendingRequest.current = null;
       setState({ status: "idle", descriptor: null, url: null, error: null });
       return;
     }
@@ -91,19 +105,33 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
     let cancelled = false;
     const photoChanged = lastPhoto.current !== options.photoId;
     lastPhoto.current = options.photoId;
+    if (photoChanged) {
+      if (activeDescriptor.current) acknowledge(activeDescriptor.current.handle);
+      activeDescriptor.current = null;
+    }
+    pendingRequest.current = current;
     setState((previous) => photoChanged
       ? { status: "loading", descriptor: null, url: null, error: null }
       : { status: "loading", descriptor: previous.descriptor, url: previous.url, error: null });
     void requestPreview(current)
       .then((descriptor) => {
-        if (cancelled || descriptor.photoId !== current.photoId || descriptor.viewGeneration !== current.viewGeneration || descriptor.sequence !== current.sequence) return;
+        const matches = descriptor.photoId === current.photoId && descriptor.slot === current.slot && descriptor.viewGeneration === current.viewGeneration && descriptor.sequence === current.sequence;
+        if (cancelled || !matches) {
+          // Every returned handle must be retired, including responses which lose a race
+          // against unmount, remount, photo swap, or a newer sequence.
+          acknowledge(descriptor.handle);
+          return;
+        }
+        pendingRequest.current = null;
+        if (activeDescriptor.current && activeDescriptor.current.handle !== descriptor.handle) acknowledge(activeDescriptor.current.handle);
+        activeDescriptor.current = descriptor;
         const url = `lightcraft-preview://${descriptor.handle}`;
-        latestDescriptor.current = descriptor;
         options.onHistogram?.(descriptor.histogram);
         setState({ status: "ready", descriptor, url, error: null });
       })
       .catch((error: unknown) => {
-        if (cancelled) return;
+        if (cancelled || pendingRequest.current?.sequence !== current.sequence) return;
+        pendingRequest.current = null;
         const message = error instanceof Error ? error.message : String(error);
         setState((previous) => ({ status: "error", descriptor: previous.descriptor, url: previous.url, error: message || "Preview unavailable" }));
       });
