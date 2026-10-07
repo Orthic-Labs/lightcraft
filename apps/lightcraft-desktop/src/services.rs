@@ -2,15 +2,83 @@
 
 #![forbid(unsafe_code)]
 
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
 const MAX_PATHS: usize = 512;
+const MAX_PREFERENCES_BYTES: usize = 4 * 1024 * 1024;
 const PHOTO_EXTENSIONS: &[&str] =
     &["jpg", "jpeg", "png", "tif", "tiff", "webp", "dng", "cr2", "cr3", "nef", "nrw", "arw", "raf", "orf", "rw2", "pef", "psd", "jxl", "gif", "bmp"];
 const PRESET_EXTENSIONS: &[&str] = &["lcpreset", "xmp", "lrtemplate", "zip", "dng", "lmp", "mplumpack", "cube"];
+
+/// Return legacy LightCraft's UI state location for one-time migration.
+pub fn legacy_preferences_path() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        return std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Application Support/LightCraft/ui.json"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return std::env::var_os("APPDATA").map(|app_data| PathBuf::from(app_data).join("LightCraft/ui.json"));
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// Copy valid legacy preferences into a missing destination without touching the source.
+/// Unknown preference fields remain byte-for-byte intact. `Ok(false)` means no migration was needed.
+pub fn migrate_preferences(source: &Path, destination: &Path) -> Result<bool, String> {
+    if destination.exists() {
+        return Ok(false);
+    }
+    let bytes = match fs::read(source) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("legacy preferences could not be read: {error}")),
+    };
+    if bytes.len() > MAX_PREFERENCES_BYTES {
+        return Err(format!("legacy preferences exceed {MAX_PREFERENCES_BYTES} bytes"));
+    }
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(Value::Object(_)) => {}
+        Ok(_) => return Err("legacy preferences must be a JSON object".into()),
+        Err(error) => return Err(format!("legacy preferences are invalid: {error}")),
+    }
+    let parent = destination.parent().ok_or_else(|| "preferences destination has no parent".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| format!("creating preferences directory: {error}"))?;
+    let name = destination.file_name().and_then(|name| name.to_str()).unwrap_or("ui.json");
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_nanos()).unwrap_or(0);
+    let temporary = parent.join(format!(".{name}.migrate-{}-{stamp}", std::process::id()));
+    let result = (|| {
+        let mut file = OpenOptions::new().create_new(true).write(true).open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        if destination.exists() {
+            return Ok(false);
+        }
+        fs::rename(&temporary, destination)?;
+        if let Ok(directory) = File::open(parent) {
+            let _ = directory.sync_all();
+        }
+        Ok(true)
+    })();
+    match result {
+        Ok(true) => Ok(true),
+        Ok(false) => {
+            let _ = fs::remove_file(&temporary);
+            Ok(false)
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            Err(format!("migrating legacy preferences: {error}"))
+        }
+    }
+}
 
 pub fn run(action: &str, params: &Value) -> Result<Value, String> {
     match action {
@@ -210,4 +278,44 @@ fn reveal(path: &str) -> Result<(), String> {
         Command::new("xdg-open").arg(directory).status()
     };
     status.map_err(|error| format!("revealing path: {error}"))?.success().then_some(()).ok_or_else(|| "reveal failed".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn fixture_dir() -> PathBuf {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_nanos()).unwrap_or(0);
+        std::env::temp_dir().join(format!("lightcraft-native-preferences-{}-{stamp}", std::process::id()))
+    }
+
+    #[test]
+    fn migration_copies_unknown_fields_once() -> Result<(), Box<dyn std::error::Error>> {
+        let root = fixture_dir();
+        fs::create_dir_all(&root)?;
+        let source = root.join("legacy-ui.json");
+        let destination = root.join("new/ui.json");
+        fs::write(&source, br#"{"libraryPath":"/catalog","futureField":{"keep":true}}"#)?;
+        assert!(migrate_preferences(&source, &destination)?);
+        assert_eq!(fs::read(&source)?, fs::read(&destination)?);
+        assert!(!migrate_preferences(&source, &destination)?);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn migration_preserves_corrupt_source() -> Result<(), Box<dyn std::error::Error>> {
+        let root = fixture_dir();
+        fs::create_dir_all(&root)?;
+        let source = root.join("legacy-ui.json");
+        let destination = root.join("new/ui.json");
+        let corrupt = br#"{"libraryPath":"unterminated""#;
+        fs::write(&source, corrupt)?;
+        assert!(migrate_preferences(&source, &destination).is_err());
+        assert_eq!(fs::read(&source)?, corrupt);
+        assert!(!destination.exists());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }

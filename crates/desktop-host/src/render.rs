@@ -206,7 +206,7 @@ impl Renderer {
             let _ = reply.send(Err("preview request is stale".to_string()));
             return Ok(());
         }
-        let job: QuickJob = session
+        let job = session
             .quick_view_job(PhotoId(request.photo_id), request.width.max(request.height) as usize, true)
             .ok_or_else(|| "photo is unavailable".to_string());
         let job = match job {

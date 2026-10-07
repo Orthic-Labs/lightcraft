@@ -12,6 +12,7 @@ const DEFAULT_UI: UiState = {
   slideshow: false, infoOverlay: 0, maskOverlay: false, maskOverlayMode: 'selected', maskPins: true,
   clipping: false, theme: 'system', locale: 'en', sections: { light: true, color: true, effects: true, detail: false, optics: false },
   autoAdvance: false, gridInfo: true, softProof: false, brushSize: 100, brushFeather: 50, cropOverlay: 'thirds', filterText: '',
+  confirmDelete: false, gpu: true, previewEdge: 2560, memoryMb: 0, externalEditor: '', filmNames: true, filmBadges: true,
 };
 
 const DesktopContext = createContext<DesktopContextValue | null>(null);
@@ -34,8 +35,89 @@ function mergeUi(value: unknown): Partial<UiState> {
   return next;
 }
 
+function objectOf(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/** Map legacy egui UiState once; a persisted `ui` object becomes migration sentinel. */
+function migrateLegacyUi(value: JsonObject): Partial<UiState> {
+  const next: Partial<UiState> = {};
+  const legacy = value;
+  const settings = objectOf(legacy.settings);
+  const view = legacy.view;
+  const panel = legacy.right;
+  const viewModes: UiState['view'][] = ['photoGrid', 'squareGrid', 'detail', 'compare', 'survey', 'people', 'reference'];
+  const panels: Array<Exclude<UiState['panel'], null>> = ['edit', 'profiles', 'crop', 'remove', 'masking', 'redeye', 'presets', 'info', 'keywords', 'versions', 'activity'];
+
+  if (typeof legacy.language === 'string' && ['en', 'zh-hans', 'zh-hant', 'ja'].includes(legacy.language.toLowerCase())) next.locale = legacy.language.toLowerCase();
+  if (typeof view === 'string' && viewModes.includes(view as UiState['view'])) next.view = view as UiState['view'];
+  const startupView = settings?.startupView;
+  if (next.view === undefined && startupView === 'grid') next.view = 'photoGrid';
+  if (next.view === undefined && startupView === 'detail') next.view = 'detail';
+  if (typeof legacy.leftPanel === 'boolean') next.sidebarCollapsed = !legacy.leftPanel;
+  const leftWidth = finiteNumber(legacy.leftWidth);
+  if (leftWidth !== null) next.sidebarWidth = leftWidth;
+  const rightWidth = finiteNumber(legacy.rightWidth);
+  if (rightWidth !== null) next.inspectorWidth = rightWidth;
+  if (typeof panel === 'string') {
+    const normalized = panel === 'redEye' ? 'redeye' : panel;
+    if (normalized === 'none') next.inspectorCollapsed = true;
+    else if (panels.includes(normalized as Exclude<UiState['panel'], null>)) {
+      next.panel = normalized as UiState['panel'];
+      next.inspectorCollapsed = false;
+    }
+  }
+  if (typeof legacy.filmstrip === 'boolean') next.filmstrip = legacy.filmstrip;
+  if (typeof legacy.thumbSize === 'number' && Number.isFinite(legacy.thumbSize)) next.thumbSize = legacy.thumbSize;
+  if (typeof legacy.beforeAfter === 'string' && ['off', 'sideBySide', 'split', 'topBottom', 'splitTopBottom', 'original'].includes(legacy.beforeAfter)) next.beforeAfter = legacy.beforeAfter as UiState['beforeAfter'];
+  if (typeof legacy.clickZoom === 'number' && Number.isFinite(legacy.clickZoom)) next.clickZoom = Math.max(1, Math.min(8, legacy.clickZoom / 100));
+  if (legacy.zoom === 'fit' || legacy.zoom === 'fill') next.zoom = legacy.zoom;
+  else {
+    const zoom = finiteNumber(legacy.zoom) ?? finiteNumber(objectOf(legacy.zoom)?.percent);
+    if (zoom !== null) next.zoom = Math.max(0.1, zoom / (zoom > 16 ? 100 : 1));
+  }
+  if (typeof legacy.showClipping === 'boolean') next.clipping = legacy.showClipping;
+  if (typeof legacy.softProof === 'boolean') next.softProof = legacy.softProof;
+  if (typeof legacy.maskOverlay === 'boolean') next.maskOverlay = legacy.maskOverlay;
+  if (typeof legacy.maskOverlayMode === 'string') next.maskOverlayMode = legacy.maskOverlayMode;
+  if (typeof legacy.maskPins === 'boolean') next.maskPins = legacy.maskPins;
+  if (typeof legacy.cropOverlay === 'string') next.cropOverlay = legacy.cropOverlay;
+  if (typeof legacy.search === 'string') next.filterText = legacy.search;
+  if (typeof legacy.filterBar === 'boolean') next.filterBar = legacy.filterBar;
+  if (typeof legacy.autoAdvance === 'boolean') next.autoAdvance = legacy.autoAdvance;
+  if (typeof legacy.navigator === 'boolean') next.navigator = legacy.navigator;
+  if (typeof legacy.gridInfo === 'string') next.gridInfo = legacy.gridInfo !== 'none';
+  else if (typeof legacy.showCounts === 'boolean') next.gridInfo = legacy.showCounts;
+  const infoOverlay = legacy.infoOverlay;
+  if (infoOverlay === 'off') next.infoOverlay = 0;
+  else if (infoOverlay === 'basic') next.infoOverlay = 1;
+  else if (infoOverlay === 'exposure') next.infoOverlay = 2;
+  const sections = { ...DEFAULT_UI.sections };
+  if (Array.isArray(legacy.openSections)) legacy.openSections.forEach((section) => { if (typeof section === 'string') sections[section] = true; });
+  if (Array.isArray(legacy.openSections)) next.sections = sections;
+  const gridBadges = settings?.gridBadges;
+  if (gridBadges === 'never') next.gridInfo = false;
+  else if (gridBadges === 'always' || gridBadges === 'auto') next.gridInfo = true;
+  if (typeof settings?.confirmDelete === 'boolean') next.confirmDelete = settings.confirmDelete;
+  if (typeof settings?.gpu === 'boolean') next.gpu = settings.gpu;
+  const previewEdge = finiteNumber(settings?.previewEdge);
+  if (previewEdge !== null) next.previewEdge = Math.max(512, Math.min(16384, Math.round(previewEdge)));
+  const memoryMb = finiteNumber(settings?.memoryMb);
+  if (memoryMb !== null) next.memoryMb = Math.max(0, Math.min(1_048_576, Math.round(memoryMb)));
+  if (typeof settings?.externalEditor === 'string') next.externalEditor = settings.externalEditor;
+  if (typeof settings?.filmNames === 'boolean') next.filmNames = settings.filmNames;
+  if (typeof settings?.filmBadges === 'boolean') next.filmBadges = settings.filmBadges;
+  return next;
+}
+
 function clampUi(next: Partial<UiState>, current: UiState): Partial<UiState> {
   const result = { ...next } as Partial<UiState>;
+  if (typeof result.previewEdge === 'number' && Number.isFinite(result.previewEdge)) result.previewEdge = Math.max(512, Math.min(16384, Math.round(result.previewEdge)));
+  if (typeof result.memoryMb === 'number' && Number.isFinite(result.memoryMb)) result.memoryMb = Math.max(0, Math.min(1_048_576, Math.round(result.memoryMb)));
   if (typeof result.sidebarWidth === 'number') result.sidebarWidth = Math.max(220, Math.min(420, result.sidebarWidth));
   if (typeof result.inspectorWidth === 'number') result.inspectorWidth = Math.max(260, Math.min(520, result.inspectorWidth));
   if (typeof result.sidebarWidth === 'number' || typeof result.inspectorWidth === 'number') {
@@ -54,7 +136,35 @@ function clampUi(next: Partial<UiState>, current: UiState): Partial<UiState> {
 
 function preferenceUi(preferences: JsonObject | undefined): Partial<UiState> {
   if (!preferences) return {};
-  return mergeUi(preferences.ui ?? preferences.layout ?? preferences);
+  if (objectOf(preferences.ui) || objectOf(preferences.layout)) {
+    const source = objectOf(preferences.ui ?? preferences.layout) ?? {};
+    const next = mergeUi(source);
+    const general = objectOf(source.general) ?? {};
+    const performance = objectOf(source.performance) ?? {};
+    const nested = { ...general, ...performance };
+    const setIfAbsent = <K extends keyof UiState>(key: K, value: unknown) => {
+      if (next[key] !== undefined) return;
+      (next[key] as unknown) = value;
+    };
+    if (general.theme === 'light' || general.theme === 'dark' || general.theme === 'system') setIfAbsent('theme', general.theme);
+    if (typeof general.locale === 'string') setIfAbsent('locale', general.locale);
+    if (typeof nested.confirmDelete === 'boolean') setIfAbsent('confirmDelete', nested.confirmDelete);
+    if (typeof nested.gpu === 'boolean') setIfAbsent('gpu', nested.gpu);
+    const edge = finiteNumber(nested.previewEdge);
+    if (edge !== null) setIfAbsent('previewEdge', Math.max(512, Math.min(16384, Math.round(edge))));
+    const memory = finiteNumber(nested.memoryMb ?? nested.cacheMb);
+    if (memory !== null) setIfAbsent('memoryMb', Math.max(0, Math.min(1_048_576, Math.round(memory))));
+    if (typeof nested.externalEditor === 'string') setIfAbsent('externalEditor', nested.externalEditor);
+    if (typeof nested.filmNames === 'boolean') setIfAbsent('filmNames', nested.filmNames);
+    if (typeof nested.filmBadges === 'boolean') setIfAbsent('filmBadges', nested.filmBadges);
+    // Native migration preserves legacy root fields. Fill only settings absent from newer React UI.
+    const legacy = migrateLegacyUi(preferences);
+    (Object.keys(legacy) as Array<keyof UiState>).forEach((key) => {
+      if (next[key] === undefined) (next[key] as unknown) = legacy[key];
+    });
+    return next;
+  }
+  return migrateLegacyUi(preferences);
 }
 
 function dialogForCommand(id: string): DialogState | null {
@@ -94,7 +204,10 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [histogram, setHistogram] = useState<unknown>(null);
   const prefHydrated = useRef(false);
+  const enginePrefsApplied = useRef<{ gpu: boolean; memoryMb: number } | null>(null);
   const refreshInFlight = useRef<Promise<void> | null>(null);
+  const noticeQueue = useRef<string[] | null>(null);
+  const liveNotice = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (refreshInFlight.current) return refreshInFlight.current;
@@ -105,8 +218,19 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
         prefHydrated.current = true;
         setUiState((current) => ({ ...current, ...preferenceUi(next.preferences) }));
       }
-      const statusNotice = next.status?.notices?.at(-1);
-      if (statusNotice) setNotice(statusNotice);
+      const notices = Array.isArray(next.status?.notices) ? next.status.notices.filter((value): value is string => typeof value === 'string') : [];
+      const previous = noticeQueue.current;
+      const latest = notices.at(-1);
+      const appended = previous === null
+        ? notices.length > 0
+        : notices.length > previous.length && previous.every((value, index) => notices[index] === value)
+          || notices.length > 0 && notices.at(-1) !== previous.at(-1);
+      const emittedByEvent = liveNotice.current;
+      liveNotice.current = null;
+      // Snapshot notices are a durable queue. Emit only on queue growth/replacement;
+      // dismissing notice then polling same snapshot cannot resurrect it.
+      if (latest && appended && emittedByEvent !== latest) setNotice(latest);
+      noticeQueue.current = notices;
     }).catch((reason: unknown) => {
       setError(messageOf(reason));
     }).finally(() => {
@@ -117,6 +241,23 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
+
+  // Host snapshot is authoritative, but app-level rendering preferences are engine commands;
+  // apply them once after persisted UI settings hydrate, before preview requests begin.
+  useEffect(() => {
+    if (!snapshot || !prefHydrated.current) return;
+    const previous = enginePrefsApplied.current;
+    if (previous?.gpu === ui.gpu && previous.memoryMb === ui.memoryMb) return;
+    enginePrefsApplied.current = { gpu: ui.gpu, memoryMb: ui.memoryMb };
+    const commands: Array<Promise<unknown>> = [];
+    if (!previous || previous.gpu !== ui.gpu) commands.push(runCommand('app.gpu', { enabled: ui.gpu }));
+    if ((!previous || previous.memoryMb !== ui.memoryMb) && ui.memoryMb >= 64) commands.push(runCommand('app.memoryBudget', { mb: ui.memoryMb }));
+    if (!commands.length) return;
+    void Promise.allSettled(commands).then((results) => {
+      const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (rejected) setError(messageOf(rejected.reason));
+    });
+  }, [snapshot, ui.gpu, ui.memoryMb]);
 
   useEffect(() => {
     let timer: number | undefined;
@@ -146,6 +287,10 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
 
   const run = useCallback(async (id: string, params: JsonObject = {}): Promise<unknown> => {
     try {
+      if ((id === 'photo.delete' || id === 'photo.deletePermanently') && ui.confirmDelete && params.confirmed !== true) {
+        setDialog({ kind: 'confirmDelete', params: { ...params, command: id } });
+        return null;
+      }
       if ((UI_COMMAND_IDS as readonly string[]).includes(id)) {
         const nextDialog = dialogForCommand(id);
         if (nextDialog) setDialog(nextDialog);
@@ -202,7 +347,8 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
         if (id === 'photo.editInExternal') {
           const result = await runCommand('photo.editExternal', params) as JsonObject;
           const path = firstPath(result?.path);
-          if (path) await nativeAction('openExternalEditor', { path, app: params.app });
+          const requestedEditor = typeof params.app === 'string' && params.app.trim() ? params.app : ui.externalEditor;
+          if (path) await nativeAction('openExternalEditor', { path, app: requestedEditor || undefined });
           return result;
         }
         if (id === 'app.showInFinder') {
@@ -313,11 +459,15 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
       setError(text);
       throw reason;
     }
-  }, [refresh, setUi]);
+  }, [refresh, setUi, ui.confirmDelete, ui.externalEditor]);
 
   const native = useCallback(async (action: string, params: JsonObject = {}): Promise<unknown> => {
     try {
       const result = await nativeAction(action, params);
+      if (action === 'preferences.patch' && result && typeof result === 'object' && !Array.isArray(result)) {
+        const patch = preferenceUi(result as JsonObject);
+        if (Object.keys(patch).length) setUi(patch);
+      }
       setError(null);
       return result;
     } catch (reason: unknown) {
@@ -325,7 +475,7 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
       setError(text);
       throw reason;
     }
-  }, []);
+  }, [setUi]);
 
   useEffect(() => {
     let live = true;
@@ -341,7 +491,12 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
         }).catch((reason: unknown) => setError(messageOf(reason)));
       }),
       listen<JsonObject>('lc://error', (event) => { if (live) setError(messageOf(event.payload)); }),
-      listen<JsonObject>('lc://notice', (event) => { if (live) setNotice(messageOf(event.payload)); }),
+      listen<JsonObject>('lc://notice', (event) => {
+        if (!live) return;
+        const message = messageOf(event.payload);
+        liveNotice.current = message;
+        setNotice(message);
+      }),
       listen<JsonObject>('lc://close-requested', (event) => {
         if (!live) return;
         if (event.payload?.unsaved === true) {

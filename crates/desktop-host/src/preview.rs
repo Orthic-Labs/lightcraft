@@ -138,7 +138,7 @@ pub fn encode_png(image: &lightcraft_raster::Rgba8) -> Result<Vec<u8>, String> {
         let mut encoder = png::Encoder::new(&mut encoded, width, height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_srgb(png::SrgbRenderingIntent::Perceptual);
+        encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
         let mut writer = encoder.write_header().map_err(|error| format!("preview PNG header: {error}"))?;
         writer.write_image_data(&image.as_bytes()).map_err(|error| format!("preview PNG data: {error}"))?;
     }

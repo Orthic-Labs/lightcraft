@@ -101,6 +101,7 @@ impl Tasks {
             total: total_counter.clone(),
             completed: completed.clone(),
             cancel: cancel.clone(),
+            worker: None,
         };
         let tx = self.tx.clone();
         let id_for_worker = task_id.clone();
@@ -151,7 +152,15 @@ impl Tasks {
         let completed = job.done.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let task_id = self.new_id("import");
-        let task = Task { id: task_id.clone(), kind: "import".into(), label: "Import Photos".into(), total, completed, cancel: cancel.clone() };
+        let task = Task {
+            id: task_id.clone(),
+            kind: "import".into(),
+            label: "Import Photos".into(),
+            total,
+            completed,
+            cancel: cancel.clone(),
+            worker: None,
+        };
         let tx = self.tx.clone();
         let id_for_worker = task_id.clone();
         let paths = request.paths;
@@ -272,8 +281,9 @@ impl Tasks {
         id
     }
 
-    fn insert(&mut self, task: Task) -> Result<(), String> {
+    fn insert(&mut self, mut task: Task) -> Result<(), String> {
         if self.jobs.len() >= MAX_TASKS {
+            task.cancel.store(true, Ordering::Relaxed);
             if let Some(worker) = task.worker {
                 let _ = worker.join();
             }

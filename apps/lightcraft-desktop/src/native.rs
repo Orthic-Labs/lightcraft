@@ -10,6 +10,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::{fs, path::Path};
 
 use lightcraft_desktop_host::{DesktopHandle, HostOptions, PreviewRequest};
 use serde_json::{Value, json};
@@ -24,6 +25,7 @@ struct AppState {
     host: Option<DesktopHandle>,
     preferences: Preferences,
     startup_error: Option<String>,
+    startup_warnings: Vec<String>,
     /// One-shot close override set only by an explicit user-facing quit action.
     closing: Arc<AtomicBool>,
 }
@@ -40,16 +42,52 @@ where
 async fn lc_run(state: State<'_, AppState>, id: String, params: Value) -> Result<Value, String> {
     let host = state.host.clone();
     let error = state.startup_error.clone();
-    blocking(move || host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into())).and_then(|host| host.run(id, params)))
-        .await
+    let preferences = state.preferences.clone();
+    let restore = id == "library.restore";
+    blocking(move || {
+        let result =
+            host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into())).and_then(|host| host.run(id, params))?;
+        if restore { persist_library_path(&preferences, host.as_ref(), result, None) } else { Ok(result) }
+    })
+    .await
 }
 
 #[tauri::command]
 async fn lc_snapshot(state: State<'_, AppState>) -> Result<Value, String> {
     let host = state.host.clone();
     let error = state.startup_error.clone();
-    blocking(move || host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into())).and_then(DesktopHandle::snapshot))
-        .await
+    let warnings = state.startup_warnings.clone();
+    blocking(move || {
+        let snapshot =
+            host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into())).and_then(DesktopHandle::snapshot)?;
+        Ok(merge_startup_warnings(snapshot, &warnings))
+    })
+    .await
+}
+
+fn merge_startup_warnings(mut snapshot: Value, warnings: &[String]) -> Value {
+    if !snapshot.get("status").is_some_and(Value::is_object) {
+        if let Some(object) = snapshot.as_object_mut() {
+            object.insert("status".into(), json!({}));
+        }
+    }
+    let Some(status) = snapshot.get_mut("status").and_then(Value::as_object_mut) else { return snapshot };
+    let notices = status.entry("notices").or_insert_with(|| json!([]));
+    if !notices.is_array() {
+        *notices = json!([]);
+    }
+    if let Some(notices) = notices.as_array_mut() {
+        for warning in warnings.iter().take(16) {
+            if !notices.iter().any(|notice| notice.as_str() == Some(warning)) {
+                notices.push(Value::String(warning.clone()));
+            }
+        }
+        if notices.len() > 64 {
+            let remove = notices.len() - 64;
+            notices.drain(..remove);
+        }
+    }
+    snapshot
 }
 
 #[tauri::command]
@@ -108,11 +146,13 @@ async fn lc_native(action: String, params: Value, app: AppHandle<Wry>, state: St
     if action == "openLibrary" {
         let host = state.host.clone();
         let startup_error = state.startup_error.clone();
-        return blocking(move || open_library_action(host, startup_error, params)).await;
+        let preferences = state.preferences.clone();
+        return blocking(move || open_library_action(host, startup_error, preferences, params)).await;
     }
     if matches!(action.as_str(), "backupLibrary" | "restoreLibrary") {
         let host = state.host.clone();
         let startup_error = state.startup_error.clone();
+        let preferences = state.preferences.clone();
         return blocking(move || {
             let path = if let Some(path) = params.get("path").and_then(Value::as_str) {
                 path.to_string()
@@ -124,11 +164,12 @@ async fn lc_native(action: String, params: Value, app: AppHandle<Wry>, state: St
                 }?;
                 picker.get("path").and_then(Value::as_str).map(str::to_string).ok_or_else(|| "no library backup selected".to_string())?
             };
-            if path.is_empty() || path.len() > 8_192 {
+            if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
                 return Err("invalid library backup path".into());
             }
             let host = host.as_ref().ok_or_else(|| startup_error.unwrap_or_else(|| "desktop host is unavailable".into()))?;
-            host.run(if action == "backupLibrary" { "library.backup" } else { "library.restore" }.into(), json!({"path": path}))
+            let result = host.run(if action == "backupLibrary" { "library.backup" } else { "library.restore" }.into(), json!({"path": path}))?;
+            if action == "restoreLibrary" { persist_library_path(&preferences, Some(host), result, None) } else { Ok(result) }
         })
         .await;
     }
@@ -166,7 +207,7 @@ async fn lc_native(action: String, params: Value, app: AppHandle<Wry>, state: St
     blocking(move || services::run(&action, &params)).await
 }
 
-fn open_library_action(host: Option<DesktopHandle>, startup_error: Option<String>, params: Value) -> Result<Value, String> {
+fn open_library_action(host: Option<DesktopHandle>, startup_error: Option<String>, preferences: Preferences, params: Value) -> Result<Value, String> {
     let picked = services::run("openLibrary", &params)?;
     let Some(path) = picked.get("path").and_then(Value::as_str) else {
         return Ok(json!({"cancelled": true}));
@@ -175,7 +216,26 @@ fn open_library_action(host: Option<DesktopHandle>, startup_error: Option<String
         return Err("invalid library path".into());
     }
     let host = host.ok_or_else(|| startup_error.unwrap_or_else(|| "desktop host is unavailable".into()))?;
-    host.run("library.open".into(), json!({"path": path}))
+    let result = host.run("library.open".into(), json!({"path": path}))?;
+    persist_library_path(&preferences, Some(&host), result, Some(path))
+}
+
+fn persist_library_path(preferences: &Preferences, host: Option<&DesktopHandle>, result: Value, fallback: Option<&str>) -> Result<Value, String> {
+    let path = result
+        .get("libraryPath")
+        .and_then(Value::as_str)
+        .or_else(|| result.get("restoredPath").and_then(Value::as_str))
+        .or_else(|| result.get("path").and_then(Value::as_str))
+        .or(fallback)
+        .ok_or_else(|| "library operation returned no library path".to_string())?;
+    if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
+        return Err("library operation returned an invalid library path".into());
+    }
+    let value = preferences.patch(Some(json!({"libraryPath": path})))?;
+    if let Some(host) = host {
+        host.preferences(Some(value))?;
+    }
+    Ok(result)
 }
 
 fn native_window_action(app: &AppHandle<Wry>, action: &str, params: &Value) -> Result<Value, String> {
@@ -269,9 +329,19 @@ fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<Strin
         "lc_run" => {
             let object = args.as_object().ok_or_else(|| "lc_run expects an object".to_string())?;
             let id = object.get("id").and_then(Value::as_str).ok_or_else(|| "lc_run requires id".to_string())?;
-            control_host(app)?.run(id.to_string(), object.get("params").cloned().unwrap_or_else(|| json!({})))?
+            let host = control_host(app)?;
+            let result = host.run(id.to_string(), object.get("params").cloned().unwrap_or_else(|| json!({})))?;
+            if id == "library.restore" {
+                let state = app.try_state::<AppState>().ok_or_else(|| "desktop state is unavailable".to_string())?;
+                persist_library_path(&state.preferences, Some(&host), result, None)?
+            } else {
+                result
+            }
         }
-        "lc_snapshot" => control_host(app)?.snapshot()?,
+        "lc_snapshot" => {
+            let state = app.try_state::<AppState>().ok_or_else(|| "desktop state is unavailable".to_string())?;
+            merge_startup_warnings(control_host(app)?.snapshot()?, &state.startup_warnings)
+        }
         "lc_view_slice" => {
             let object = args.as_object().ok_or_else(|| "lc_view_slice expects an object".to_string())?;
             let generation = object.get("generation").and_then(Value::as_u64);
@@ -306,10 +376,17 @@ fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<Strin
             let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
             if action == "openLibrary" {
                 let state = app.try_state::<AppState>().ok_or_else(|| "desktop state is unavailable".to_string())?;
-                open_library_action(state.host.clone(), state.startup_error.clone(), params)?
+                open_library_action(state.host.clone(), state.startup_error.clone(), state.preferences.clone(), params)?
             } else if matches!(action, "backupLibrary" | "restoreLibrary") {
                 let path = params.get("path").and_then(Value::as_str).ok_or_else(|| format!("{action} requires path in QA control mode"))?;
-                control_host(app)?.run(if action == "backupLibrary" { "library.backup" } else { "library.restore" }.into(), json!({"path": path}))?
+                let host = control_host(app)?;
+                let result = host.run(if action == "backupLibrary" { "library.backup" } else { "library.restore" }.into(), json!({"path": path}))?;
+                if action == "restoreLibrary" {
+                    let state = app.try_state::<AppState>().ok_or_else(|| "desktop state is unavailable".to_string())?;
+                    persist_library_path(&state.preferences, Some(&host), result, None)?
+                } else {
+                    result
+                }
             } else if action == "preferences.patch" {
                 let state = app.try_state::<AppState>().ok_or_else(|| "desktop state is unavailable".to_string())?;
                 let value = state.preferences.patch(Some(params))?;
@@ -383,31 +460,146 @@ fn response(status: u16, body: Vec<u8>, content_type: &str) -> Response<Vec<u8>>
         .unwrap_or_else(|_| Response::new(Vec::new()))
 }
 
-fn startup_options(app: &AppHandle<Wry>) -> (HostOptions, PathBuf) {
-    let args: Vec<String> = std::env::args().collect();
-    let explicit = args
-        .windows(2)
-        .find(|pair| pair.first().is_some_and(|arg| arg == "--library"))
-        .and_then(|pair| pair.get(1))
-        .map(PathBuf::from)
-        .or_else(|| args.iter().find_map(|arg| arg.strip_prefix("--library=")).map(PathBuf::from));
+const PRIMARY_IDENTIFIER: &str = "ai.storyteller.lightcraft";
+const MAX_PERSISTED_LIBRARY_PATH: usize = 8_192;
+
+fn runtime_modes(args: &[String]) -> (bool, Option<PathBuf>) {
     #[cfg(feature = "qa-native")]
     let qa_env = std::env::var_os("LIGHTCRAFT_DESKTOP_QA").is_some() || std::env::var_os("RIGHTKIT_QA_HIDDEN").is_some();
     #[cfg(not(feature = "qa-native"))]
     let qa_env = false;
     let qa = args.iter().any(|arg| arg == "--qa") || qa_env;
-    let demo = args.iter().any(|arg| arg == "--demo") || std::env::var_os("LIGHTCRAFT_DESKTOP_DEMO").is_some();
     #[cfg(feature = "qa-native")]
     let qa_data_dir = std::env::var_os("RIGHTKIT_QA_DATA_DIR").map(PathBuf::from);
     #[cfg(not(feature = "qa-native"))]
     let qa_data_dir = None;
-    let app_dir = qa_data_dir
+    (qa, qa_data_dir)
+}
+
+fn explicit_library(args: &[String]) -> Option<PathBuf> {
+    args.windows(2)
+        .find(|pair| pair.first().is_some_and(|arg| arg == "--library"))
+        .and_then(|pair| pair.get(1))
+        .map(PathBuf::from)
+        .or_else(|| args.iter().find_map(|arg| arg.strip_prefix("--library=")).map(PathBuf::from))
+}
+
+fn isolated_root(app: &AppHandle<Wry>, qa: bool, qa_data_dir: Option<&Path>) -> PathBuf {
+    qa_data_dir
+        .map(Path::to_path_buf)
         .or_else(|| qa.then(|| std::env::temp_dir().join("lightcraft-preview-qa")))
         .or_else(|| app.path().app_data_dir().ok())
-        .unwrap_or_else(|| std::env::temp_dir().join("lightcraft-preview"));
-    let library = explicit.unwrap_or_else(|| app_dir.join("Preview Library"));
+        .unwrap_or_else(|| std::env::temp_dir().join("lightcraft-preview"))
+}
+
+fn preferences_root(app: &AppHandle<Wry>, qa: bool, qa_data_dir: Option<&Path>) -> PathBuf {
+    qa_data_dir
+        .map(Path::to_path_buf)
+        .or_else(|| qa.then(|| std::env::temp_dir().join("lightcraft-preview-qa")))
+        .or_else(|| app.path().app_config_dir().ok())
+        .or_else(|| app.path().app_data_dir().ok())
+        .unwrap_or_else(|| std::env::temp_dir().join("lightcraft-preview"))
+}
+
+fn preferences_path(app: &AppHandle<Wry>) -> PathBuf {
+    let args: Vec<String> = std::env::args().collect();
+    let (qa, qa_data_dir) = runtime_modes(&args);
+    preferences_root(app, qa, qa_data_dir.as_deref()).join("ui.json")
+}
+
+fn persisted_library_path(path: &Path) -> Option<PathBuf> {
+    let bytes = fs::read(path).ok()?;
+    if bytes.len() > 4 * 1024 * 1024 {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    let path = value
+        .get("libraryPath")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/settings/libraryPath").and_then(Value::as_str))
+        .or_else(|| value.pointer("/settings/library_path").and_then(Value::as_str))?;
+    if path.is_empty() || path.len() > MAX_PERSISTED_LIBRARY_PATH || path.contains('\0') {
+        return None;
+    }
+    Some(PathBuf::from(path))
+}
+
+fn model_paths(primary: bool, qa: bool, config: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
+    if primary && !qa {
+        let dir = std::env::var_os("LIGHTCRAFT_SAM3_DIR")
+            .map(PathBuf::from)
+            .or_else(|| lightcraft_engine::camera_profiles::config_dir().map(|path| path.join("models").join("sam3")));
+        let mirrors = lightcraft_engine::camera_profiles::config_dir().map(|path| path.join("models").join("sam3-mirrors.txt"));
+        return (dir, mirrors);
+    }
+    let root = config.parent().unwrap_or_else(|| Path::new("."));
+    (Some(root.join("models").join("sam3")), Some(root.join("models").join("sam3-mirrors.txt")))
+}
+
+fn gpu_preference(value: &Value) -> bool {
+    value
+        .get("gpu")
+        .and_then(Value::as_bool)
+        .or_else(|| value.pointer("/ui/gpu").and_then(Value::as_bool))
+        .or_else(|| value.pointer("/layout/gpu").and_then(Value::as_bool))
+        .or_else(|| value.pointer("/settings/gpu").and_then(Value::as_bool))
+        .unwrap_or(true)
+}
+
+fn gpu_marker_path(primary: bool, qa: bool, config: &Path) -> Option<PathBuf> {
+    if std::env::var_os("LIGHTCRAFT_NO_PREFS").is_some() {
+        return None;
+    }
+    if primary && !qa {
+        lightcraft_engine::camera_profiles::config_dir().map(|path| path.join("gpu-init.marker"))
+    } else {
+        Some(config.with_file_name("gpu-init.marker"))
+    }
+}
+
+fn gpu_crash_check(marker: Option<PathBuf>) -> Option<String> {
+    let left = marker.as_deref().and_then(lightcraft_engine::gpu::backend::take_init_marker);
+    lightcraft_engine::gpu::backend::set_init_marker(marker);
+    left.map(|what| {
+        format!(
+            "LightCraft closed unexpectedly while starting the GPU last time ({what}), so GPU rendering is now off and photos render on the CPU. To try the GPU again, turn on Settings ▸ Performance ▸ Use the GPU for rendering; to try another graphics backend, start LightCraft with LIGHTCRAFT_GPU_BACKEND=dx12, vulkan or off."
+        )
+    })
+}
+
+fn prepare_primary_preferences(path: &Path) -> Option<String> {
+    if path.exists() {
+        return None;
+    }
+    let Some(legacy) = services::legacy_preferences_path() else { return None };
+    match services::migrate_preferences(&legacy, path) {
+        Ok(true) => log::info!("migrated legacy LightCraft preferences from {}", legacy.display()),
+        Ok(false) => {}
+        Err(error) => {
+            let warning = format!("legacy LightCraft preferences were not migrated: {error}");
+            log::warn!("{warning}");
+            return Some(warning);
+        }
+    }
+    None
+}
+
+fn startup_options(app: &AppHandle<Wry>) -> (HostOptions, PathBuf, Option<String>) {
+    let args: Vec<String> = std::env::args().collect();
+    let (qa, qa_data_dir) = runtime_modes(&args);
+    let primary = app.config().identifier == PRIMARY_IDENTIFIER;
+    let config = preferences_root(app, qa, qa_data_dir.as_deref()).join("ui.json");
+    let migration_warning = (primary && !qa).then(|| prepare_primary_preferences(&config)).flatten();
+    let app_dir = isolated_root(app, qa, qa_data_dir.as_deref());
+    let explicit = explicit_library(&args);
+    let library = explicit
+        .or_else(|| (!qa && primary).then(|| persisted_library_path(&config)).flatten())
+        .or_else(|| (!qa && primary).then(lightcraft_engine::library::default_dir).flatten())
+        .unwrap_or_else(|| app_dir.join("Preview Library"));
+    let (sam3_dir, sam3_mirrors_file) = model_paths(primary, qa, &config);
+    let demo = args.iter().any(|arg| arg == "--demo") || std::env::var_os("LIGHTCRAFT_DESKTOP_DEMO").is_some();
     let demo_count = std::env::var("LIGHTCRAFT_DEMO_COUNT").ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
-    (HostOptions { library_path: Some(library.clone()), demo, demo_count }, library)
+    (HostOptions { library_path: Some(library.clone()), demo, demo_count, sam3_dir, sam3_mirrors_file }, library, migration_warning)
 }
 
 fn build_shell() -> rightkit_shell::Shell {
@@ -426,6 +618,32 @@ fn build_shell() -> rightkit_shell::Shell {
         .build()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn persisted_library_path_reads_legacy_nested_key() -> Result<(), Box<dyn std::error::Error>> {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = std::env::temp_dir().join(format!("lightcraft-native-path-{}-{stamp}.json", std::process::id()));
+        fs::write(&path, br#"{"settings":{"libraryPath":"/legacy/catalog"}}"#)?;
+        assert_eq!(persisted_library_path(&path), Some(PathBuf::from("/legacy/catalog")));
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_library_path_rejects_malformed_value() -> Result<(), Box<dyn std::error::Error>> {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = std::env::temp_dir().join(format!("lightcraft-native-path-invalid-{}-{stamp}.json", std::process::id()));
+        fs::write(&path, br#"{"libraryPath":""}"#)?;
+        assert!(persisted_library_path(&path).is_none());
+        fs::remove_file(path)?;
+        Ok(())
+    }
+}
+
 pub fn run() {
     let shell = build_shell();
     let builder = tauri::Builder::default()
@@ -437,25 +655,47 @@ pub fn run() {
         })
         .invoke_handler(rightkit_shell::handler![lc_run, lc_snapshot, lc_view_slice, lc_preview, lc_preview_ack, lc_native, lc_preferences])
         .setup(|app| {
-            let (options, _library) = startup_options(app.handle());
-            let config_root = std::env::var_os("RIGHTKIT_QA_DATA_DIR")
-                .map(PathBuf::from)
-                .or_else(|| app.path().app_config_dir().ok())
-                .or_else(|| app.path().app_data_dir().ok())
-                .unwrap_or_else(|| std::env::temp_dir().join("lightcraft-preview"));
-            let config = config_root.join("ui.json");
+            let (options, _library, migration_warning) = startup_options(app.handle());
+            let config = preferences_path(app.handle());
             let preferences = Preferences::load(config);
+            let args: Vec<String> = std::env::args().collect();
+            let (qa, _) = runtime_modes(&args);
+            let primary = app.config().identifier == PRIMARY_IDENTIFIER;
+            let preference_value = preferences.get().unwrap_or_else(|error| {
+                log::warn!("could not read startup preferences for GPU setup: {error}");
+                Value::Object(serde_json::Map::new())
+            });
+            let gpu_crash = gpu_crash_check(gpu_marker_path(primary, qa, preferences_path(app.handle()).as_path()));
+            lightcraft_engine::gpu::set_enabled(gpu_preference(&preference_value) && gpu_crash.is_none());
+            let gpu_warning = gpu_crash.map(|notice| match preferences.patch(Some(json!({"ui": {"gpu": false}}))) {
+                Ok(_) => notice,
+                Err(error) => format!("{notice} Saving GPU preference failed: {error}"),
+            });
             let preferences_warning = preferences.warning();
+            let startup_warnings =
+                [preferences_warning.clone(), migration_warning.clone(), gpu_warning.clone()].into_iter().flatten().collect::<Vec<_>>();
             let startup_error = match DesktopHandle::spawn(options) {
                 Ok(host) => {
                     if let Ok(value) = preferences.get() {
                         let _ = host.preferences(Some(value));
                     }
-                    app.manage(AppState { host: Some(host), preferences, startup_error: None, closing: Arc::new(AtomicBool::new(false)) });
+                    app.manage(AppState {
+                        host: Some(host),
+                        preferences,
+                        startup_error: None,
+                        startup_warnings: startup_warnings.clone(),
+                        closing: Arc::new(AtomicBool::new(false)),
+                    });
                     None
                 }
                 Err(error) => {
-                    app.manage(AppState { host: None, preferences, startup_error: Some(error.clone()), closing: Arc::new(AtomicBool::new(false)) });
+                    app.manage(AppState {
+                        host: None,
+                        preferences,
+                        startup_error: Some(error.clone()),
+                        startup_warnings: startup_warnings.clone(),
+                        closing: Arc::new(AtomicBool::new(false)),
+                    });
                     Some(error)
                 }
             };
@@ -463,7 +703,7 @@ pub fn run() {
                 use tauri::Emitter;
                 let _ = app.emit("lc://error", json!({"message": error}));
             }
-            if let Some(warning) = preferences_warning {
+            for warning in startup_warnings {
                 use tauri::Emitter;
                 let _ = app.emit("lc://notice", json!({"message": warning}));
             }

@@ -21,11 +21,18 @@ pub struct Controller {
     preferences: Map<String, Value>,
     notices: Vec<String>,
     last_error: Option<String>,
+    segmenter_dir: Option<PathBuf>,
+    segmenter_mirrors_file: Option<PathBuf>,
 }
 
 impl Controller {
     pub(crate) fn new(options: HostOptions, store: PreviewStore) -> Result<Self, String> {
-        let HostOptions { library_path, demo, demo_count } = options;
+        let HostOptions { library_path, demo, demo_count, sam3_dir, sam3_mirrors_file } = options;
+        let segmenter_dir = sam3_dir
+            .or_else(|| std::env::var_os("LIGHTCRAFT_SAM3_DIR").map(PathBuf::from))
+            .or_else(|| lightcraft_engine::camera_profiles::config_dir().map(|dir| dir.join("models").join("sam3")));
+        let segmenter_mirrors_file =
+            sam3_mirrors_file.or_else(|| lightcraft_engine::camera_profiles::config_dir().map(|dir| dir.join("models").join("sam3-mirrors.txt")));
         let mut session = if let Some(path) = library_path {
             let mut session = Session::new().with_system_clock();
             session.open_library(&path, demo).map_err(|error| error.to_string())?;
@@ -35,6 +42,7 @@ impl Controller {
         } else {
             Session::new().with_system_clock()
         };
+        configure_segmenter(&mut session, &segmenter_dir, &segmenter_mirrors_file);
         if demo_count > 0 {
             let visible = session.visible_cloned();
             if demo_count < visible.len() {
@@ -52,6 +60,8 @@ impl Controller {
             preferences: Map::new(),
             notices,
             last_error: None,
+            segmenter_dir,
+            segmenter_mirrors_file,
         })
     }
 
@@ -232,7 +242,7 @@ impl Controller {
         }
     }
 
-    fn shutdown(&mut self) -> Result<(), String> {
+    pub(crate) fn shutdown(&mut self) -> Result<(), String> {
         self.tasks.cancel(None)?;
         self.poll();
         if self.tasks.running() {
@@ -276,6 +286,7 @@ impl Controller {
 
         let mut fresh = Session::new().with_system_clock();
         fresh.open_library(&path, false).map_err(|error| format!("could not open library: {error}"))?;
+        configure_segmenter(&mut fresh, &self.segmenter_dir, &self.segmenter_mirrors_file);
         let notices = fresh.take_library_warnings();
         let photos = fresh.catalog.len();
 
@@ -361,6 +372,11 @@ fn library_path(params: &Value, command: &str) -> Result<PathBuf, String> {
         return Err(format!("invalid {command} path"));
     }
     Ok(PathBuf::from(path))
+}
+
+fn configure_segmenter(session: &mut Session, dir: &Option<PathBuf>, mirrors_file: &Option<PathBuf>) {
+    session.segmenter.dir = dir.clone();
+    session.segmenter.mirrors_file = mirrors_file.clone();
 }
 
 fn same_library_path(left: &Path, right: &Path) -> bool {
@@ -532,11 +548,23 @@ mod tests {
     fn equal_revision_catalog_switch_gets_fresh_generation() {
         let old = temp_library("same-old");
         let next = temp_library("same-next");
+        let model_dir = temp_library("sam3-model");
+        let mirrors_file = temp_library("sam3-mirrors");
         seed_library(&old);
         seed_library(&next);
-        let controller_result = Controller::new(HostOptions { library_path: Some(old.clone()), ..HostOptions::default() }, PreviewStore::default());
+        let controller_result = Controller::new(
+            HostOptions {
+                library_path: Some(old.clone()),
+                sam3_dir: Some(model_dir.clone()),
+                sam3_mirrors_file: Some(mirrors_file.clone()),
+                ..HostOptions::default()
+            },
+            PreviewStore::default(),
+        );
         assert!(controller_result.is_ok());
         let Ok(mut controller) = controller_result else { return };
+        assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&model_dir));
+        assert_eq!(controller.session.segmenter.mirrors_file.as_ref(), Some(&mirrors_file));
         let before_result = controller.snapshot();
         assert!(before_result.is_ok());
         let Ok(before) = before_result else { return };
@@ -551,6 +579,8 @@ mod tests {
         let opened_result = controller.run("library.open", &json!({"path": next}));
         assert!(opened_result.is_ok());
         let Ok(opened) = opened_result else { return };
+        assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&model_dir));
+        assert_eq!(controller.session.segmenter.mirrors_file.as_ref(), Some(&mirrors_file));
         assert!(opened.get("photos").and_then(Value::as_u64).is_some_and(|count| count > 0));
         let after_result = controller.snapshot();
         assert!(after_result.is_ok());

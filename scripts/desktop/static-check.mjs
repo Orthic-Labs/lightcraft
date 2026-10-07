@@ -63,7 +63,7 @@ function checkFixtures() {
   if (catalog.photos.some((photo) => photo.inputLicense !== "CC0")) fail("fixture inputs must declare CC0 license");
   const journey = readJson("fixtures/desktop/native-journey.json");
   if (journey.schema !== 1 || journey.kind !== "native-control-journey" || journey.hidden !== true) fail("native journey must be hidden-control schema 1");
-  for (const name of ["ipc", "stalePreview", "cache", "preferences", "gesture", "arwImport", "lightroomImport", "engineExport", "catalogRecovery"]) {
+  for (const name of ["ipc", "stalePreview", "cache", "scalability", "preferences", "gesture", "arwImport", "lightroomImport", "engineExport", "catalogRecovery"]) {
     if (!journey.scenarios?.some((scenario) => scenario.id === name)) fail(`native journey missing scenario ${name}`);
   }
   const baseline = readJson("fixtures/desktop/installed-baseline.json");

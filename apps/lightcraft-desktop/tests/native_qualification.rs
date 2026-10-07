@@ -71,6 +71,10 @@ fn source_hash(path: &Path) -> String {
     sha256_hex(&fs::read(path).unwrap_or_else(|error| panic!("fixture {} must be readable: {error}", path.display())))
 }
 
+fn source_fingerprint(path: &Path) -> String {
+    if path.is_dir() { tree_fingerprint(path) } else { source_hash(path) }
+}
+
 fn assert_sources_unchanged(paths: &[(&str, &Path)], expected: &[(&str, String)]) {
     assert_eq!(paths.len(), expected.len(), "fixture hash inventory must match source inventory");
     for ((label, path), (expected_label, before)) in paths.iter().zip(expected.iter()) {
@@ -146,6 +150,46 @@ fn assert_active_grid_is_bounded(control: &rightkit_qa::control::Control) {
     assert!(value["images"].as_u64().is_some_and(|count| count <= 512), "virtualized grid rendered too many images: {value}");
     assert_eq!(value["active"].as_u64(), Some(1), "grid must expose exactly one active photo: {value}");
     assert!(value["loaded"].as_u64().is_some_and(|count| count > 0), "grid must expose decoded WebView pixels: {value}");
+}
+
+fn grid_metrics(control: &rightkit_qa::control::Control) -> Value {
+    control
+        .eval(
+            "return (() => { const scroll = document.querySelector('.lc-grid-scroll'); const grid = document.querySelector('.lc-grid-window'); const images = [...(grid?.querySelectorAll('.lc-photo-preview') || [])]; const first = grid?.querySelector('.lc-photo-caption span:first-child')?.textContent?.trim() || ''; return {scrollTop: scroll?.scrollTop || 0, scrollHeight: scroll?.scrollHeight || 0, clientHeight: scroll?.clientHeight || 0, top: Number.parseFloat(grid?.style.top || '0') || 0, cells: grid?.querySelectorAll('.lc-photo-cell').length || 0, images: images.length, loaded: images.filter((img) => img.complete && img.naturalWidth > 0 && img.naturalHeight > 0).length, first, busy: grid?.getAttribute('aria-busy') === 'true'}; })();",
+        )
+        .expect("scalable grid DOM query must execute")
+}
+
+fn wait_for_grid(control: &rightkit_qa::control::Control, scrolled: bool, previous_first: Option<&str>) -> Value {
+    for _ in 0..200 {
+        let value = grid_metrics(control);
+        let visible = value["cells"].as_u64().is_some_and(|count| count <= 512)
+            && value["images"].as_u64().is_some_and(|count| count <= 512)
+            && value["loaded"].as_u64().is_some_and(|count| count > 0)
+            && value["busy"].as_bool() == Some(false)
+            && previous_first.map_or(true, |previous| value["first"].as_str() != Some(previous))
+            && (!scrolled || (value["scrollTop"].as_f64().unwrap_or(0.0) > 0.0 && value["top"].as_f64().unwrap_or(0.0) > 0.0));
+        if visible {
+            return value;
+        }
+        sleep(Duration::from_millis(50));
+    }
+    panic!("scalable grid did not settle: {:?}", grid_metrics(control));
+}
+
+fn enable_grid_info(control: &rightkit_qa::control::Control) {
+    let clicked = control
+        .eval("return (() => { const button = [...document.querySelectorAll('.lc-footer-actions button')].find((item) => item.textContent?.includes('Grid info')); if (!button) return false; button.click(); return true; })();")
+        .expect("grid info control query must execute");
+    assert_eq!(clicked.as_bool(), Some(true), "grid info control must exist");
+    wait_for_dom(control, "return Boolean(document.querySelector('.lc-grid-window .lc-photo-caption span:first-child')?.textContent?.trim());");
+}
+
+fn scroll_grid_to_end(control: &rightkit_qa::control::Control) {
+    let changed = control
+        .eval("return (() => { const scroll = document.querySelector('.lc-grid-scroll'); if (!scroll) return false; scroll.scrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight); scroll.dispatchEvent(new Event('scroll', {bubbles: true})); return scroll.scrollHeight > scroll.clientHeight; })();")
+        .expect("grid scroll command must execute");
+    assert_eq!(changed.as_bool(), Some(true), "scalable grid must have scrollable height");
 }
 
 fn assert_active_grid_identity(control: &rightkit_qa::control::Control, file_name: &str) {
@@ -383,8 +427,13 @@ fn native_hidden_control_journeys() {
     let input_dir = evidence.join("fixture-inputs");
     fs::create_dir_all(&input_dir).expect("fixture input directory must exist");
     let inputs = fixture_inputs::write_fixture_inputs(&input_dir).expect("real ARW/PNG/Lightroom fixtures must be generated");
-    let source_paths = [("arw", inputs.arw.as_path()), ("png", inputs.png.as_path()), ("catalog", inputs.catalog.as_path())];
-    let source_hashes = source_paths.map(|(label, path)| (label, source_hash(path)));
+    let source_paths = [
+        ("arw", inputs.arw.as_path()),
+        ("png", inputs.png.as_path()),
+        ("catalog", inputs.catalog.as_path()),
+        ("scalabilitySources", inputs.scalability_sources.as_path()),
+    ];
+    let source_hashes = source_paths.map(|(label, path)| (label, source_fingerprint(path)));
     let source_manifest = input_dir.join("manifest.json");
     fs::write(
         &source_manifest,
@@ -402,8 +451,19 @@ fn native_hidden_control_journeys() {
     .expect("source manifest must be writable");
     let harness = qa_harness(&binary, &evidence, &revision, platform, &architecture);
 
-    let scenario_names =
-        ["ipc", "stalePreview", "cache", "preferences", "gesture", "editingTools", "arwImport", "lightroomImport", "engineExport", "catalogRecovery"];
+    let scenario_names = [
+        "ipc",
+        "stalePreview",
+        "cache",
+        "scalability",
+        "preferences",
+        "gesture",
+        "editingTools",
+        "arwImport",
+        "lightroomImport",
+        "engineExport",
+        "catalogRecovery",
+    ];
     for name in scenario_names {
         let outcome = harness.scenario(name, "fast", &[], |scenario| {
             let baseline_capture = scenario.dir().join("baseline.png");
@@ -519,6 +579,80 @@ fn native_hidden_control_journeys() {
                         let dom = control.dom(".lc-grid-scroll").expect("grid DOM query must execute");
                         assert!(!dom.is_empty(), "library grid must exist in hidden WebView");
                         assert_active_grid_is_bounded(control);
+                    }
+                    "scalability" => {
+                        let opened = control
+                            .command("lc_native", &json!({"action": "openLibrary", "params": {"path": inputs.scalability_library}}))
+                            .expect("native scalability openLibrary command must execute");
+                        let library_path = inputs.scalability_library.to_string_lossy().to_string();
+                        assert_eq!(opened["path"].as_str(), Some(library_path.as_str()), "scalability openLibrary must report generated path");
+                        let opened_snapshot = snapshot(control);
+                        assert_eq!(opened_snapshot["libraryPath"].as_str(), Some(library_path.as_str()), "snapshot must expose scalability library path");
+                        assert_eq!(opened_snapshot["counts"]["catalog"].as_u64(), Some(fixture_inputs::SCALABILITY_PHOTO_COUNT as u64));
+                        assert_eq!(opened_snapshot["total"].as_u64(), Some(fixture_inputs::SCALABILITY_PHOTO_COUNT as u64));
+                        let generation = opened_snapshot["viewGeneration"].as_u64().expect("scalability generation must be numeric");
+                        let first_page = control
+                            .command("lc_view_slice", &json!({"generation": generation, "offset": 0, "limit": 4096}))
+                            .expect("scalability first page must reply");
+                        assert_eq!(first_page["total"].as_u64(), Some(fixture_inputs::SCALABILITY_PHOTO_COUNT as u64));
+                        assert_eq!(first_page["offset"].as_u64(), Some(0));
+                        assert_eq!(first_page["photos"].as_array().map(Vec::len), Some(512), "first page must remain capped at 512 photos");
+                        let tail_page = control
+                            .command("lc_view_slice", &json!({"generation": generation, "offset": 1536, "limit": 512}))
+                            .expect("scalability tail page must reply");
+                        assert_eq!(tail_page["offset"].as_u64(), Some(1536));
+                        assert_eq!(tail_page["photos"].as_array().map(Vec::len), Some(512), "tail page must contain final 512 photos");
+                        let first_id = first_page["photos"][0]["id"].as_u64().expect("first page must expose photo id");
+                        let selected = run(control, "library.select", json!({"ids": [first_id], "active": first_id, "mode": "replace"}));
+                        assert_eq!(selected["active"].as_u64(), Some(first_id), "scalability selection must identify first page photo");
+                        control.key("G").expect("library route key must execute for scalability journey");
+                        wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
+                        assert_layout_settled(control, ".lc-grid-scroll");
+                        enable_grid_info(control);
+                        let initial = wait_for_grid(control, false, None);
+                        let initial_name = initial["first"].as_str().unwrap_or_default().to_string();
+                        assert!(!initial_name.is_empty(), "initial grid must expose first filename");
+                        assert!(initial["scrollHeight"].as_f64().unwrap_or(0.0) > initial["clientHeight"].as_f64().unwrap_or(0.0), "2048-photo grid must have scrollable height: {initial}");
+                        assert_active_grid_is_bounded(control);
+                        scroll_grid_to_end(control);
+                        let far = wait_for_grid(control, true, Some(initial_name.as_str()));
+                        assert!(far["scrollHeight"].as_f64().unwrap_or(0.0) > far["clientHeight"].as_f64().unwrap_or(0.0), "far grid viewport must preserve scrollable height: {far}");
+                        assert!(far["cells"].as_u64().is_some_and(|count| count <= 512), "far grid rendered too many cells: {far}");
+                        assert!(far["images"].as_u64().is_some_and(|count| count <= 512), "far grid rendered too many images: {far}");
+                        assert_ne!(far["first"].as_str(), Some(initial_name.as_str()), "far grid must render a different page");
+                        control
+                            .eval("return (() => { const scroll = document.querySelector('.lc-grid-scroll'); if (!scroll) return false; scroll.scrollTop = 0; scroll.dispatchEvent(new Event('scroll', {bubbles: true})); return true; })();")
+                            .expect("grid reset scroll command must execute");
+                        wait_for_dom(control, "return Number.parseFloat(document.querySelector('.lc-grid-window')?.style.top || '0') === 0;");
+                        let _descending = run(control, "library.sort", json!({"key": "fileName", "ascending": false}));
+                        let descending_before = snapshot(control);
+                        let descending_generation = descending_before["viewGeneration"].as_u64().expect("descending generation must be numeric");
+                        assert!(descending_generation > generation, "descending sort must advance view generation");
+                        let descending_name = wait_for_dom(control, "return Boolean(document.querySelector('.lc-grid-window .lc-photo-caption span:first-child')?.textContent?.trim());")
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                        assert!(!descending_name.is_empty(), "descending sort must expose first filename");
+                        let _ascending = run(control, "library.sort", json!({"key": "fileName", "ascending": true}));
+                        let ascending_snapshot = snapshot(control);
+                        let ascending_generation = ascending_snapshot["viewGeneration"].as_u64().expect("ascending generation must be numeric");
+                        assert!(ascending_generation > descending_generation, "ascending sort must advance view generation");
+                        let ascending_name = wait_for_dom(control, &format!("return (document.querySelector('.lc-grid-window .lc-photo-caption span:first-child')?.textContent?.trim() || '') !== {descending_name:?};"))
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                        assert!(!ascending_name.is_empty(), "ascending sort must expose first filename");
+                        assert_ne!(ascending_name, descending_name, "generation change must replace cached first page");
+                        let stale = control
+                            .command("lc_view_slice", &json!({"generation": descending_generation, "offset": 1536, "limit": 4096}))
+                            .expect("stale scalability slice must reply");
+                        assert_eq!(stale["generationChanged"].as_bool(), Some(true), "stale scalability generation must be rejected");
+                        assert_eq!(stale["generation"].as_u64(), Some(ascending_generation));
+                        let fresh = control
+                            .command("lc_view_slice", &json!({"generation": ascending_generation, "offset": 1536, "limit": 512}))
+                            .expect("fresh scalability tail must reply");
+                        assert_eq!(fresh["generationChanged"].as_bool(), None);
+                        assert_eq!(fresh["photos"].as_array().map(Vec::len), Some(512), "fresh tail page must remain capped at 512 photos");
                     }
                     "gesture" => {
                         let imported = import_file(control, &inputs.png);

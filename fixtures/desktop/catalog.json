@@ -8,12 +8,21 @@
     { "id": 2, "fileName": "procedural-rgb-01.png", "format": "PNG", "width": 96, "height": 64, "sourceHash": "runtime-generated", "sourceRecipe": "fixture_inputs::procedural_png:v2", "inputLicense": "CC0", "pattern": "srgb-checker-gradient" },
     { "id": 3, "fileName": "synthetic-lightroom.lrcat", "format": "LRCAT", "width": 0, "height": 0, "sourceHash": "runtime-generated", "sourceRecipe": "fixture_inputs::synthetic_lightroom_catalog:v2", "inputLicense": "CC0", "pattern": "sqlite-master-virtual-copy-nested-collections" }
   ],
+  "scalability": {
+    "count": 2048,
+    "format": "PNG",
+    "sourceHash": "runtime-generated",
+    "sourceRecipe": "fixture_inputs::scalability_png_catalog:v2",
+    "inputLicense": "CC0",
+    "pattern": "seeded-real-png-files-persisted-through-engine-batch"
+  },
   "expected": {
     "sourceHashes": "sha256-generated-from-runtime-inputs",
     "noDuplicateSourceRecipes": true,
     "arwImport": "decode-preview-preserve-source-hash",
     "lightroomImport": "preserve-virtual-copy-and-collection-ids",
     "engineExport": "engine-decoded-pixels",
+    "scalability": "2048-entry-slice-cap-scroll-window-generation-cache",
     "catalogRecovery": "source-backup-unchanged-copied-restore-and-open-library",
     "sourceFilesReadOnly": true
   }

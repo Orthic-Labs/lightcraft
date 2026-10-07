@@ -8,6 +8,7 @@
     { "id": "ipc", "control": "lc_snapshot", "assert": "version=1,revision,viewGeneration,controls" },
     { "id": "stalePreview", "control": "lc_preview", "assert": "older viewGeneration or sequence never becomes visible" },
     { "id": "cache", "control": "lc_view_slice", "assert": "generation mismatch refreshes slice; limit<=512" },
+    { "id": "scalability", "control": "lc_view_slice", "assert": "2048 generated PNG catalog stays slice and DOM bounded across far scroll; stale generation clears UI cache" },
     { "id": "preferences", "control": "lc_preferences", "assert": "unknown fields survive atomic reopen" },
     { "id": "gesture", "control": "lc_run", "assert": "one pointer gesture creates one undo step; Escape cancels" },
     { "id": "arwImport", "control": "lc_native", "params": { "action": "import" }, "assert": "ARW source hash survives import and reload" },

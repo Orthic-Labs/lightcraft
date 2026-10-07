@@ -121,11 +121,26 @@ function cropHandleAt(value: Point, rect: Box): number | null {
   return nearest;
 }
 
-function activePhoto(snapshot: DesktopSnapshot | null): PhotoSummary | null {
-  const active = snapshot?.active;
+function photosIn(snapshot: DesktopSnapshot | null): PhotoSummary[] {
   const source = record(snapshot?.source);
   const cached = (snapshot as DesktopSnapshot & { photos?: PhotoSummary[] } | null)?.photos ?? (Array.isArray(source.photos) ? source.photos as PhotoSummary[] : undefined);
-  return active == null ? null : cached?.find((photo) => photo.id === active) ?? null;
+  return cached ?? [];
+}
+
+function photoForId(snapshot: DesktopSnapshot | null, id: number | null): PhotoSummary | null {
+  return id == null ? null : photosIn(snapshot).find((photo) => photo.id === id) ?? null;
+}
+
+function activePhoto(snapshot: DesktopSnapshot | null): PhotoSummary | null {
+  return photoForId(snapshot, snapshot?.active ?? null);
+}
+
+function previewDimensions(photo: PhotoSummary | null, previewEdge: number): { width: number; height: number } {
+  const edge = Math.max(256, Math.min(8192, Math.round(Number.isFinite(previewEdge) ? previewEdge : 2560)));
+  const width = photo && Number.isFinite(photo.w) && photo.w > 0 ? photo.w : 4;
+  const height = photo && Number.isFinite(photo.h) && photo.h > 0 ? photo.h : 3;
+  const scale = edge / Math.max(width, height);
+  return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
 }
 
 function previewSlot(view: ViewMode, index = 0): string {
@@ -138,6 +153,8 @@ function titleFor(photo: PhotoSummary | null): string {
 
 function PreviewPane({
   photoId,
+  photo,
+  previewEdge,
   slot,
   viewGeneration,
   before,
@@ -145,6 +162,8 @@ function PreviewPane({
   onHistogram,
 }: {
   photoId: number | null;
+  photo: PhotoSummary | null;
+  previewEdge: number;
   slot: string;
   viewGeneration: number;
   before?: boolean;
@@ -152,11 +171,14 @@ function PreviewPane({
   onHistogram: (value: unknown) => void;
 }) {
   if (photoId == null) return <div className={`stage-empty ${className ?? ""}`}>Select a photo to view its decoded preview</div>;
-  return <PhotoPreview photoId={photoId} slot={slot} viewGeneration={viewGeneration} width={1600} height={1200} quality="full" before={before} className={className} onHistogram={onHistogram} />;
+  const dimensions = previewDimensions(photo, previewEdge);
+  return <PhotoPreview photoId={photoId} slot={slot} viewGeneration={viewGeneration} width={dimensions.width} height={dimensions.height} quality="full" before={before} className={className} onHistogram={onHistogram} />;
 }
 
 function StageImage({
   photoId,
+  photo,
+  previewEdge,
   slot,
   viewGeneration,
   before,
@@ -167,6 +189,8 @@ function StageImage({
   onPointerUp,
 }: {
   photoId: number | null;
+  photo: PhotoSummary | null;
+  previewEdge: number;
   slot: string;
   viewGeneration: number;
   before?: boolean;
@@ -180,7 +204,7 @@ function StageImage({
   return (
     <div className="stage-image-wrap" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
       <div className="stage-image-transform" style={{ ["--stage-angle" as string]: `${crop.angle}deg` }}>
-        <PreviewPane photoId={photoId} slot={slot} viewGeneration={viewGeneration} before={before} className="stage-preview" onHistogram={onHistogram} />
+        <PreviewPane photoId={photoId} photo={photo} previewEdge={previewEdge} slot={slot} viewGeneration={viewGeneration} before={before} className="stage-preview" onHistogram={onHistogram} />
       </div>
     </div>
   );
@@ -255,9 +279,9 @@ function MultiViewActions({ view, candidate, reference, run, setUi }: { view: Vi
   return <div className="multi-view-actions"><button type="button" onClick={() => void run("compare.swap", {})}>Swap</button><button type="button" disabled={candidate == null} onClick={() => void run("compare.makeSelect", {})}>Make Select</button>{view === "reference" ? <button type="button" onClick={() => { setUi({ referenceId: reference }); void run("photo.setReference", { id: reference }); }}>Keep Reference</button> : null}</div>;
 }
 
-function BeforeAfterStage({ mode, photoId, viewGeneration, develop, onHistogram, onPointerDown, onPointerMove, onPointerUp }: { mode: UiState["beforeAfter"]; photoId: number | null; viewGeneration: number; develop: DevelopShape; onHistogram: (value: unknown) => void; onPointerDown: (event: PointerEvent<HTMLElement>) => void; onPointerMove: (event: PointerEvent<HTMLElement>) => void; onPointerUp: (event: PointerEvent<HTMLElement>) => void }) {
+function BeforeAfterStage({ mode, photoId, photo, previewEdge, viewGeneration, develop, onHistogram, onPointerDown, onPointerMove, onPointerUp }: { mode: UiState["beforeAfter"]; photoId: number | null; photo: PhotoSummary | null; previewEdge: number; viewGeneration: number; develop: DevelopShape; onHistogram: (value: unknown) => void; onPointerDown: (event: PointerEvent<HTMLElement>) => void; onPointerMove: (event: PointerEvent<HTMLElement>) => void; onPointerUp: (event: PointerEvent<HTMLElement>) => void }) {
   const vertical = mode === "topBottom" || mode === "splitTopBottom";
-  return <div className={`before-after-panes ${vertical ? "vertical" : "horizontal"} ${mode === "split" || mode === "splitTopBottom" ? "split-mode" : ""}`}><div className="before-after-pane"><StageImage photoId={photoId} slot="before" before viewGeneration={viewGeneration} develop={develop} onHistogram={onHistogram} /><span className="pane-label">Before</span></div><div className="before-after-pane"><StageImage photoId={photoId} slot="after" viewGeneration={viewGeneration} develop={develop} onHistogram={onHistogram} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} /><span className="pane-label">After</span></div></div>;
+  return <div className={`before-after-panes ${vertical ? "vertical" : "horizontal"} ${mode === "split" || mode === "splitTopBottom" ? "split-mode" : ""}`}><div className="before-after-pane"><StageImage photoId={photoId} photo={photo} previewEdge={previewEdge} slot="before" before viewGeneration={viewGeneration} develop={develop} onHistogram={onHistogram} /><span className="pane-label">Before</span></div><div className="before-after-pane"><StageImage photoId={photoId} photo={photo} previewEdge={previewEdge} slot="after" viewGeneration={viewGeneration} develop={develop} onHistogram={onHistogram} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} /><span className="pane-label">After</span></div></div>;
 }
 
 export function StageWorkspace() {
@@ -278,6 +302,7 @@ export function StageWorkspace() {
   const candidate = candidateIds[candidateIndex % Math.max(1, candidateIds.length)] ?? null;
   const zoom = typeof ui.zoom === "number" ? ui.zoom : ui.zoom === "fill" ? 1.25 : 1;
   const sourceAspect = photo && photo.h > 0 ? photo.w / photo.h : 1.5;
+  const previewEdge = Math.max(256, Math.min(8192, Math.round(Number.isFinite(ui.previewEdge) ? ui.previewEdge : 2560)));
 
   const send = useCallback(async (id: string, params: Record<string, unknown> = {}) => { await run(id, params); }, [run]);
 
@@ -415,7 +440,7 @@ export function StageWorkspace() {
     <div className="stage-topbar"><div className="stage-route-tabs">{views.map((view) => <button key={view.id} type="button" className={ui.view === view.id ? "selected" : ""} onClick={() => routeView(view.id)}><span>{view.label}</span><kbd>{view.key}</kbd></button>)}</div><div className="stage-photo-title"><strong>{titleFor(photo)}</strong><span>{photo ? `${photo.w} × ${photo.h}` : ""}</span></div><MultiViewActions view={ui.view} candidate={candidate} reference={ui.referenceId} run={run} setUi={setUi} /><div className="stage-status">{snapshot?.status.previewBuild ? <span className="stage-loading">Rendering preview…</span> : null}{error ? <span className="stage-error">{error}</span> : null}{notice ? <span>{notice}</span> : null}</div></div>
     <div className="stage-body">
       <div className="stage-canvas" style={{ ["--stage-zoom" as string]: zoom, ["--stage-pan-x" as string]: `${pan.x * 100}%`, ["--stage-pan-y" as string]: `${pan.y * 100}%` }}>
-        {ui.view === "compare" ? <div className="compare-panes"><div className="compare-pane"><StageImage photoId={active} slot={previewSlot(ui.view)} before={ui.beforeAfter === "original"} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /><span className="pane-label">Select</span></div><div className="compare-pane"><StageImage photoId={candidate} slot={previewSlot(ui.view, 1)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span className="pane-label">Candidate {candidate ?? "—"}</span></div></div> : ui.view === "reference" ? <div className="compare-panes"><div className="compare-pane"><StageImage photoId={ui.referenceId} slot="reference" viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span className="pane-label">Reference {ui.referenceId ?? "—"}</span></div><div className="compare-pane"><StageImage photoId={active} slot="reference-active" viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /><span className="pane-label">Active</span></div></div> : ui.view === "survey" ? <div className="survey-grid">{(selection.length ? selection : active == null ? [] : [active]).map((id, index) => <button type="button" className={id === active ? "survey-photo selected" : "survey-photo"} key={id} onClick={() => { setUi({ view: "detail" }); void send("library.select", { ids: [id], active: id, mode: "replace" }); }}><StageImage photoId={id} slot={previewSlot(ui.view, index)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span>{index + 1}</span></button>)}</div> : ui.view === "people" ? <div className="people-stage"><StageImage photoId={active} slot={previewSlot(ui.view)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><div className="face-boxes">{Array.isArray(record(snapshot?.source).faces) ? (record(snapshot?.source).faces as unknown[]).map((face, index) => { const f = record(face); const r = box(f.rect ?? f.bounds) ?? { x0: 0.3 + index * 0.05, y0: 0.25, x1: 0.44 + index * 0.05, y1: 0.42 }; return <span key={index} style={{ left: `${r.x0 * 100}%`, top: `${r.y0 * 100}%`, width: `${(r.x1 - r.x0) * 100}%`, height: `${(r.y1 - r.y0) * 100}%` }} />; }) : null}</div></div> : ui.beforeAfter !== "off" && ui.beforeAfter !== "original" ? <BeforeAfterStage mode={ui.beforeAfter} photoId={active} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /> : <div className="single-pane"><StageImage photoId={active} slot={previewSlot(ui.view)} before={ui.beforeAfter === "original"} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} />{ui.panel === "crop" ? <CropOverlay develop={develop} guide={ui.cropOverlay} /> : null}{ui.maskOverlay && ui.panel === "masking" ? <MaskOverlay develop={develop} pins={ui.maskPins} /> : null}{ui.panel === "remove" ? <SpotsOverlay develop={develop} /> : null}{ui.panel === "redeye" ? <SpotsOverlay develop={develop} eyes /> : null}{ui.clipping ? <div className="clipping-overlay" aria-label="Clipping preview" /> : null}</div>}
+        {ui.view === "compare" ? <div className="compare-panes"><div className="compare-pane"><StageImage photoId={active} photo={photoForId(snapshot, active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} before={ui.beforeAfter === "original"} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /><span className="pane-label">Select</span></div><div className="compare-pane"><StageImage photoId={candidate} photo={photoForId(snapshot, candidate)} previewEdge={previewEdge} slot={previewSlot(ui.view, 1)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span className="pane-label">Candidate {candidate ?? "—"}</span></div></div> : ui.view === "reference" ? <div className="compare-panes"><div className="compare-pane"><StageImage photoId={ui.referenceId} photo={photoForId(snapshot, ui.referenceId)} previewEdge={previewEdge} slot="reference" viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span className="pane-label">Reference {ui.referenceId ?? "—"}</span></div><div className="compare-pane"><StageImage photoId={active} photo={photoForId(snapshot, active)} previewEdge={previewEdge} slot="reference-active" viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /><span className="pane-label">Active</span></div></div> : ui.view === "survey" ? <div className="survey-grid">{(selection.length ? selection : active == null ? [] : [active]).map((id, index) => <button type="button" className={id === active ? "survey-photo selected" : "survey-photo"} key={id} onClick={() => { setUi({ view: "detail" }); void send("library.select", { ids: [id], active: id, mode: "replace" }); }}><StageImage photoId={id} photo={photoForId(snapshot, id)} previewEdge={previewEdge} slot={previewSlot(ui.view, index)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span>{index + 1}</span></button>)}</div> : ui.view === "people" ? <div className="people-stage"><StageImage photoId={active} photo={photoForId(snapshot, active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><div className="face-boxes">{Array.isArray(record(snapshot?.source).faces) ? (record(snapshot?.source).faces as unknown[]).map((face, index) => { const f = record(face); const r = box(f.rect ?? f.bounds) ?? { x0: 0.3 + index * 0.05, y0: 0.25, x1: 0.44 + index * 0.05, y1: 0.42 }; return <span key={index} style={{ left: `${r.x0 * 100}%`, top: `${r.y0 * 100}%`, width: `${(r.x1 - r.x0) * 100}%`, height: `${(r.y1 - r.y0) * 100}%` }} />; }) : null}</div></div> : ui.beforeAfter !== "off" && ui.beforeAfter !== "original" ? <BeforeAfterStage mode={ui.beforeAfter} photoId={active} photo={photoForId(snapshot, active)} previewEdge={previewEdge} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /> : <div className="single-pane"><StageImage photoId={active} photo={photoForId(snapshot, active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} before={ui.beforeAfter === "original"} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} />{ui.panel === "crop" ? <CropOverlay develop={develop} guide={ui.cropOverlay} /> : null}{ui.maskOverlay && ui.panel === "masking" ? <MaskOverlay develop={develop} pins={ui.maskPins} /> : null}{ui.panel === "remove" ? <SpotsOverlay develop={develop} /> : null}{ui.panel === "redeye" ? <SpotsOverlay develop={develop} eyes /> : null}{ui.clipping ? <div className="clipping-overlay" aria-label="Clipping preview" /> : null}</div>}
         {ui.infoOverlay ? <InfoOverlay photo={photo} develop={develop} onClose={() => setUi({ infoOverlay: 0 })} /> : null}
         {ui.navigator ? <Navigator zoom={zoom} pan={pan} onChange={setPan} /> : null}
         {histogram ? <div className="histogram-badge" aria-label="Histogram available">Histogram</div> : null}

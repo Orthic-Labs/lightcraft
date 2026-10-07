@@ -7,6 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
+use lightcraft_engine::Session;
+use lightcraft_engine::catalog::{Op, Photo, PhotoId, Source};
 use lightcraft_tiff::tags as t;
 use lightcraft_tiff::{IfdBuilder, ImageData, TiffWriter, Value};
 
@@ -15,6 +17,7 @@ const ARW_HEIGHT: u32 = 16;
 const PNG_WIDTH: u32 = 96;
 const PNG_HEIGHT: u32 = 64;
 const MAX_DIMENSION: u32 = 4096;
+pub const SCALABILITY_PHOTO_COUNT: usize = 2048;
 const SONY_BLACK_LEVEL: u16 = 0x7310;
 const SONY_WB_RGGB: u16 = 0x7313;
 
@@ -25,6 +28,8 @@ pub struct FixtureInputs {
     pub arw: PathBuf,
     pub png: PathBuf,
     pub catalog: PathBuf,
+    pub scalability_library: PathBuf,
+    pub scalability_sources: PathBuf,
 }
 
 /// Write one real Sony ARW, one sRGB PNG, and one Lightroom catalog that references both.
@@ -40,11 +45,45 @@ pub fn write_fixture_inputs(root: &Path) -> Result<FixtureInputs, String> {
     let arw = photos.join("synthetic-sonya-01.arw");
     let png = photos.join("procedural-rgb-01.png");
     let catalog = root.join("synthetic-lightroom.lrcat");
+    let scalability_sources = root.join("scalability-sources");
+    let scalability_library = root.join("scalability-library");
     std::fs::write(&arw, synthetic_sony_arw(ARW_WIDTH, ARW_HEIGHT)?).map_err(|e| format!("write ARW: {e}"))?;
     std::fs::write(&png, procedural_png(PNG_WIDTH, PNG_HEIGHT)?).map_err(|e| format!("write PNG: {e}"))?;
     let file_name = arw.file_name().and_then(|n| n.to_str()).ok_or_else(|| "ARW fixture name is not UTF-8".to_string())?;
     std::fs::write(&catalog, synthetic_lightroom_catalog(&root, file_name)?).map_err(|e| format!("write Lightroom catalog: {e}"))?;
-    Ok(FixtureInputs { root, arw, png, catalog })
+    write_scalability_library(&scalability_library, &scalability_sources)?;
+    Ok(FixtureInputs { root, arw, png, catalog, scalability_library, scalability_sources })
+}
+
+/// Build a persisted 2048-photo library whose entries point at real generated PNG files.
+fn write_scalability_library(library: &Path, sources: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(library).map_err(|e| format!("create scalability library: {e}"))?;
+    std::fs::create_dir_all(sources).map_err(|e| format!("create scalability sources: {e}"))?;
+    let mut ops = Vec::with_capacity(SCALABILITY_PHOTO_COUNT);
+    for index in 0..SCALABILITY_PHOTO_COUNT {
+        let width = 32 + (index as u32 % 31);
+        let height = 24 + ((index as u32 * 7) % 23);
+        let file_name = format!("scale-{:04}.png", SCALABILITY_PHOTO_COUNT - index);
+        let path = sources.join(&file_name);
+        std::fs::write(&path, procedural_png_seeded(width, height, index as u32)?)
+            .map_err(|e| format!("write scalability PNG {}: {e}", path.display()))?;
+        let mut photo = Photo::new(
+            PhotoId(index as u64 + 1),
+            Source::File { path: path.to_string_lossy().into_owned() },
+            &file_name,
+            "PNG",
+            width,
+            height,
+            "2026-10-08T12:00:00",
+        );
+        photo.captured = Some(format!("2026-{:02}-{:02}T12:00:00", 1 + index % 12, 1 + index % 28));
+        photo.rating = (index % 6) as u8;
+        ops.push(Op::AddPhoto { photo: Box::new(photo) });
+    }
+    let mut session = Session::new().with_system_clock();
+    session.open_library(library, false).map_err(|e| format!("open scalability library: {e}"))?;
+    session.commit("Scalability fixture", Op::Batch { ops }).map_err(|e| format!("commit scalability fixture: {e}"))?;
+    session.persist().map_err(|e| format!("persist scalability fixture: {e}"))
 }
 
 /// Build a little-endian TIFF-shaped Sony ARW with an uncompressed 14-bit RGGB sensor plane.
@@ -88,6 +127,10 @@ pub fn synthetic_sony_arw(width: u32, height: u32) -> Result<Vec<u8>, String> {
 
 /// Build deterministic opaque RGBA PNG pixels with an sRGB chunk and no external assets.
 pub fn procedural_png(width: u32, height: u32) -> Result<Vec<u8>, String> {
+    procedural_png_seeded(width, height, 0)
+}
+
+fn procedural_png_seeded(width: u32, height: u32, seed: u32) -> Result<Vec<u8>, String> {
     validate_dimensions(width, height)?;
     let capacity = width.checked_mul(height).and_then(|px| px.checked_mul(4)).ok_or_else(|| "PNG dimensions overflow".to_string())? as usize;
     let mut pixels = Vec::with_capacity(capacity);
@@ -96,7 +139,7 @@ pub fn procedural_png(width: u32, height: u32) -> Result<Vec<u8>, String> {
             let checker = ((x / 12) + (y / 12)) % 2;
             let r = ((x * 255) / width.max(1)) as u8;
             let g = ((y * 255) / height.max(1)) as u8;
-            let b = if checker == 0 { 56 } else { 212 };
+            let b = if (checker + seed % 2) == 0 { 56 } else { 212 };
             pixels.extend_from_slice(&[r, g, b, 255]);
         }
     }

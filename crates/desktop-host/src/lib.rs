@@ -25,6 +25,10 @@ pub struct HostOptions {
     pub library_path: Option<PathBuf>,
     pub demo: bool,
     pub demo_count: usize,
+    /// SAM 3 checkpoint directory. `None` uses LightCraft's standard config location.
+    pub sam3_dir: Option<PathBuf>,
+    /// Optional one-per-line SAM 3 mirror file. `None` uses LightCraft's standard config location.
+    pub sam3_mirrors_file: Option<PathBuf>,
 }
 
 enum Request {

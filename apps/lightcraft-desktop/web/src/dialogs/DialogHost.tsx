@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useDesktop } from '../desktop';
-import type { DesktopContextValue, DialogState, JsonObject } from '../types';
+import type { DesktopContextValue, DialogState, JsonObject, UiState } from '../types';
 import './dialogs.css';
 
 type AnyRecord = Record<string, any>;
@@ -93,6 +93,28 @@ function UnsavedQuitDialog({ desktop, d }: { desktop: DesktopContextValue; d: Di
   return <Frame title="Quit with unsaved changes?" busy={busy} onClose={keepOpen} actions={<><Button disabled={busy} onClick={keepOpen}>Keep Open</Button><Button disabled={busy} onClick={() => void quitAnyway()}>Quit Anyway</Button><Button primary disabled={busy} onClick={() => void saveAndQuit()}>Retry Save &amp; Quit</Button></>}><Note tone="warning">Some library changes could not be saved. Try saving again before closing.</Note>{typeof d.params?.error === 'string' && !error && <Note>{d.params.error}</Note>}{error && <Note tone="error">{error}</Note>}</Frame>;
 }
 
+function ConfirmDeleteDialog({ desktop, d }: { desktop: DesktopContextValue; d: DialogState }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const command = d.params?.command === 'photo.deletePermanently' ? 'photo.deletePermanently' : 'photo.delete';
+  const permanent = command === 'photo.deletePermanently';
+  const confirm = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const payload: AnyRecord = { ...(d.params || {}), confirmed: true, skipConfirmation: true };
+      delete payload.command;
+      await desktop.run(command, payload);
+      desktop.setDialog(null);
+    } catch (reason) {
+      setError(errorText(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <Frame title={permanent ? 'Delete Photos Permanently?' : 'Move Photos to Recently Deleted?'} busy={busy} onClose={() => desktop.setDialog(null)} actions={<><Button disabled={busy} onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary disabled={busy} onClick={() => void confirm()}>{permanent ? 'Delete Permanently' : 'Delete Photos'}</Button></>}><Note tone="warning">{permanent ? 'These photos cannot be restored.' : 'Photos can be restored from Recently Deleted.'}</Note>{error && <Note tone="error">{error}</Note>}</Frame>;
+}
+
 async function choose(native: DesktopContextValue['native'], action: string, params: JsonObject = {}) { const result: AnyRecord = await native(action, params) as AnyRecord; if (typeof result === 'string') return [result]; if (Array.isArray(result)) return result.filter((p) => typeof p === 'string'); return arr(result?.paths || result?.files || result?.selected || (result?.path ? [result.path] : [] )).filter((p) => typeof p === 'string'); }
 
 function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextValue }) {
@@ -126,7 +148,109 @@ function MergeDialog({ kind, d, desktop }: { kind: string; d: DialogState; deskt
 function AlbumDialog({ folder, desktop, d }: { folder: boolean; desktop: DesktopContextValue; d: DialogState }) { const [name, setName] = useState(text(d.params?.name)); const [error, setError] = useState(''); const save = async () => { if (!name.trim()) { setError(`Enter a ${folder ? 'folder' : 'album'} name.`); return; } try { await desktop.run(folder ? 'album.create' : 'album.create', { name: name.trim(), folder, addSelected: !folder }); desktop.setDialog(null); } catch (e) { setError(String(e)); } }; return <Frame title={folder ? 'New Folder' : 'New Album'} onClose={() => desktop.setDialog(null)} actions={<><Button onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary onClick={() => void save()}>Create</Button></>}><Field label="Name" value={name} onChange={setName} placeholder={folder ? 'Folder name' : 'Album name'} />{error && <Note tone="error">{error}</Note>}</Frame>; }
 function SmartAlbumDialog({ desktop, d }: { desktop: DesktopContextValue; d: DialogState }) { const [name, setName] = useState(text(d.params?.name)); const [field, setField] = useState(text(d.params?.field, 'rating')); const [op, setOp] = useState(text(d.params?.operator, field === 'rating' ? 'gte' : 'is')); const [value, setValue] = useState(text(d.params?.value, '3')); const save = async () => { try { const numeric = ['rating', 'iso', 'aperture', 'focalLength', 'megapixels', 'album', 'sharpness'].includes(field); const boolean = field === 'edited'; const parsed = Number(value); const ruleValue = numeric ? (Number.isFinite(parsed) ? parsed : 0) : boolean ? ['true', 'yes', '1'].includes(value.trim().toLowerCase()) : value; await desktop.run('album.createSmart', { name: name.trim() || 'Smart Album', rules: { ruleSet: { match: 'all', rules: [{ field, op, value: ruleValue }] } } }); desktop.setDialog(null); } catch (e) { desktop.setNotice(String(e)); } }; const options: [string, string][] = field === 'rating' ? [["is", 'Is'], ['gte', 'At least'], ['lte', 'At most']] : field === 'camera' || field === 'keywords' ? [["contains", 'Contains'], ['is', 'Is'], ['isNot', 'Is not']] : [["is", 'Is'], ['isNot', 'Is not']]; return <Frame title="Smart Album" onClose={() => desktop.setDialog(null)} actions={<><Button onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary onClick={() => void save()}>Create Smart Album</Button></>}><Field label="Name" value={name} onChange={setName} placeholder="Smart Album" /><Select label="Match field" value={field} options={[["rating", 'Rating'], ['flag', 'Pick flag'], ['label', 'Color label'], ['camera', 'Camera'], ['keywords', 'Keywords'], ['edited', 'Has edits']]} onChange={(v) => { setField(v); setOp(v === 'rating' ? 'gte' : v === 'camera' || v === 'keywords' ? 'contains' : 'is'); }} /><Select label="Condition" value={op} options={options} onChange={setOp} /><Field label="Value" value={value} onChange={setValue} /></Frame>; }
 
-function SettingsDialog({ desktop, d }: { desktop: DesktopContextValue; d: DialogState }) { const tabs = ['general', 'import', 'performance', 'privacy', 'language']; const [tab, setTab] = useState(text(d.params?.tab, 'general')); const [values, setValues] = useState<AnyRecord>({ ...(d.params?.values as AnyRecord || {}) }); const update = (key: string, value: unknown) => setValues((old) => ({ ...old, [key]: value })); const save = async () => { try { if (tab === 'import') { const allowed = ['rawPreset', 'otherPreset', 'perCamera', 'cameras', 'copyright', 'creator', 'metadataPreset']; const settings = Object.fromEntries(allowed.filter((key) => values[key] !== undefined).map((key) => [key, values[key]])); await desktop.run('library.preferences', { import: settings }); } else if (tab === 'performance' && values.cacheMb != null) await desktop.run('library.preferences', { cacheMb: Number(values.cacheMb) }); await desktop.native('preferences.patch', { ui: { [tab]: values } }); desktop.setDialog(null); } catch (e) { desktop.setNotice(String(e)); } }; return <Frame title="Settings" wide onClose={() => desktop.setDialog(null)} actions={<><Button onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary onClick={() => void save()}>Save</Button></>}><div className="lc-settings"><nav aria-label="Settings sections">{tabs.map((item) => <button key={item} className={tab === item ? 'lc-settings-tab active' : 'lc-settings-tab'} onClick={() => setTab(item)}>{item[0].toUpperCase() + item.slice(1)}</button>)}</nav><div className="lc-settings-panel">{tab === 'general' && <><Select label="Theme" value={text(values.theme, desktop.ui.theme)} options={[["system", 'System'], ['light', 'Light'], ['dark', 'Dark']]} onChange={(v) => update('theme', v)} /><Check checked={bool(values.confirmDelete, true)} onChange={(v) => update('confirmDelete', v)}>Confirm photo deletion</Check></>}{tab === 'import' && <><Field label="Raw develop preset ID" value={text(values.rawPreset, 'default')} onChange={(v) => update('rawPreset', v)} placeholder="default" /><Field label="Other photo preset ID" value={text(values.otherPreset, 'default')} onChange={(v) => update('otherPreset', v)} placeholder="default" /><Check checked={bool(values.perCamera)} onChange={(v) => update('perCamera', v)}>Use per-camera defaults</Check><Field label="Default copyright" value={text(values.copyright)} onChange={(v) => update('copyright', v)} /><Field label="Default creator" value={text(values.creator)} onChange={(v) => update('creator', v)} /><Field label="Metadata preset" value={text(values.metadataPreset)} onChange={(v) => update('metadataPreset', v)} /></>}{tab === 'performance' && <><Field label="Preview edge" type="number" value={num(values.previewEdge, 2048)} onChange={(v) => update('previewEdge', Number(v))} /><Field label="Cache size (MB)" type="number" value={num(values.cacheMb, 0)} onChange={(v) => update('cacheMb', Number(v))} /><Check checked={bool(values.gpu, true)} onChange={(v) => update('gpu', v)}>Use GPU rendering when available</Check></>}{tab === 'privacy' && <Check checked={bool(values.telemetry)} onChange={(v) => update('telemetry', v)}>Share anonymous diagnostics</Check>}{tab === 'language' && <Select label="Language" value={text(values.locale, desktop.ui.locale)} options={[["en", 'English'], ['zh-hans', '简体中文'], ['zh-hant', '繁體中文'], ['ja', '日本語']]} onChange={(v) => update('locale', v)} />}</div></div></Frame>; }
+function SettingsDialog({ desktop, d }: { desktop: DesktopContextValue; d: DialogState }) {
+  const record = (value: unknown): AnyRecord => value && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : {};
+  const persisted = record(desktop.snapshot?.preferences);
+  const persistedUi = record(persisted.ui ?? persisted.layout ?? persisted);
+  const persistedGeneral = record(persistedUi.general);
+  const persistedPerformance = record(persistedUi.performance);
+  const legacy = record(persisted.settings);
+  const supplied = record(d.params?.values);
+  const initial: AnyRecord = {
+    ...legacy,
+    ...persistedUi,
+    ...persistedGeneral,
+    ...persistedPerformance,
+    ...supplied,
+    theme: text(supplied.theme, text(persistedUi.theme, text(persistedGeneral.theme, text(legacy.theme, desktop.ui.theme)))),
+    locale: text(supplied.locale, text(persistedUi.locale, text(persistedGeneral.locale, text(legacy.locale, desktop.ui.locale)))),
+    confirmDelete: typeof supplied.confirmDelete === 'boolean' ? supplied.confirmDelete : typeof persistedUi.confirmDelete === 'boolean' ? persistedUi.confirmDelete : typeof persistedGeneral.confirmDelete === 'boolean' ? persistedGeneral.confirmDelete : typeof legacy.confirmDelete === 'boolean' ? legacy.confirmDelete : desktop.ui.confirmDelete,
+    previewEdge: num(supplied.previewEdge, num(persistedUi.previewEdge, num(persistedPerformance.previewEdge, num(legacy.previewEdge, desktop.ui.previewEdge)))),
+    cacheMb: num(supplied.cacheMb, num(persistedUi.cacheMb, num(persistedPerformance.cacheMb, num(persisted.cacheMb, 0)))),
+    memoryMb: Number(supplied.memoryMb ?? supplied.memoryBudget ?? persistedUi.memoryMb ?? persistedUi.memoryBudget ?? persistedPerformance.memoryMb ?? persistedPerformance.memoryBudget ?? desktop.ui.memoryMb),
+    gpu: typeof supplied.gpu === 'boolean' ? supplied.gpu : typeof persistedUi.gpu === 'boolean' ? persistedUi.gpu : typeof persistedPerformance.gpu === 'boolean' ? persistedPerformance.gpu : desktop.ui.gpu,
+  };
+  const requestedTab = text(d.params?.tab, 'general');
+  const [tab, setTab] = useState(['general', 'import', 'performance', 'language'].includes(requestedTab) ? requestedTab : 'general');
+  const [values, setValues] = useState<AnyRecord>(initial);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const tabs = ['general', 'import', 'performance', 'language'];
+  const update = (key: string, value: unknown) => setValues((old) => ({ ...old, [key]: value }));
+
+  useEffect(() => {
+    let live = true;
+    const load = async () => {
+      try {
+        const [library, gpu, memory] = await Promise.all([
+          desktop.run('library.preferences', {}),
+          desktop.run('app.gpu', {}),
+          desktop.run('app.memoryBudget', {}),
+        ]);
+        if (!live) return;
+        const libraryPrefs = record(library);
+        const importPrefs = record(libraryPrefs.import);
+        const gpuReport = record(gpu);
+        const memoryReport = record(memory);
+        setValues((old) => ({
+          ...old,
+          rawPreset: importPrefs.rawPreset == null ? old.rawPreset : text(importPrefs.rawPreset, 'default'),
+          otherPreset: importPrefs.otherPreset == null ? old.otherPreset : text(importPrefs.otherPreset, 'default'),
+          perCamera: typeof importPrefs.perCamera === 'boolean' ? importPrefs.perCamera : old.perCamera,
+          cameras: importPrefs.cameras ?? old.cameras,
+          copyright: text(importPrefs.copyright, text(old.copyright)),
+          creator: text(importPrefs.creator, text(old.creator)),
+          metadataPreset: importPrefs.metadataPreset == null ? '' : text(importPrefs.metadataPreset),
+          cacheMb: num(libraryPrefs.cacheMb, num(old.cacheMb)),
+          gpu: typeof gpuReport.enabled === 'boolean' ? gpuReport.enabled : old.gpu,
+          memoryMb: num(old.memoryMb) === 0 ? 0 : num(memoryReport.budget, num(old.memoryMb * 1048576)) / 1048576,
+        }));
+      } catch (reason) {
+        if (live) setError(errorText(reason));
+      }
+    };
+    void load();
+    return () => { live = false; };
+  }, []);
+
+  const save = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      if (tab === 'import') {
+        const allowed = ['rawPreset', 'otherPreset', 'perCamera', 'cameras', 'copyright', 'creator', 'metadataPreset'];
+        const settings = Object.fromEntries(allowed.filter((key) => values[key] !== undefined).map((key) => [key, values[key]]));
+        await desktop.run('library.preferences', { import: settings });
+      }
+      if (values.cacheMb != null) await desktop.run('library.preferences', { cacheMb: Math.max(0, Math.round(num(values.cacheMb))) });
+      if (typeof values.gpu === 'boolean') await desktop.run('app.gpu', { enabled: values.gpu });
+      const memoryMb = num(values.memoryMb, num(values.memoryBudget));
+      if (memoryMb >= 64) await desktop.run('app.memoryBudget', { mb: Math.round(memoryMb) });
+      const memoryChoice = memoryMb >= 0 ? Math.round(memoryMb) : desktop.ui.memoryMb;
+      const edge = Math.max(256, Math.min(8192, Math.round(num(values.previewEdge, desktop.ui.previewEdge))));
+      if (tab === 'performance' && edge !== desktop.ui.previewEdge) {
+        await desktop.run('library.buildPreviews', { size: 'standard', edge });
+      }
+      const uiPatch: AnyRecord = {
+        theme: values.theme,
+        locale: values.locale,
+        confirmDelete: values.confirmDelete,
+        previewEdge: edge,
+        gpu: values.gpu,
+        memoryMb: memoryChoice,
+      };
+      await desktop.native('preferences.patch', { ui: Object.fromEntries(Object.entries(uiPatch).filter(([, value]) => value !== undefined)) });
+      desktop.setUi(uiPatch as Partial<UiState>);
+      desktop.setDialog(null);
+    } catch (reason) {
+      setError(errorText(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <Frame title="Settings" wide busy={busy} onClose={() => desktop.setDialog(null)} actions={<><Button disabled={busy} onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary disabled={busy} onClick={() => void save()}>Save</Button></>}><div className="lc-settings"><nav aria-label="Settings sections">{tabs.map((item) => <button key={item} className={tab === item ? 'lc-settings-tab active' : 'lc-settings-tab'} onClick={() => setTab(item)}>{item[0].toUpperCase() + item.slice(1)}</button>)}</nav><div className="lc-settings-panel">{tab === 'general' && <><Select label="Theme" value={text(values.theme, desktop.ui.theme)} options={[["system", 'System'], ['light', 'Light'], ['dark', 'Dark']]} onChange={(v) => update('theme', v)} /><Check checked={bool(values.confirmDelete, desktop.ui.confirmDelete)} onChange={(v) => update('confirmDelete', v)}>Confirm photo deletion</Check></>}{tab === 'import' && <><Field label="Raw develop preset ID" value={text(values.rawPreset, 'default')} onChange={(v) => update('rawPreset', v)} placeholder="default" /><Field label="Other photo preset ID" value={text(values.otherPreset, 'default')} onChange={(v) => update('otherPreset', v)} placeholder="default" /><Check checked={bool(values.perCamera)} onChange={(v) => update('perCamera', v)}>Use per-camera defaults</Check><Field label="Default copyright" value={text(values.copyright)} onChange={(v) => update('copyright', v)} /><Field label="Default creator" value={text(values.creator)} onChange={(v) => update('creator', v)} /><Field label="Metadata preset" value={text(values.metadataPreset)} onChange={(v) => update('metadataPreset', v)} /></>}{tab === 'performance' && <><Field label="Preview edge" type="number" value={num(values.previewEdge, desktop.ui.previewEdge)} min={256} max={8192} step={128} onChange={(v) => update('previewEdge', Number(v))} /><Field label="Cache size (MB)" type="number" value={num(values.cacheMb, 0)} min={0} onChange={(v) => update('cacheMb', Number(v))} /><Field label="Memory budget (MB; 0 = automatic)" type="number" value={num(values.memoryMb, desktop.ui.memoryMb)} min={0} onChange={(v) => update('memoryMb', Number(v))} /><Check checked={bool(values.gpu, desktop.ui.gpu)} onChange={(v) => update('gpu', v)}>Use GPU rendering when available</Check></>}{tab === 'language' && <Select label="Language" value={text(values.locale, desktop.ui.locale)} options={[["en", 'English'], ['zh-hans', '简体中文'], ['zh-hant', '繁體中文'], ['ja', '日本語']]} onChange={(v) => update('locale', v)} />}</div></div></Frame>;
+}
 
 const SETTINGS_GROUPS = ['basic', 'tone', 'curve', 'color', 'effects', 'detail', 'optics', 'geometry', 'masks', 'spotRemoval', 'redEye'];
 function GroupsDialog({ paste, desktop, d }: { paste: boolean; desktop: DesktopContextValue; d: DialogState }) { const initial = arr(d.params?.groups).map(String); const [groups, setGroups] = useState<string[]>(initial.length ? initial : SETTINGS_GROUPS.slice(0, 8)); const toggle = (group: string) => setGroups((old) => old.includes(group) ? old.filter((item) => item !== group) : [...old, group]); const submit = async () => { try { await desktop.run(paste ? 'develop.paste' : 'develop.copy', { groups }); desktop.setDialog(null); } catch (e) { desktop.setNotice(String(e)); } }; return <Frame title={paste ? 'Paste Selected Edit Settings' : 'Choose Edit Settings to Copy'} onClose={() => desktop.setDialog(null)} actions={<><Button onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary onClick={() => void submit()}>{paste ? 'Paste Settings' : 'Copy Settings'}</Button></>}><div className="lc-group-list">{SETTINGS_GROUPS.map((group) => <Check key={group} checked={groups.includes(group)} onChange={() => toggle(group)}>{group === 'spotRemoval' ? 'Spot removal' : group === 'redEye' ? 'Red eye' : group[0].toUpperCase() + group.slice(1)}</Check>)}</div><div className="lc-dialog-toolbar"><Button onClick={() => setGroups([...SETTINGS_GROUPS])}>Select all</Button><Button onClick={() => setGroups([])}>Clear</Button></div></Frame>; }
@@ -146,6 +270,7 @@ function LightroomResult({ d, desktop }: { d: DialogState; desktop: DesktopConte
 export default function DialogHost({ desktop: provided }: HostProps = {}) {
   const hookContext = useDesktop(); const context = provided || hookContext; const { dialog } = context; if (!dialog) return null; const kind = dialog.kind.toLowerCase();
   if (kind === 'unsavedquit') return <UnsavedQuitDialog d={dialog} desktop={context} />;
+  if (kind === 'confirmdelete' || kind === 'confirm-delete') return <ConfirmDeleteDialog d={dialog} desktop={context} />;
   if (kind === 'import' || kind === 'importphotos' || kind === 'importfolder' || kind === 'importdevice') return <ImportDialog d={dialog} desktop={context} />;
   if (kind === 'lightroom' || kind === 'lightroomimport' || kind === 'importlightroom') return <LightroomDialog d={dialog} desktop={context} />;
   if (kind === 'export') return <ExportDialog d={dialog} desktop={context} />;
