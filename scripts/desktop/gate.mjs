@@ -62,6 +62,9 @@ bootstrapLockfile(lockfile);
 if (process.platform === "darwin") {
   const revision = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" });
   if (revision.status !== 0) fail("cannot bind native Mac proof to checked-out revision");
+  // Actions PR checkout is detached. Attach a runner-local branch to the exact
+  // tested commit so existing RightRelease's primary-checkout contract holds.
+  run("git", ["switch", "--create", `lightcraft-native-ci-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`], "attach native CI checkout");
   const nativeEnv = {
     ...process.env,
     RIGHT_GIT_SOURCE_REVISION: revision.stdout.trim(),
