@@ -26,7 +26,13 @@ function lockfileReady(lockfile) {
 }
 
 function bootstrapLockfile(lockfile) {
-  if (lockfileReady(lockfile)) return;
+  if (lockfileReady(lockfile)) {
+    const probe = runCargoSync(["metadata", "--locked", "--format-version", "1"], { cwd: repoRoot, encoding: "utf8", maxBuffer: 16 * 1024 * 1024, windowsHide: true });
+    if (!probe.error && probe.status === 0) return;
+    const diagnostic = probe.error?.message || probe.stderr || `Cargo metadata exited ${probe.status}`;
+    if (!/cannot update the lock file|lock file .* needs to be updated/i.test(diagnostic)) fail(`Cargo lock validation: ${diagnostic}`);
+    console.log("desktop gate: dependency changes require verified Cargo.lock refresh");
+  }
   run("cargo", ["generate-lockfile"], "Cargo.lock bootstrap via @rightkit/release");
   if (!lockfileReady(lockfile)) fail("Cargo.lock bootstrap did not resolve pinned rightkit-control & rightkit-qa");
   const bytes = readFileSync(lockfile);
