@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as previewApi from "../api";
-import { requestPreview } from "../api";
+import { convertFileSrc, requestPreview } from "../api";
 import type { PreviewDescriptor, PreviewQuality, PreviewRequest } from "../desktop/types";
 
 export type PreviewState =
@@ -30,6 +30,7 @@ export interface UsePreviewResult {
 
 const MAX_DIMENSION = 8192;
 const MAX_SEQUENCE = Number.MAX_SAFE_INTEGER;
+const MAX_ACKNOWLEDGED_HANDLES = 256;
 let nextSequenceValue = 0;
 
 function nextSequence(): number {
@@ -41,12 +42,32 @@ function boundedDimension(value: number): number {
   return Math.max(1, Math.min(MAX_DIMENSION, Math.round(Number.isFinite(value) ? value : 1)));
 }
 
+function decodePreviewUrl(url: string): Promise<void> {
+  if (typeof Image === "undefined") return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.decoding = "async";
+    image.onload = () => resolve();
+    image.onerror = () => reject(new Error("Preview could not be decoded"));
+    try {
+      image.src = url;
+      if (typeof image.decode === "function") {
+        void image.decode().then(resolve, () => reject(new Error("Preview could not be decoded")));
+      }
+    } catch {
+      reject(new Error("Preview could not be decoded"));
+    }
+  });
+}
+
 /** Request native decoded pixels and ignore any result from an older generation or sequence. */
 export function usePreview(options: UsePreviewOptions): UsePreviewResult {
   const latestSequence = useRef(0);
   const activeDescriptor = useRef<PreviewDescriptor | null>(null);
+  const lastDecoded = useRef<{ descriptor: PreviewDescriptor; url: string } | null>(null);
   const pendingRequest = useRef<PreviewRequest | null>(null);
   const acknowledgedHandles = useRef<Set<string>>(new Set());
+  const acknowledgedOrder = useRef<string[]>([]);
   const lastPhoto = useRef(options.photoId);
   const [retryValue, setRetryValue] = useState(0);
   const [state, setState] = useState<PreviewState>({ status: "idle", descriptor: null, url: null, error: null });
@@ -68,9 +89,14 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
   const acknowledge = useCallback((handle: string) => {
     if (!handle || acknowledgedHandles.current.has(handle)) return;
     acknowledgedHandles.current.add(handle);
+    acknowledgedOrder.current.push(handle);
+    if (acknowledgedOrder.current.length > MAX_ACKNOWLEDGED_HANDLES) {
+      const expired = acknowledgedOrder.current.shift();
+      if (expired) acknowledgedHandles.current.delete(expired);
+    }
     const bridge = (previewApi as unknown as { acknowledgePreview?: (value: string) => Promise<unknown> | unknown }).acknowledgePreview;
     if (!bridge) return;
-    void Promise.resolve(bridge(handle)).catch(() => undefined);
+    void Promise.resolve().then(() => bridge(handle)).catch(() => undefined);
   }, []);
 
   const onImageLoad = useCallback((descriptor: PreviewDescriptor) => {
@@ -95,6 +121,7 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
     if (options.enabled === false || !Number.isSafeInteger(options.photoId) || options.photoId < 0) {
       if (activeDescriptor.current) acknowledge(activeDescriptor.current.handle);
       activeDescriptor.current = null;
+      lastDecoded.current = null;
       pendingRequest.current = null;
       setState({ status: "idle", descriptor: null, url: null, error: null });
       return;
@@ -108,6 +135,7 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
     if (photoChanged) {
       if (activeDescriptor.current) acknowledge(activeDescriptor.current.handle);
       activeDescriptor.current = null;
+      lastDecoded.current = null;
     }
     pendingRequest.current = current;
     setState((previous) => photoChanged
@@ -122,18 +150,37 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
           acknowledge(descriptor.handle);
           return;
         }
-        pendingRequest.current = null;
-        if (activeDescriptor.current && activeDescriptor.current.handle !== descriptor.handle) acknowledge(activeDescriptor.current.handle);
-        activeDescriptor.current = descriptor;
-        const url = `lightcraft-preview://${descriptor.handle}`;
-        options.onHistogram?.(descriptor.histogram);
-        setState({ status: "ready", descriptor, url, error: null });
+        const protocolUrl = `lightcraft-preview://${descriptor.handle}`;
+        const browserUrl = convertFileSrc(descriptor.handle, "lightcraft-preview");
+        void decodePreviewUrl(browserUrl).then(() => {
+          if (cancelled || pendingRequest.current?.sequence !== current.sequence) {
+            acknowledge(descriptor.handle);
+            return;
+          }
+          pendingRequest.current = null;
+          if (activeDescriptor.current && activeDescriptor.current.handle !== descriptor.handle) acknowledge(activeDescriptor.current.handle);
+          activeDescriptor.current = descriptor;
+          lastDecoded.current = { descriptor, url: protocolUrl };
+          options.onHistogram?.(descriptor.histogram);
+          setState({ status: "ready", descriptor, url: protocolUrl, error: null });
+        }).catch((error: unknown) => {
+          if (cancelled || pendingRequest.current?.sequence !== current.sequence) {
+            acknowledge(descriptor.handle);
+            return;
+          }
+          pendingRequest.current = null;
+          acknowledge(descriptor.handle);
+          const retained = lastDecoded.current?.descriptor.photoId === current.photoId ? lastDecoded.current : null;
+          const message = error instanceof Error ? error.message : String(error);
+          setState({ status: "error", descriptor: retained?.descriptor ?? null, url: retained?.url ?? null, error: message || "Preview could not be decoded" });
+        });
       })
       .catch((error: unknown) => {
         if (cancelled || pendingRequest.current?.sequence !== current.sequence) return;
         pendingRequest.current = null;
         const message = error instanceof Error ? error.message : String(error);
-        setState((previous) => ({ status: "error", descriptor: previous.descriptor, url: previous.url, error: message || "Preview unavailable" }));
+        const retained = lastDecoded.current?.descriptor.photoId === current.photoId ? lastDecoded.current : null;
+        setState({ status: "error", descriptor: retained?.descriptor ?? null, url: retained?.url ?? null, error: message || "Preview unavailable" });
       });
     return () => {
       cancelled = true;
@@ -141,6 +188,13 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
     // request values are represented by explicit dependencies below; callback identity is caller-owned.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [options.enabled, options.photoId, options.slot, options.viewGeneration, request.width, request.height, request.quality, request.before, retryValue]);
+
+  useEffect(() => () => {
+    if (activeDescriptor.current) acknowledge(activeDescriptor.current.handle);
+    activeDescriptor.current = null;
+    lastDecoded.current = null;
+    pendingRequest.current = null;
+  }, [acknowledge]);
 
   return { state, request: { ...request, sequence: latestSequence.current }, retry, onImageLoad, onImageError };
 }

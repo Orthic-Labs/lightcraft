@@ -216,9 +216,8 @@ fn sqlite_fixture(tables: &[Table]) -> Result<Vec<u8>, String> {
     bytes[22] = 32;
     bytes[23] = 32;
     bytes[28..32].copy_from_slice(&(page_count as u32).to_be_bytes());
-    // Schema cookie is arbitrary for this read-only fixture; matching table count mirrors
-    // Lightroom's small catalog layout and keeps the header conventional.
-    bytes[44..48].copy_from_slice(&(tables.len() as u32).to_be_bytes());
+    // Use schema format 4, matching SQLite's current format and engine fixture parser.
+    bytes[44..48].copy_from_slice(&4u32.to_be_bytes());
     bytes[56..60].copy_from_slice(&1u32.to_be_bytes());
 
     let mut schema = Vec::with_capacity(tables.len());
@@ -318,6 +317,7 @@ mod tests {
         let catalog = synthetic_lightroom_catalog(Path::new("."), "synthetic-sonya-01.arw")?;
         assert_eq!(&catalog[..16], b"SQLite format 3\0");
         assert_eq!(u16::from_be_bytes([catalog[16], catalog[17]]), 2048);
+        assert_eq!(u32::from_be_bytes([catalog[44], catalog[45], catalog[46], catalog[47]]), 4);
         assert!(catalog.windows(b"Synthetic Lightroom".len()).any(|window| window == b"Synthetic Lightroom"));
         Ok(())
     }

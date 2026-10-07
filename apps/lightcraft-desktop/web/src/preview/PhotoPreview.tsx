@@ -23,8 +23,27 @@ export function PhotoPreview({ photoId, slot, width, height, viewGeneration = 0,
     return convertFileSrc(preview.state.url.replace("lightcraft-preview://", ""), "lightcraft-preview");
   }, [photoId, preview.state.descriptor?.photoId, preview.state.url]);
   const frameStyle: CSSProperties = { width: "100%", height: "100%", minWidth: 1, minHeight: 1, ...style };
+  const descriptor = preview.state.descriptor;
+  // Bind DOM events to descriptor which produced this URL. Hook-level refs reject late
+  // events from an old image after a request/photo swap.
+  const onLoad = descriptor ? () => preview.onImageLoad(descriptor) : undefined;
+  const onError = descriptor ? () => preview.onImageError(descriptor) : undefined;
+  const image = url
+    ? <img {...imageProps} {...(alt === "" ? { alt: "Photo preview" } : { alt })} className={className} style={frameStyle} src={url} width={width} height={height} decoding="async" draggable={false} onLoad={onLoad} onError={onError} />
+    : null;
 
   if (preview.state.status === "error") {
+    if (image) {
+      return (
+        <div className={className} style={{ ...frameStyle, position: "relative" }} role="group" aria-label={`${alt || "Photo"}: ${preview.state.error}`}>
+          {image}
+          <div role="alert" style={{ position: "absolute", inset: "auto 8px 8px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "6px 8px", background: "rgba(0, 0, 0, 0.72)", color: "white" }}>
+            <span data-preview-state="error">{preview.state.error}</span>
+            <button type="button" onClick={preview.retry}>Retry</button>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className={className} style={{ ...frameStyle, display: "grid", placeItems: "center" }} role="img" aria-label={`${alt || "Photo"}: ${preview.state.error}`}>
         <span data-preview-state="error">Preview unavailable</span>
@@ -39,12 +58,7 @@ export function PhotoPreview({ photoId, slot, width, height, viewGeneration = 0,
       </div>
     );
   }
-  const descriptor = preview.state.descriptor;
-  // Bind DOM events to descriptor which produced this URL. Hook-level refs reject late
-  // events from an old image after a request/photo swap.
-  const onLoad = descriptor ? () => preview.onImageLoad(descriptor) : undefined;
-  const onError = descriptor ? () => preview.onImageError(descriptor) : undefined;
-  return <img {...imageProps} {...(alt === "" ? { alt: "Photo preview" } : { alt })} className={className} style={frameStyle} src={url} width={width} height={height} decoding="async" draggable={false} onLoad={onLoad} onError={onError} />;
+  return image;
 }
 
 export default PhotoPreview;
