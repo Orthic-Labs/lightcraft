@@ -230,7 +230,6 @@ impl Tasks {
                                 {
                                     session.selection = Selection::single(PhotoId(first));
                                 }
-                                report
                             })
                     };
                     self.finish(id, result, "import", cancelled);
