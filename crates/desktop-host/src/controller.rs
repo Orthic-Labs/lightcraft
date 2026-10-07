@@ -123,10 +123,7 @@ impl Controller {
                 let _ = reply.send(result);
                 false
             }
-            Request::Preview { request, reply } => {
-                let result = self.preview(request, reply);
-                result
-            }
+            Request::Preview { request, reply } => self.preview(request, reply),
             Request::Preferences { patch, reply } => {
                 let result = self.preferences(patch);
                 let _ = reply.send(result);
@@ -162,9 +159,8 @@ impl Controller {
             "ui.preferences" => self.preferences(Some(params.clone())),
             _ => self.session.execute(id, params).map_err(|error| error.to_string()),
         })
-        .map_err(|error| {
+        .inspect_err(|error| {
             self.last_error = Some(error.clone());
-            error
         })?;
         match result {
             Ok(value) => {

@@ -190,9 +190,9 @@ function firstPath(value: unknown): string | undefined { return pathsFrom(value)
 const HELP_URLS: Record<string, string> = {
   'app.help': 'https://lightcraft.photo/help',
   'app.discord': 'https://discord.gg/artcraft',
-  'app.feedback': 'https://github.com/storytold/lightcraft-can/issues/new',
+  'app.feedback': 'https://github.com/storytold/lightcraft/issues/new',
   'app.website': 'https://lightcraft.photo',
-  'app.github': 'https://github.com/storytold/lightcraft-can',
+  'app.github': 'https://github.com/storytold/lightcraft',
   'app.artcraft': 'https://artcraft.ai',
 };
 
@@ -203,11 +203,16 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [histogram, setHistogram] = useState<unknown>(null);
+  const snapshotRef = useRef<DesktopSnapshot | null>(null);
+  const dialogRef = useRef<DialogState | null>(null);
   const prefHydrated = useRef(false);
   const enginePrefsApplied = useRef<{ gpu: boolean; memoryMb: number } | null>(null);
   const refreshInFlight = useRef<Promise<void> | null>(null);
   const noticeQueue = useRef<string[] | null>(null);
   const liveNotice = useRef<string | null>(null);
+
+  snapshotRef.current = snapshot;
+  dialogRef.current = dialog;
 
   const refresh = useCallback(async () => {
     if (refreshInFlight.current) return refreshInFlight.current;
@@ -336,7 +341,7 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
           return nativeAction(id === 'file.backupLibrary' ? 'backupLibrary' : 'restoreLibrary', params);
         }
         if (id === 'photo.locate') {
-          const idValue = params.id ?? snapshot?.active;
+          const idValue = params.id ?? snapshotRef.current?.active;
           if (typeof idValue !== 'number') throw new Error('no photo selected');
           const path = firstPath(params.path) || firstPath(await nativeAction('chooseFiles', { ...params, multiple: false }));
           if (!path) return null;
@@ -410,13 +415,13 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
           return value;
         }
         if (id === 'photo.setReference') {
-          const referenceId = typeof params.id === 'number' ? params.id : snapshot?.active;
+          const referenceId = typeof params.id === 'number' ? params.id : snapshotRef.current?.active;
           if (typeof referenceId === 'number') setUi({ referenceId });
           return { reference: referenceId ?? null };
         }
-        if (id === 'view.reference' && snapshot?.active !== null && snapshot?.active !== undefined) {
-          setUi({ referenceId: snapshot.active });
-          return { reference: snapshot.active };
+        if (id === 'view.reference' && snapshotRef.current?.active !== null && snapshotRef.current?.active !== undefined) {
+          setUi({ referenceId: snapshotRef.current.active });
+          return { reference: snapshotRef.current.active };
         }
         if (id === 'dialog.allMetadata') {
           const metadata = await runCommand('photo.allMetadata', params);
@@ -438,7 +443,7 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
           window.requestAnimationFrame(() => document.querySelector<HTMLInputElement>('.lc-filter-search input')?.focus());
           return null;
         }
-        if (id === 'view.back' && dialog) { setDialog(null); return null; }
+        if (id === 'view.back' && dialogRef.current) { setDialog(null); return null; }
         if (id === 'dialog.export') { setDialog({ kind: 'export', params }); return null; }
         if (id === 'dialog.copySettings') { setDialog({ kind: 'copySettings', params }); return null; }
         if (id === 'dialog.pasteSettings') { setDialog({ kind: 'pasteSettings', params }); return null; }

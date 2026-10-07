@@ -160,10 +160,11 @@ impl Renderer {
         if request.quality == PreviewQuality::Draft {
             job = job.draft();
         }
-        if !request.before && self.is_loupe_slot(&request.slot) {
-            if let Some(loupe) = session.loupe_job(photo, request.width as usize, request.height as usize, true) {
-                job = if request.quality == PreviewQuality::Draft { loupe.draft() } else { loupe };
-            }
+        if !request.before
+            && self.is_loupe_slot(&request.slot)
+            && let Some(loupe) = session.loupe_job(photo, request.width as usize, request.height as usize, true)
+        {
+            job = if request.quality == PreviewQuality::Draft { loupe.draft() } else { loupe };
         }
         let key = job.key;
         if let Some(previous) = self.pending.remove(&slot) {
@@ -383,13 +384,13 @@ impl Renderer {
         if let Some(slot) = self.slots.get(name) {
             return *slot;
         }
-        if self.slots.len() >= MAX_SLOTS {
-            if let Some(victim) = self.slots.iter().find(|(_, slot)| !self.pending.contains_key(slot)).map(|(name, slot)| (name.clone(), *slot)) {
-                self.slots.remove(&victim.0);
-                self.stages.remove(&victim.1);
-                self.failed.retain(|(slot, _), _| *slot != victim.1);
-                self.drop_queued();
-            }
+        if self.slots.len() >= MAX_SLOTS
+            && let Some(victim) = self.slots.iter().find(|(_, slot)| !self.pending.contains_key(slot)).map(|(name, slot)| (name.clone(), *slot))
+        {
+            self.slots.remove(&victim.0);
+            self.stages.remove(&victim.1);
+            self.failed.retain(|(slot, _), _| *slot != victim.1);
+            self.drop_queued();
         }
         let slot = SlotId(self.next_slot);
         self.next_slot = self.next_slot.wrapping_add(1).max(1);

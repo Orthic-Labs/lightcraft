@@ -33,7 +33,7 @@ enum Event {
     Import {
         id: String,
         prepared: Prepared,
-        opts: ImportOptions,
+        opts: Box<ImportOptions>,
         now: String,
         album: Option<u64>,
         album_name: Option<String>,
@@ -179,7 +179,7 @@ impl Tasks {
                         let _ = tx.send(Event::Import {
                             id: id_for_worker,
                             prepared,
-                            opts,
+                            opts: Box::new(opts),
                             now: job.now().to_string(),
                             album,
                             album_name,
@@ -192,7 +192,7 @@ impl Tasks {
                         let _ = tx.send(Event::Import {
                             id: id_for_worker,
                             prepared: empty,
-                            opts,
+                            opts: Box::new(opts),
                             now: String::new(),
                             album,
                             album_name,
@@ -222,7 +222,7 @@ impl Tasks {
                                 lightcraft_engine::cmd::library::import_batch_done(session, report, album, album_name.as_deref())
                                     .map_err(|error| error.to_string())
                             })
-                            .map(|report| {
+                            .inspect(|report| {
                                 let n = session.undo.len().saturating_sub(undo_before);
                                 session.merge_undo(n, "Import Photos");
                                 if let Some(first) =
@@ -281,7 +281,7 @@ impl Tasks {
         id
     }
 
-    fn insert(&mut self, mut task: Task) -> Result<(), String> {
+    fn insert(&mut self, task: Task) -> Result<(), String> {
         if self.jobs.len() >= MAX_TASKS {
             task.cancel.store(true, Ordering::Relaxed);
             if let Some(worker) = task.worker {

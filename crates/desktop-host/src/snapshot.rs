@@ -155,10 +155,10 @@ pub fn view_slice(session: &mut Session, generation: Option<u64>, offset: usize,
     }
     let result = ViewSlice { generation: current_generation, total: visible.len(), offset: start, photos };
     let mut value = serde_json::to_value(result).map_err(|error| error.to_string())?;
-    if generation.is_some_and(|requested| requested != current_generation) {
-        if let Some(object) = value.as_object_mut() {
-            object.insert("generationChanged".into(), Value::Bool(true));
-        }
+    if generation.is_some_and(|requested| requested != current_generation)
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert("generationChanged".into(), Value::Bool(true));
     }
     Ok(value)
 }
@@ -248,7 +248,7 @@ pub fn snapshot(
         "total": visible.len(),
         "active": active,
         "selection": selection,
-        "source": serde_json::to_value(&session.source).unwrap_or(Value::Null),
+        "source": serde_json::to_value(session.source).unwrap_or(Value::Null),
         "filter": serde_json::to_value(&session.filter).unwrap_or(Value::Null),
         "sort": format!("{:?}", session.sort),
         "commands": commands,
