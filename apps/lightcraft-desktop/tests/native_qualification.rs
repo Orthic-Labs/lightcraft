@@ -90,6 +90,71 @@ fn wait_for_dom(control: &rightkit_qa::control::Control, expression: &str) -> Va
     panic!("DOM route condition did not become true: {expression}");
 }
 
+fn set_native_viewport(control: &rightkit_qa::control::Control, width: u64, height: u64) -> Value {
+    let result = control.command("lc_qa_viewport", &json!({"width": width, "height": height})).expect("QA viewport resize command must execute");
+    assert_eq!(result["requested"]["width"].as_u64(), Some(width), "QA viewport must report requested width");
+    assert_eq!(result["requested"]["height"].as_u64(), Some(height), "QA viewport must report requested height");
+    assert!(result["observedInnerSize"]["width"].as_u64().is_some_and(|value| value > 0), "QA viewport must report observed width: {result}");
+    assert!(result["observedInnerSize"]["height"].as_u64().is_some_and(|value| value > 0), "QA viewport must report observed height: {result}");
+    let settled = wait_for_dom(control, &format!("return window.innerWidth === {width} && window.innerHeight === {height};"));
+    assert_eq!(settled.as_bool(), Some(true), "WebView inner size must match requested QA viewport");
+    result
+}
+
+fn assert_layout_settled(control: &rightkit_qa::control::Control, selector: &str) {
+    let expression = format!(
+        "return (() => {{ const node = document.querySelector({selector:?}); if (!node) return false; const rect = node.getBoundingClientRect(); return rect.width >= 1 && rect.height >= 1 && getComputedStyle(node).display !== 'none'; }})();"
+    );
+    assert_eq!(wait_for_dom(control, &expression).as_bool(), Some(true), "layout must settle for {selector}");
+}
+
+fn is_scoped_preview_src(src: &str) -> bool {
+    let prefix = if cfg!(target_os = "windows") { "http://lightcraft-preview.localhost/" } else { "lightcraft-preview://localhost/" };
+    src.strip_prefix(prefix).is_some_and(|handle| !handle.is_empty() && !handle.contains("..") && !handle.contains('/'))
+}
+
+fn wait_for_rendered_preview(control: &rightkit_qa::control::Control, selector: &str, expected_src: Option<&str>) -> Value {
+    let expression = format!(
+        "return (() => {{ const img = document.querySelector({selector:?}); if (!img) return {{ready:false, reason:'missing'}}; const cell = img.closest('.lc-photo-cell'); const src = img.getAttribute('src') || ''; return {{ready: img.complete && img.naturalWidth > 0 && img.naturalHeight > 0, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight, src, active: Boolean(cell?.classList.contains('is-active')), selected: Boolean(cell?.getAttribute('aria-selected') === 'true')}}; }})();"
+    );
+    for _ in 0..160 {
+        let value = control.eval(&expression).expect("rendered preview DOM query must execute");
+        let ready = value["ready"].as_bool() == Some(true);
+        let scoped = value["src"].as_str().is_some_and(is_scoped_preview_src);
+        let changed = expected_src.map_or(true, |previous| value["src"].as_str() != Some(previous));
+        if ready && scoped && changed {
+            assert!(value["naturalWidth"].as_u64().is_some_and(|width| width > 0));
+            assert!(value["naturalHeight"].as_u64().is_some_and(|height| height > 0));
+            if selector.contains("lc-photo-cell") {
+                assert_eq!(value["active"].as_bool(), Some(true), "active grid cell must own rendered preview: {value}");
+                assert_eq!(value["selected"].as_bool(), Some(true), "active grid cell must be selected: {value}");
+            }
+            return value;
+        }
+        sleep(Duration::from_millis(50));
+    }
+    panic!("rendered preview did not become ready for selector {selector}: {expression}");
+}
+
+fn assert_active_grid_is_bounded(control: &rightkit_qa::control::Control) {
+    let value = control
+        .eval(
+            "return (() => { const grid = document.querySelector('.lc-grid-window'); const images = [...document.querySelectorAll('.lc-photo-preview')]; const active = document.querySelectorAll('.lc-photo-cell.is-active'); return {cells: grid?.querySelectorAll('.lc-photo-cell').length || 0, images: images.length, active: active.length, loaded: images.filter((img) => img.complete && img.naturalWidth > 0 && img.naturalHeight > 0).length}; })();",
+        )
+        .expect("bounded grid DOM query must execute");
+    assert!(value["cells"].as_u64().is_some_and(|count| count <= 512), "virtualized grid rendered too many cells: {value}");
+    assert!(value["images"].as_u64().is_some_and(|count| count <= 512), "virtualized grid rendered too many images: {value}");
+    assert_eq!(value["active"].as_u64(), Some(1), "grid must expose exactly one active photo: {value}");
+    assert!(value["loaded"].as_u64().is_some_and(|count| count > 0), "grid must expose decoded WebView pixels: {value}");
+}
+
+fn assert_active_grid_identity(control: &rightkit_qa::control::Control, file_name: &str) {
+    let value = control
+        .eval("return document.querySelector('.lc-photo-cell.is-active .lc-photo-caption span:first-child')?.textContent?.trim() || '';")
+        .expect("active grid identity query must execute");
+    assert_eq!(value.as_str(), Some(file_name), "active grid DOM identity must match selected source");
+}
+
 fn wait_task(control: &rightkit_qa::control::Control, task_id: &str) -> Value {
     for _ in 0..900 {
         let value = snapshot(control);
@@ -187,6 +252,76 @@ fn with_control<T>(
     }
 }
 
+fn run_catalog_recovery(
+    binary: &Path,
+    scenario: &rightkit_qa::harness::Scenario,
+    catalog: &Path,
+    png: &Path,
+    baseline_capture: &Path,
+    source_revision: &str,
+    installed_hash: &str,
+) {
+    let (before_counts, active, expected_exposure, backup, backup_fingerprint) = with_control(binary, scenario, catalog, |control, _data| {
+        let before = import_file(control, png);
+        let before_counts = before["counts"].clone();
+        let active = before["active"].as_u64().expect("import must select active photo");
+        run(control, "develop.beginInteraction", json!({"label": "Backup baseline edit"}));
+        run(control, "develop.set", json!({"control": "light.exposure", "value": 1.25, "ids": [active]}));
+        run(control, "develop.endInteraction", json!({}));
+        let edited = snapshot(control);
+        let expected_exposure = edited["develop"]["light"]["exposure"].as_f64().expect("edited exposure must be numeric");
+        let backup = scenario.dir().join("library-backup");
+        let backup_result = run(control, "library.backup", json!({"path": backup}));
+        assert!(backup_result["path"].as_str().is_some(), "backup must return destination: {backup_result}");
+        assert!(backup.is_dir(), "backup directory must exist");
+        let backup_fingerprint = tree_fingerprint(&backup);
+        (before_counts, active, expected_exposure, backup, backup_fingerprint)
+    });
+
+    with_control(binary, scenario, catalog, |control, _data| {
+        let current = snapshot(control);
+        assert_eq!(current["counts"]["catalog"].as_u64(), before_counts["catalog"].as_u64(), "current catalog must reopen before mutation");
+        let current_active = current["active"].as_u64().expect("reopened catalog must select active photo");
+        run(control, "develop.beginInteraction", json!({"label": "Mutate before restore"}));
+        run(control, "develop.set", json!({"control": "light.exposure", "value": -1.25, "ids": [current_active]}));
+        run(control, "develop.endInteraction", json!({}));
+        let mutated = snapshot(control);
+        assert_ne!(mutated["develop"]["light"]["exposure"].as_f64(), Some(expected_exposure), "current catalog must differ before restore");
+    });
+
+    with_control(binary, scenario, catalog, |control, _data| {
+        let restored = run(control, "library.restore", json!({"path": backup}));
+        let backup_text = backup.to_string_lossy().to_string();
+        assert_eq!(restored["libraryPath"].as_str(), Some(backup_text.as_str()));
+        assert_eq!(tree_fingerprint(&backup), backup_fingerprint, "backup must remain unchanged immediately after restore");
+        let after = snapshot(control);
+        assert_eq!(after["counts"], before_counts, "restore must recover catalog counts");
+        assert_eq!(after["active"].as_u64(), Some(active), "restore must recover active photo identity");
+        assert_eq!(after["develop"]["light"]["exposure"].as_f64(), Some(expected_exposure), "restore must recover edited photo state");
+        control.screenshot_to(baseline_capture).expect("catalog recovery screenshot must be captured");
+        assert!(baseline_capture.is_file());
+        let receipt = scenario.dir().join("catalog-recovery.json");
+        fs::write(
+            &receipt,
+            serde_json::to_vec_pretty(&json!({
+                "schema": 2,
+                "sourceRevision": source_revision,
+                "installedArtifactSha256": installed_hash,
+                "catalogRecovery": {"qualified": true, "method": "backup-mutated-catalog-restore"},
+                "installerRollback": {"qualified": false, "requiresSeparateEvidence": true},
+                "beforeCounts": before_counts,
+                "afterCounts": after["counts"],
+                "backupFingerprint": backup_fingerprint,
+                "restoredLibraryPath": restored["libraryPath"],
+                "expectedExposure": expected_exposure,
+            }))
+            .expect("catalog recovery receipt must serialize"),
+        )
+        .expect("catalog recovery receipt must be writable");
+        scenario.keep("catalog-recovery.json", &receipt);
+    });
+}
+
 #[test]
 #[ignore = "target-native candidate qualification only; invoke with cargo test --ignored on CI"]
 fn native_hidden_control_journeys() {
@@ -197,11 +332,13 @@ fn native_hidden_control_journeys() {
     let architecture = required_env("RIGHTKIT_QA_ARCHITECTURE");
     let installed_hash = required_env("RIGHTKIT_QA_INSTALLED_ARTIFACT_SHA256");
     assert!(installed_hash.len() == 64 && installed_hash.bytes().all(|byte| byte.is_ascii_hexdigit()), "installed artifact hash must be SHA-256");
+    assert_eq!(source_hash(&binary), installed_hash, "installed binary must match admitted artifact hash");
     let platform = if cfg!(target_os = "macos") { "macos" } else { "windows" };
     let baseline: Value =
         serde_json::from_str(&fs::read_to_string(fixture_root().join("installed-baseline.json")).expect("baseline fixture must be readable"))
             .expect("baseline fixture must be valid JSON");
-    assert_eq!(baseline["rollback"]["required"].as_bool(), Some(true));
+    assert_eq!(baseline["catalogRecovery"]["required"].as_bool(), Some(true));
+    assert_eq!(baseline["installerRollback"]["qualified"].as_bool(), Some(false));
     let input_dir = evidence.join("fixture-inputs");
     fs::create_dir_all(&input_dir).expect("fixture input directory must exist");
     let inputs = fixture_inputs::write_fixture_inputs(&input_dir).expect("real ARW/PNG/Lightroom fixtures must be generated");
@@ -225,7 +362,7 @@ fn native_hidden_control_journeys() {
     let harness = qa_harness(&binary, &evidence, &revision, platform, &architecture);
 
     let scenario_names =
-        ["ipc", "stalePreview", "cache", "preferences", "gesture", "editingTools", "arwImport", "lightroomImport", "cliExport", "rollback"];
+        ["ipc", "stalePreview", "cache", "preferences", "gesture", "editingTools", "arwImport", "lightroomImport", "engineExport", "catalogRecovery"];
     for name in scenario_names {
         let outcome = harness.scenario(name, "fast", &[], |scenario| {
             let baseline_capture = scenario.dir().join("baseline.png");
@@ -249,6 +386,8 @@ fn native_hidden_control_journeys() {
                     control.screenshot_to(&light).expect("light theme screenshot must be captured");
                     assert!(light.is_file());
                 });
+            } else if name == "catalogRecovery" {
+                run_catalog_recovery(&binary, scenario, &inputs.catalog, &inputs.png, &baseline_capture, &revision, &installed_hash);
             } else {
                 with_control(&binary, scenario, &inputs.catalog, |control, _data| match name {
                     "ipc" => {
@@ -258,37 +397,79 @@ fn native_hidden_control_journeys() {
                         assert_eq!(snapshot["version"].as_u64(), Some(1));
                         assert!(snapshot["viewGeneration"].is_number());
                         assert!(snapshot["controls"].is_array());
-                        let viewport =
-                            control.eval("return {width: window.innerWidth, height: window.innerHeight};").expect("viewport query must execute");
-                        let width = viewport["width"].as_u64().expect("viewport width must be numeric");
-                        assert!(matches!(width, 1280 | 1600), "native qualification viewport must be 1280 or 1600 pixels: {viewport}");
-                        assert!(viewport["height"].as_u64().is_some_and(|height| height >= 800));
-                        wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
-                        let library = scenario.dir().join(format!("route-library-{width}.png"));
-                        control.screenshot_to(&library).expect("library route screenshot must be captured");
-                        assert!(library.is_file());
-                        control.key("D").expect("develop route key must execute");
-                        wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
-                        let route = control
-                            .eval("return document.querySelector('.stage-route-tabs button.selected span')?.textContent?.trim() || '';")
-                            .expect("develop route readback must execute");
-                        assert_eq!(route.as_str(), Some("Detail"), "D must select Detail route");
-                        let develop = scenario.dir().join(format!("route-develop-{width}.png"));
-                        control.screenshot_to(&develop).expect("develop route screenshot must be captured");
-                        assert!(develop.is_file());
-                        control.key("G").expect("library route key must execute");
-                        wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
+                        for (width, height) in [(1280_u64, 800_u64), (1600_u64, 1000_u64)] {
+                            set_native_viewport(control, width, height);
+                            wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
+                            assert_layout_settled(control, ".lc-library-workspace");
+                            let viewport = control
+                                .eval("return {width: window.innerWidth, height: window.innerHeight};")
+                                .expect("viewport query must execute");
+                            assert_eq!(viewport["width"].as_u64(), Some(width));
+                            assert_eq!(viewport["height"].as_u64(), Some(height));
+                            let library = scenario.dir().join(format!("route-library-{width}x{height}.png"));
+                            control.screenshot_to(&library).expect("library route screenshot must be captured");
+                            assert!(library.is_file());
+                            control.key("D").expect("develop route key must execute");
+                            wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
+                            assert_layout_settled(control, ".stage-workspace.stage-detail");
+                            let route = control
+                                .eval("return document.querySelector('.stage-route-tabs button.selected span')?.textContent?.trim() || '';")
+                                .expect("develop route readback must execute");
+                            assert_eq!(route.as_str(), Some("Detail"), "D must select Detail route");
+                            let develop = scenario.dir().join(format!("route-develop-{width}x{height}.png"));
+                            control.screenshot_to(&develop).expect("develop route screenshot must be captured");
+                            assert!(develop.is_file());
+                            control.key("G").expect("library route key must execute");
+                            wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
+                        }
                     }
                     "stalePreview" => {
-                        let snapshot = control.command("lc_snapshot", &Value::Null).expect("snapshot must reply");
-                        let generation = snapshot["viewGeneration"].as_u64().expect("snapshot generation required");
-                        let slice = control
-                            .command("lc_view_slice", &json!({"generation": generation + 1, "offset": 0, "limit": 512}))
+                        let first = import_file(control, &inputs.png);
+                        control.key("G").expect("library route key must execute");
+                        wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
+                        let first_grid = wait_for_rendered_preview(control, ".lc-photo-cell.is-active img.lc-photo-preview", None);
+                        assert_active_grid_identity(control, "procedural-rgb-01.png");
+                        let first_src = first_grid["src"].as_str().expect("first grid preview must expose scoped source").to_string();
+                        let first_id = first["active"].as_u64().expect("first import must select active photo");
+                        let second = import_file(control, &inputs.arw);
+                        let second_generation = second["viewGeneration"].as_u64().expect("second import generation required");
+                        let second_grid = wait_for_rendered_preview(control, ".lc-photo-cell.is-active img.lc-photo-preview", Some(&first_src));
+                        assert_active_grid_identity(control, "synthetic-sonya-01.arw");
+                        let second_src = second_grid["src"].as_str().expect("second grid preview must expose scoped source").to_string();
+                        assert_ne!(first_src, second_src, "second import must replace active grid pixels");
+                        let second_id = second["active"].as_u64().expect("second import must select active photo");
+                        let selected_first = run(control, "library.select", json!({"ids": [first_id], "active": first_id, "mode": "replace"}));
+                        assert_eq!(selected_first["active"].as_u64(), Some(first_id), "selection must return first active photo");
+                        let first_again = snapshot(control);
+                        assert!(first_again["viewGeneration"].as_u64().is_some_and(|generation| generation > second_generation), "selection must advance view generation");
+                        let first_again_grid = wait_for_rendered_preview(control, ".lc-photo-cell.is-active img.lc-photo-preview", Some(&second_src));
+                        assert_active_grid_identity(control, "procedural-rgb-01.png");
+                        assert_ne!(first_again_grid["src"].as_str(), Some(second_src.as_str()), "quick selection must replace second photo pixels");
+                        control.key("D").expect("develop route key must execute");
+                        wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
+                        let first_stage = wait_for_rendered_preview(control, "img.stage-preview", None);
+                        let first_stage_src = first_stage["src"].as_str().expect("first stage preview must expose scoped source").to_string();
+                        let selected_second = run(control, "library.select", json!({"ids": [second_id], "active": second_id, "mode": "replace"}));
+                        assert_eq!(selected_second["active"].as_u64(), Some(second_id), "selection must return second active photo");
+                        let second_again = snapshot(control);
+                        assert!(second_again["viewGeneration"].as_u64().is_some_and(|generation| generation > first_again["viewGeneration"].as_u64().unwrap_or(0)), "second selection must advance view generation");
+                        let second_stage = wait_for_rendered_preview(control, "img.stage-preview", Some(&first_stage_src));
+                        assert_ne!(second_stage["src"].as_str(), Some(first_stage_src.as_str()), "quick selection must never leave first photo in stage");
+                        control.key("G").expect("library route key must execute");
+                        wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
+                        wait_for_rendered_preview(control, ".lc-photo-cell.is-active img.lc-photo-preview", None);
+                        assert_active_grid_identity(control, "synthetic-sonya-01.arw");
+                        let stale = control
+                            .command("lc_view_slice", &json!({"generation": second_again["viewGeneration"].as_u64().unwrap_or(0) + 1, "offset": 0, "limit": 512}))
                             .expect("slice must reply");
-                        assert_eq!(slice["generationChanged"].as_bool(), Some(true), "stale generation must be rejected");
+                        assert_eq!(stale["generationChanged"].as_bool(), Some(true), "stale generation must be rejected");
                     }
                     "cache" => {
                         let imported = import_file(control, &inputs.png);
+                        control.key("G").expect("library route key must execute");
+                        wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
+                        wait_for_rendered_preview(control, ".lc-photo-cell.is-active img.lc-photo-preview", None);
+                        assert_active_grid_identity(control, "procedural-rgb-01.png");
                         let slice = control
                             .command("lc_view_slice", &json!({"generation": imported["viewGeneration"], "offset": 0, "limit": 4096}))
                             .expect("bounded slice must reply");
@@ -296,6 +477,7 @@ fn native_hidden_control_journeys() {
                         assert_eq!(slice["generation"], imported["viewGeneration"]);
                         let dom = control.dom(".lc-grid-scroll").expect("grid DOM query must execute");
                         assert!(!dom.is_empty(), "library grid must exist in hidden WebView");
+                        assert_active_grid_is_bounded(control);
                     }
                     "gesture" => {
                         let imported = import_file(control, &inputs.png);
@@ -370,11 +552,20 @@ fn native_hidden_control_journeys() {
                     }
                     "arwImport" => {
                         let imported = import_file(control, &inputs.arw);
+                        control.key("G").expect("library route key must execute");
+                        wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
+                        wait_for_rendered_preview(control, ".lc-photo-cell.is-active img.lc-photo-preview", None);
+                        assert_active_grid_identity(control, "synthetic-sonya-01.arw");
                         let descriptor = preview_imported(control, &imported);
+                        control.key("D").expect("develop route key must execute");
+                        wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
+                        let rendered = wait_for_rendered_preview(control, "img.stage-preview", None);
                         let screenshot = scenario.dir().join("arw-preview.png");
                         control.screenshot_to(&screenshot).expect("ARW preview screenshot must be captured");
                         assert!(screenshot.is_file());
                         assert!(descriptor["width"].as_u64().is_some_and(|width| width > 0));
+                        assert!(rendered["naturalWidth"].as_u64().is_some_and(|width| width > 0));
+                        assert!(rendered["naturalHeight"].as_u64().is_some_and(|height| height > 0));
                     }
                     "lightroomImport" => {
                         let first = run(control, "library.importLightroom", json!({"path": inputs.catalog, "updateExisting": false}));
@@ -386,7 +577,7 @@ fn native_hidden_control_journeys() {
                         assert_eq!(second["mapping"], mapping, "reimport must preserve source identities");
                         assert_eq!(snapshot(control)["counts"]["catalog"].as_u64(), Some(2));
                     }
-                    "cliExport" => {
+                    "engineExport" => {
                         let imported = import_file(control, &inputs.png);
                         let id = imported["active"].as_u64().expect("PNG import must select photo");
                         let output = scenario.dir().join("export");
@@ -401,63 +592,6 @@ fn native_hidden_control_journeys() {
                             .find(|path| path.is_file())
                             .expect("export must write file");
                         assert_png_pixels(&exported, 96, 64);
-                    }
-                    "rollback" => {
-                        let before = import_file(control, &inputs.png);
-                        let before_counts = before["counts"].clone();
-                        let active = before["active"].as_u64().expect("import must select active photo");
-                        run(control, "develop.beginInteraction", json!({"label": "Backup baseline edit"}));
-                        run(control, "develop.set", json!({"control": "light.exposure", "value": 1.25, "ids": [active]}));
-                        run(control, "develop.endInteraction", json!({}));
-                        let edited = snapshot(control);
-                        let expected_exposure = edited["develop"]["light"]["exposure"].as_f64().expect("edited exposure must be numeric");
-                        let backup = scenario.dir().join("library-backup");
-                        let backup_result = run(control, "library.backup", json!({"path": backup}));
-                        assert!(backup_result["path"].as_str().is_some(), "backup must return destination: {backup_result}");
-                        assert!(backup.is_dir(), "backup directory must exist");
-                        let backup_fingerprint = tree_fingerprint(&backup);
-                        let backup_text = backup.to_string_lossy().to_string();
-                        let catalog = inputs.catalog.clone();
-                        let backup_for_mutation = backup.clone();
-                        with_control(&binary, scenario, &catalog, |control, _data| {
-                            let current = snapshot(control);
-                            assert_eq!(current["counts"]["catalog"].as_u64(), before_counts["catalog"].as_u64(), "current catalog must reopen before mutation");
-                            let current_active = current["active"].as_u64().expect("reopened catalog must select active photo");
-                            run(control, "develop.beginInteraction", json!({"label": "Mutate before restore"}));
-                            run(control, "develop.set", json!({"control": "light.exposure", "value": -1.25, "ids": [current_active]}));
-                            run(control, "develop.endInteraction", json!({}));
-                            let mutated = snapshot(control);
-                            assert_ne!(mutated["develop"]["light"]["exposure"].as_f64(), Some(expected_exposure), "current catalog must differ before restore");
-                        });
-                        with_control(&binary, scenario, &catalog, |control, _data| {
-                            let restored = run(control, "library.restore", json!({"path": backup_for_mutation}));
-                            assert_eq!(restored["libraryPath"].as_str(), Some(backup_text.as_str()));
-                            assert_eq!(tree_fingerprint(&backup_for_mutation), backup_fingerprint, "backup must remain unchanged immediately after restore");
-                            let after = snapshot(control);
-                            assert_eq!(after["counts"], before_counts, "restore must recover catalog counts");
-                            assert_eq!(after["active"].as_u64(), Some(active), "restore must recover active photo identity");
-                            assert_eq!(after["develop"]["light"]["exposure"].as_f64(), Some(expected_exposure), "restore must recover edited photo state");
-                            control.screenshot_to(&baseline_capture).expect("baseline screenshot must be captured");
-                            assert!(baseline_capture.is_file());
-                            let receipt = scenario.dir().join("rollback.json");
-                            fs::write(
-                                &receipt,
-                                serde_json::to_vec_pretty(&json!({
-                                    "schema": 1,
-                                    "sourceRevision": revision,
-                                    "installedArtifactSha256": installed_hash,
-                                    "baseline": baseline["baseline"],
-                                    "beforeCounts": before_counts,
-                                    "afterCounts": after["counts"],
-                                    "backupFingerprint": backup_fingerprint,
-                                    "restoredLibraryPath": restored["libraryPath"],
-                                    "expectedExposure": expected_exposure,
-                                }))
-                                .expect("rollback receipt must serialize"),
-                            )
-                            .expect("rollback receipt must be writable");
-                            scenario.keep("rollback.json", &receipt);
-                        });
                     }
                     _ => unreachable!("scenario inventory is static"),
                 });

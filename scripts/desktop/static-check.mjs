@@ -63,11 +63,12 @@ function checkFixtures() {
   if (catalog.photos.some((photo) => photo.inputLicense !== "CC0")) fail("fixture inputs must declare CC0 license");
   const journey = readJson("fixtures/desktop/native-journey.json");
   if (journey.schema !== 1 || journey.kind !== "native-control-journey" || journey.hidden !== true) fail("native journey must be hidden-control schema 1");
-  for (const name of ["ipc", "stalePreview", "cache", "preferences", "gesture", "arwImport", "lightroomImport", "cliExport", "rollback"]) {
+  for (const name of ["ipc", "stalePreview", "cache", "preferences", "gesture", "arwImport", "lightroomImport", "engineExport", "catalogRecovery"]) {
     if (!journey.scenarios?.some((scenario) => scenario.id === name)) fail(`native journey missing scenario ${name}`);
   }
   const baseline = readJson("fixtures/desktop/installed-baseline.json");
-  if (baseline.schema !== 1 || baseline.rollback?.required !== true || !baseline.artifact?.sha256) fail("installed baseline must bind artifact hash & rollback");
+  if (baseline.schema !== 1 || baseline.catalogRecovery?.required !== true || !baseline.artifact?.sha256) fail("installed baseline must bind artifact hash & catalog recovery");
+  if (baseline.installerRollback?.qualified !== false || baseline.installerRollback?.requiredForCutover !== true) fail("installer rollback must remain a separate cutover requirement");
 }
 
 function checkSourceContracts() {
@@ -79,7 +80,7 @@ function checkSourceContracts() {
   if (!gate.includes("@rightkit/release/managed-cargo.mjs") || !gate.includes("generate-lockfile") || !gate.includes("--locked")) fail("desktop gate must use managed Cargo adapter & bounded lock bootstrap");
   if (!candidate.includes("cargoCompilerArtifacts") || !candidate.includes("materializeArtifacts") || candidate.includes("config.candidate") || candidate.includes("config.qualification")) fail("candidate must consume Cargo compiler records through real release config");
   if (!installed.includes("runCargoSync") || !installed.includes('"native_qualification"') || installed.includes("target.command")) fail("installed qualification must invoke fixed RightKit QA Rust test through managed Cargo");
-  for (const token of ["rightkit_qa::control", "Mode::Hidden", "RIGHTKIT_QA_UI_BINARY", "stalePreview", "lightroomImport", "rollback"]) {
+  for (const token of ["rightkit_qa::control", "Mode::Hidden", "RIGHTKIT_QA_UI_BINARY", "stalePreview", "lightroomImport", "catalogRecovery"]) {
     if (!nativeQa.includes(token)) fail(`native qualification is missing executed control contract ${token}`);
   }
   if (!nativeHost.includes("rightkit_control::embedded::Control") || !nativeHost.includes("build_if_enabled") || !nativeHost.includes("qa-native")) fail("native app must register debug-gated rightkit-control");

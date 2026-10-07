@@ -343,9 +343,19 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
       listen<JsonObject>('lc://error', (event) => { if (live) setError(messageOf(event.payload)); }),
       listen<JsonObject>('lc://notice', (event) => { if (live) setNotice(messageOf(event.payload)); }),
       listen<JsonObject>('lc://close-requested', (event) => {
-        if (!live || event.payload?.unsaved !== true) return;
-        setDialog({ kind: 'unsavedQuit', params: { ...event.payload } });
-        void refresh();
+        if (!live) return;
+        if (event.payload?.unsaved === true) {
+          setDialog({ kind: 'unsavedQuit', params: { ...event.payload } });
+          void refresh();
+          return;
+        }
+        if (event.payload?.active === true) {
+          const message = typeof event.payload.message === 'string' && event.payload.message.length > 0
+            ? event.payload.message
+            : 'A task is still running. Cancel it or wait for it to finish before closing.';
+          setNotice(message);
+          void refresh();
+        }
       }),
     ]).then((stops) => { if (live) unlisten = stops; else stops.forEach((stop) => stop()); }).catch(() => undefined);
     return () => { live = false; unlisten.forEach((stop) => stop()); };

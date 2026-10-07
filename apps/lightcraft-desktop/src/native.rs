@@ -226,6 +226,26 @@ fn control_json(value: Value) -> Result<String, String> {
 }
 
 #[cfg(feature = "qa-native")]
+fn qa_viewport(app: &AppHandle<Wry>, raw: &str) -> Result<Value, String> {
+    let args = control_args(raw)?;
+    let object = args.as_object().ok_or_else(|| "lc_qa_viewport expects an object".to_string())?;
+    let width = object.get("width").and_then(Value::as_u64).ok_or_else(|| "lc_qa_viewport requires width".to_string())?;
+    let height = object.get("height").and_then(Value::as_u64).ok_or_else(|| "lc_qa_viewport requires height".to_string())?;
+    if !matches!((width, height), (1280, 800) | (1600, 1000)) {
+        return Err("lc_qa_viewport allows only 1280x800 or 1600x1000".into());
+    }
+    let window = app.get_webview_window("main").ok_or_else(|| "main window is unavailable".to_string())?;
+    window
+        .set_size(tauri::Size::Logical(tauri::LogicalSize::new(width as f64, height as f64)))
+        .map_err(|error| format!("setting QA viewport: {error}"))?;
+    let observed = window.inner_size().map_err(|error| format!("reading QA viewport: {error}"))?;
+    Ok(json!({
+        "requested": {"width": width, "height": height},
+        "observedInnerSize": {"width": observed.width, "height": observed.height},
+    }))
+}
+
+#[cfg(feature = "qa-native")]
 fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<String, String> {
     let args = control_args(raw)?;
     let result = match name {
@@ -262,6 +282,7 @@ fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<Strin
             }
             value
         }
+        "lc_qa_viewport" => qa_viewport(app, raw)?,
         "lc_native" => {
             let object = args.as_object().ok_or_else(|| "lc_native expects an object".to_string())?;
             let action = object.get("action").and_then(Value::as_str).ok_or_else(|| "lc_native requires action".to_string())?;
@@ -309,6 +330,7 @@ fn qa_control_plugin() -> Option<TauriPlugin<Wry>> {
         .command("lc_view_slice", |app, args| control_dispatch(app, "lc_view_slice", args))
         .command("lc_preview", |app, args| control_dispatch(app, "lc_preview", args))
         .command("lc_preview_ack", |app, args| control_dispatch(app, "lc_preview_ack", args))
+        .command("lc_qa_viewport", |app, args| control_dispatch(app, "lc_qa_viewport", args))
         .command("lc_native", |app, args| control_dispatch(app, "lc_native", args))
         .command("lc_preferences", |app, args| control_dispatch(app, "lc_preferences", args));
     control.build_if_enabled()
@@ -381,10 +403,6 @@ fn build_shell() -> rightkit_shell::Shell {
         .hardening(hardening)
         .show_on_ready(!qa)
         .menu(menu::spec())
-        .on_menu(|app, id| {
-            use tauri::Emitter;
-            let _ = app.emit("lc://menu", json!({"id": id}));
-        })
         .build()
 }
 

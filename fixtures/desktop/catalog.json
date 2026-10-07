@@ -13,7 +13,7 @@
     "noDuplicateSourceRecipes": true,
     "arwImport": "decode-preview-preserve-source-hash",
     "lightroomImport": "preserve-virtual-copy-and-collection-ids",
-    "cliExport": "engine-decoded-pixels",
+    "engineExport": "engine-decoded-pixels",
     "sourceFilesReadOnly": true
   }
 }
