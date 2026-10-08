@@ -178,6 +178,99 @@ fn assert_library_header_contrast(control: &rightkit_qa::control::Control, mode:
     );
 }
 
+fn assert_filmstrip_context_contrast(control: &rightkit_qa::control::Control, mode: &str) {
+    let colors = control
+        .eval(
+            r####"return (() => {
+                const context = document.querySelector('.lc-filmstrip-context');
+                const position = document.querySelector('.lc-filmstrip-position');
+                const sourceChip = document.querySelector('.lc-filmstrip-context-chip');
+                if (!context || !position || !sourceChip) return null;
+                const canvas = document.createElement('canvas');
+                canvas.width = 1;
+                canvas.height = 1;
+                const painter = canvas.getContext('2d');
+                const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+                const parseFunctional = (value) => {
+                    const match = value.trim().match(/^rgba?\(([^)]+)\)$/i);
+                    if (!match) return null;
+                    const parts = match[1].split(/[,\s/]+/).filter(Boolean);
+                    if (parts.length < 3) return null;
+                    const channel = (part) => { const number = Number.parseFloat(part); return Number.isFinite(number) ? clamp(part.endsWith('%') ? number * 2.55 : number, 0, 255) : null; };
+                    const alpha = parts[3] === undefined ? 1 : Number.parseFloat(parts[3]) / (parts[3].endsWith('%') ? 100 : 1);
+                    const channels = parts.slice(0, 3).map(channel);
+                    return channels.every((value) => value !== null) && Number.isFinite(alpha) ? { r: channels[0], g: channels[1], b: channels[2], a: clamp(alpha, 0, 1) } : null;
+                };
+                const parseHex = (value) => {
+                    const match = value.trim().match(/^#([0-9a-f]+)$/i);
+                    if (!match || ![3, 4, 6, 8].includes(match[1].length)) return null;
+                    const hex = match[1].length < 5 ? match[1].split('').map((digit) => digit + digit).join('') : match[1];
+                    const number = (offset) => Number.parseInt(hex.slice(offset, offset + 2), 16);
+                    return { r: number(0), g: number(2), b: number(4), a: hex.length === 8 ? number(6) / 255 : 1 };
+                };
+                const parseColor = (value) => {
+                    const direct = parseFunctional(value) || parseHex(value);
+                    if (direct || !painter) return direct;
+                    try {
+                        painter.fillStyle = 'rgb(1, 2, 3)';
+                        const marker = painter.fillStyle;
+                        painter.fillStyle = value;
+                        if (painter.fillStyle === marker && value.trim() !== marker) return null;
+                        painter.clearRect(0, 0, 1, 1);
+                        painter.fillRect(0, 0, 1, 1);
+                        const pixel = painter.getImageData(0, 0, 1, 1).data;
+                        return { r: pixel[0], g: pixel[1], b: pixel[2], a: pixel[3] / 255 };
+                    } catch {
+                        return null;
+                    }
+                };
+                const blend = (foreground, background) => {
+                    const alpha = foreground.a + background.a * (1 - foreground.a);
+                    if (alpha <= 0) return { r: 0, g: 0, b: 0, a: 0 };
+                    return {
+                        r: (foreground.r * foreground.a + background.r * background.a * (1 - foreground.a)) / alpha,
+                        g: (foreground.g * foreground.a + background.g * background.a * (1 - foreground.a)) / alpha,
+                        b: (foreground.b * foreground.a + background.b * background.a * (1 - foreground.a)) / alpha,
+                        a: alpha,
+                    };
+                };
+                const effectiveBackground = (node) => {
+                    const ancestors = [];
+                    for (let current = node; current; current = current.parentElement) ancestors.unshift(current);
+                    let background = { r: 255, g: 255, b: 255, a: 1 };
+                    ancestors.forEach((ancestor) => {
+                        const color = parseColor(getComputedStyle(ancestor).backgroundColor);
+                        if (!color) background = null;
+                        else if (background) background = blend(color, background);
+                    });
+                    return background;
+                };
+                const luminance = (color) => {
+                    const channel = (value) => { const normalized = value / 255; return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4; };
+                    return channel(color.r) * 0.2126 + channel(color.g) * 0.7152 + channel(color.b) * 0.0722;
+                };
+                const measure = (node) => {
+                    const style = getComputedStyle(node);
+                    const foreground = parseColor(style.color);
+                    const background = effectiveBackground(node);
+                    if (!foreground || !background) return { color: style.color, background, ratio: null };
+                    const composited = blend(foreground, background);
+                    const foregroundLum = luminance(composited);
+                    const backgroundLum = luminance(background);
+                    return { color: style.color, background, ratio: (Math.max(foregroundLum, backgroundLum) + 0.05) / (Math.min(foregroundLum, backgroundLum) + 0.05) };
+                };
+                return { context: measure(context), position: measure(position), sourceChip: measure(sourceChip) };
+            })();"####,
+        )
+        .expect("filmstrip contrast query must execute");
+    assert!(colors.is_object(), "{mode} filmstrip context must render contrast targets");
+    eprintln!("[qa] {mode} filmstrip context contrast: {colors}");
+    for (label, key) in [("context", "context"), ("position", "position"), ("source chip", "sourceChip")] {
+        let ratio = colors[key]["ratio"].as_f64().unwrap_or(0.0);
+        assert!(ratio >= 4.5, "{mode} filmstrip {label} contrast must meet WCAG AA: {colors}");
+    }
+}
+
 fn click_dom(control: &rightkit_qa::control::Control, selector: &str, message: &str) {
     wait_for_dom(
         control,
@@ -840,6 +933,11 @@ fn native_hidden_control_journeys() {
                     control.screenshot_to(&dark).expect("dark theme screenshot must be captured");
                     assert!(dark.is_file());
                     assert_library_header_contrast(control, "dark");
+                    click_dom(control, ".rk-top button.rk-seg__item[title='Develop']", "Develop segment must select actual detail view");
+                    wait_for_dom(control, "return document.querySelector('.stage-detail') !== null && document.querySelector('.lc-library-workspace') === null && document.querySelector('.lc-filmstrip') !== null;");
+                    assert_filmstrip_context_contrast(control, "dark");
+                    click_dom(control, ".rk-top button.rk-seg__item[title='Library']", "Library segment must restore actual library view");
+                    wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
                     control.command("lc_preferences", &json!({"ui": {"theme": "light"}})).expect("light theme preference must persist");
                 });
                 with_control(&binary, scenario, &inputs.catalog, |control, _data| {
@@ -850,6 +948,11 @@ fn native_hidden_control_journeys() {
                     control.screenshot_to(&light).expect("light theme screenshot must be captured");
                     assert!(light.is_file());
                     assert_library_header_contrast(control, "light");
+                    click_dom(control, ".rk-top button.rk-seg__item[title='Develop']", "Develop segment must select actual detail view");
+                    wait_for_dom(control, "return document.querySelector('.stage-detail') !== null && document.querySelector('.lc-library-workspace') === null && document.querySelector('.lc-filmstrip') !== null;");
+                    assert_filmstrip_context_contrast(control, "light");
+                    click_dom(control, ".rk-top button.rk-seg__item[title='Library']", "Library segment must restore actual library view");
+                    wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
                 });
                 with_control(&binary, scenario, &inputs.catalog, |control, _data| {
                     // Open through the actual RightKit command palette, then choose Settings by pointer.
