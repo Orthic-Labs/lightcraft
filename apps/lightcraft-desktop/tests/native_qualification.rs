@@ -834,7 +834,13 @@ fn native_hidden_control_journeys() {
                         .as_u64()
                         .expect("settings modal must expose focusable controls");
                     assert!(focusable_count > 5, "settings modal must expose native tab stops");
-                    for _ in 0..(focusable_count - 5) {
+                    let focus_index = control
+                        .eval("return (() => { const dialog = document.querySelector('.lc-dialog'); const nodes = Array.from(dialog?.querySelectorAll('button,input,select,textarea,[href],[tabindex]:not([tabindex=\"-1\"])') || []).filter((node) => !node.disabled); return nodes.indexOf(document.activeElement); })();")
+                        .expect("settings current focus query must execute")
+                        .as_u64()
+                        .expect("active settings control must be in focus cycle");
+                    assert!(focus_index < focusable_count);
+                    for _ in 0..((focusable_count - focus_index) % focusable_count) {
                         control.key("Tab").expect("native Tab must reset settings focus cycle");
                     }
                     for _ in 0..focusable_count {
