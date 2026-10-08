@@ -109,6 +109,19 @@ mod tauri_commands {
     }
 
     #[tauri::command]
+    pub(super) async fn lc_preview_quick(
+        state: State<'_, AppState>,
+        request: PreviewRequest,
+    ) -> Result<lightcraft_desktop_host::PreviewDescriptor, String> {
+        let host = state.host.clone();
+        let error = state.startup_error.clone();
+        blocking(move || {
+            host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into())).and_then(|host| host.preview_quick(request))
+        })
+        .await
+    }
+
+    #[tauri::command]
     pub(super) async fn lc_preview_ack(state: State<'_, AppState>, handle: String) -> Result<bool, String> {
         let host = state.host.clone();
         let error = state.startup_error.clone();
@@ -554,6 +567,12 @@ fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<Strin
                 .preview(serde_json::from_value(request).map_err(|error| format!("lc_preview args are invalid: {error}"))?)
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))?
         }
+        "lc_preview_quick" => {
+            let request = args.get("request").cloned().unwrap_or(args);
+            control_host(app)?
+                .preview_quick(serde_json::from_value(request).map_err(|error| format!("lc_preview_quick args are invalid: {error}"))?)
+                .map(|value| json!(value))
+        }
         "lc_merge_preview" => {
             let request = args.get("request").cloned().unwrap_or(args);
             control_host(app)?
@@ -644,6 +663,7 @@ fn qa_control_plugin() -> Option<TauriPlugin<Wry>> {
         .command("lc_snapshot", |app, args| control_dispatch(app, "lc_snapshot", args))
         .command("lc_view_slice", |app, args| control_dispatch(app, "lc_view_slice", args))
         .command("lc_preview", |app, args| control_dispatch(app, "lc_preview", args))
+        .command("lc_preview_quick", |app, args| control_dispatch(app, "lc_preview_quick", args))
         .command("lc_merge_preview", |app, args| control_dispatch(app, "lc_merge_preview", args))
         .command("lc_merge_preview_cancel", |app, args| control_dispatch(app, "lc_merge_preview_cancel", args))
         .command("lc_preview_ack", |app, args| control_dispatch(app, "lc_preview_ack", args))
@@ -936,6 +956,7 @@ pub fn run() {
             tauri_commands::lc_snapshot,
             tauri_commands::lc_view_slice,
             tauri_commands::lc_preview,
+            tauri_commands::lc_preview_quick,
             tauri_commands::lc_merge_preview,
             tauri_commands::lc_merge_preview_cancel,
             tauri_commands::lc_preview_ack,

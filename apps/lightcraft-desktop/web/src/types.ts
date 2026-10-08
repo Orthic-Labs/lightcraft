@@ -10,8 +10,9 @@ export interface CompletedJob { id: string; kind: string; label: string; state: 
 export interface HostStatus { unsaved: boolean; importing: boolean; exporting: boolean; previewBuild: boolean; jobs: JobStatus[]; completedJobs: CompletedJob[]; notices: string[]; error: string|null }
 export interface DesktopSnapshot { version: 1; revision: number; viewGeneration: number; total: number; active: number|null; activeIndex?: number|null; selection: number[]; source: unknown; filter: unknown; sort: string; commands: CommandInfo[]; controls: ControlSpec[]; controlValues: Record<string, number>; develop: JsonObject; albums: AlbumSummary[]; counts: Record<string, number>; undo: number; redo: number; history: unknown[]; status: HostStatus; libraryPath: string|null; preferences: JsonObject }
 export interface ViewSlice { generation: number; total: number; offset: number; photos: PhotoSummary[] }
+export interface ImportCandidatePreview { handle: string; revision: string; state: 'provisional'; source: 'embedded'|'cached'|'quick'; width: number; height: number; encoding: 'png' }
 export interface PreviewRequest { photoId: number; slot: string; viewGeneration: number; width: number; height: number; quality: 'draft'|'full'; before: boolean; sequence: number }
-export interface PreviewDescriptor { handle: string; photoId: number; slot: string; viewGeneration: number; sequence: number; key: string; width: number; height: number; histogram: unknown; renderMs: number; encoding: 'png'|'rgba8' }
+export interface PreviewDescriptor { handle: string; photoId: number; slot: string; viewGeneration: number; sequence: number; key: string; width: number; height: number; histogram: unknown; renderMs: number; encoding: 'png'|'rgba8'; provisional?: boolean; source?: 'cached'|'embedded'|'quick' }
 export type MergeCommand = 'merge.hdr'|'merge.panorama'|'merge.hdrPanorama';
 export interface MergePreviewRequest { command: MergeCommand; params: JsonObject; slot: string; viewGeneration: number; sequence: number }
 export interface MergePreviewCancelRequest { slot: string; sequence: number }

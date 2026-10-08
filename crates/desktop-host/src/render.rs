@@ -61,6 +61,10 @@ pub struct PreviewDescriptor {
     pub histogram: Value,
     pub render_ms: f64,
     pub encoding: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provisional: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -72,6 +76,7 @@ struct Pending {
     key: u64,
     priority: u32,
     forced_draft: bool,
+    quick: bool,
     reply: std::sync::mpsc::Sender<Result<PreviewDescriptor, String>>,
 }
 
@@ -147,7 +152,11 @@ impl Renderer {
             return Ok(());
         }
         let slot = self.slot_id(&request.slot);
-        if self.pending.get(&slot).is_some_and(|pending| pending.request.sequence >= request.sequence) {
+        if self
+            .pending
+            .get(&slot)
+            .is_some_and(|pending| pending.request.sequence > request.sequence || (pending.request.sequence == request.sequence && !pending.quick))
+        {
             let _ = reply.send(Err("preview request is stale".to_string()));
             return Ok(());
         }
@@ -302,6 +311,12 @@ impl Renderer {
                 histogram: payload.histogram.clone(),
                 render_ms: done.ms,
                 encoding: "png",
+                provisional: result.quick.map(|_| true),
+                source: result.quick.map(|source| match source {
+                    lightcraft_engine::media::QuickSource::Cached => "cached",
+                    lightcraft_engine::media::QuickSource::Embedded => "embedded",
+                    lightcraft_engine::media::QuickSource::Small => "quick",
+                }),
             };
             self.failed.retain(|(candidate, key), _| *candidate != slot || *key != result.key);
             if self.is_thumb_slot(&pending.request.slot) {
@@ -391,7 +406,7 @@ impl Renderer {
             }),
         );
         let forced_draft = forced_draft(request.quality, interactive);
-        self.pending.insert(slot, Pending { ticket, request, key, priority, forced_draft, reply });
+        self.pending.insert(slot, Pending { ticket, request, key, priority, forced_draft, quick: false, reply });
     }
 
     fn submit_quick(
@@ -417,7 +432,7 @@ impl Renderer {
                 JobOutput { ticket, view_generation, sequence, result, payload }
             }),
         );
-        self.pending.insert(slot, Pending { ticket, request, key, priority, forced_draft: false, reply });
+        self.pending.insert(slot, Pending { ticket, request, key, priority, forced_draft: false, quick: true, reply });
     }
 
     fn ticket(&mut self) -> u64 {
@@ -473,6 +488,8 @@ impl Renderer {
             histogram,
             render_ms: 0.0,
             encoding: "png",
+            provisional: None,
+            source: None,
         })
     }
 
@@ -798,6 +815,7 @@ mod tests {
                 key: 0,
                 priority: 1000,
                 forced_draft: false,
+                quick: false,
                 reply: gate_reply,
             },
         );
@@ -878,6 +896,7 @@ mod tests {
             key: 17,
             priority: 100,
             forced_draft: false,
+            quick: false,
             reply,
         };
         assert!(publishable(&pending, 8, 3, 9, 17, PhotoId(42)));

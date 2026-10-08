@@ -60,7 +60,7 @@ impl Controller {
             session,
             renderer: Renderer::new(store.clone()),
             merge_previews: MergePreviews::new(store),
-            tasks: Tasks::new(),
+            tasks: Tasks::with_store(store.clone()),
             auto_import: AutoImport::new(),
             snapshot_cache: crate::snapshot::CatalogSnapshotCache::default(),
             preferences: Map::new(),
@@ -137,6 +137,7 @@ impl Controller {
                 false
             }
             Request::Preview { request, reply } => self.preview(request, reply),
+            Request::PreviewQuick { request, reply } => self.preview_quick(request, reply),
             Request::MergePreview { request, reply } => self.merge_preview(request, reply),
             Request::MergePreviewCancel { request, reply } => {
                 let result = self.merge_preview_cancel(request);
@@ -222,6 +223,21 @@ impl Controller {
             Ok(Ok(())) => {}
             Ok(Err(error)) | Err(error) => {
                 log::error!("preview request: {error}");
+                let _ = reply.send(Err(error));
+            }
+        }
+        self.renderer.poll(&mut self.session);
+        false
+    }
+
+    fn preview_quick(&mut self, request: PreviewRequest, reply: Sender<Result<PreviewDescriptor, String>>) -> bool {
+        let result = lightcraft_engine::guard::catch("desktop quick preview request", || {
+            self.renderer.request_quick(&mut self.session, request, reply.clone())
+        });
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) | Err(error) => {
+                log::error!("quick preview request: {error}");
                 let _ = reply.send(Err(error));
             }
         }

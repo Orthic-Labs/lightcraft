@@ -6,7 +6,8 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use serde_json::{Value, json};
 
 use lightcraft_catalog::PhotoId;
-use lightcraft_engine::import::{ImportJob, ImportOptions, Prepared, RawJpegImportPolicy, ScanInput, ScanOutput, ScanProgress};
+use lightcraft_engine::import::{ImportCandidate, ImportJob, ImportOptions, Prepared, RawJpegImportPolicy, ScanInput, ScanOutput, ScanProgress};
+use lightcraft_engine::media::QuickSource;
 use lightcraft_engine::merge::{MergeJob, MergeOutput};
 use lightcraft_engine::{Selection, Session};
 
@@ -18,6 +19,8 @@ const MAX_MERGE_IDS: usize = 256;
 const MAX_REVIEW_PATHS: usize = 512;
 const MAX_PENDING_PREVIEW_IDS: usize = 8_192;
 const MAX_COMPLETED_TASKS: usize = 64;
+const MAX_IMPORT_PREVIEWS: usize = 128;
+const IMPORT_PREVIEW_EDGE: usize = 256;
 
 struct Task {
     id: String,
@@ -75,12 +78,28 @@ enum Event {
         cancelled: bool,
         restore_probes: std::collections::HashMap<String, lightcraft_engine::media::ProbeInfo>,
     },
+    ImportReviewPreviews {
+        id: String,
+        candidates: Vec<ImportCandidate>,
+        previews: Vec<CandidatePreview>,
+        cancelled: bool,
+        restore_probes: std::collections::HashMap<String, lightcraft_engine::media::ProbeInfo>,
+    },
     Preview {
         id: String,
         status: Value,
         failed: usize,
         cancelled: bool,
     },
+}
+
+struct CandidatePreview {
+    index: usize,
+    revision: String,
+    handle: String,
+    source: &'static str,
+    width: u32,
+    height: u32,
 }
 
 pub(crate) struct Tasks {
@@ -91,12 +110,26 @@ pub(crate) struct Tasks {
     notices: Vec<String>,
     completed: VecDeque<TerminalTask>,
     pending_preview_ids: VecDeque<u64>,
+    previews: crate::PreviewStore,
 }
 
 impl Tasks {
     pub(crate) fn new() -> Self {
+        Self::with_store(crate::PreviewStore::default())
+    }
+
+    pub(crate) fn with_store(previews: crate::PreviewStore) -> Self {
         let (tx, rx) = sync_channel(EVENT_CAPACITY);
-        Self { jobs: BTreeMap::new(), tx, rx, next: 1, notices: Vec::new(), completed: VecDeque::new(), pending_preview_ids: VecDeque::new() }
+        Self {
+            jobs: BTreeMap::new(),
+            tx,
+            rx,
+            next: 1,
+            notices: Vec::new(),
+            completed: VecDeque::new(),
+            pending_preview_ids: VecDeque::new(),
+            previews,
+        }
     }
 
     pub(crate) fn start_export(&mut self, session: &mut Session, params: &Value) -> Result<Value, String> {
@@ -387,6 +420,91 @@ impl Tasks {
         Ok(json!({"taskId": task_id, "kind": "importReview", "total": 0}))
     }
 
+    fn start_import_candidate_previews(
+        &mut self,
+        session: &mut Session,
+        id: String,
+        candidates: Vec<ImportCandidate>,
+        restore_probes: std::collections::HashMap<String, lightcraft_engine::media::ProbeInfo>,
+    ) {
+        let Some(cancel) = self.jobs.get(&id).map(|task| task.cancel.clone()) else { return };
+        if cancel.load(Ordering::Relaxed) {
+            session.import_probes = restore_probes;
+            self.finish(id, Err("cancelled".into()), "importReview", true);
+            return;
+        }
+        let jobs = candidates
+            .iter()
+            .take(MAX_IMPORT_PREVIEWS)
+            .enumerate()
+            .filter_map(|(index, candidate)| session.candidate_thumb_job(candidate, IMPORT_PREVIEW_EDGE, index as u64 + 1).map(|job| (index, job)))
+            .collect::<Vec<_>>();
+        if jobs.is_empty() {
+            self.finish(id, import_review_result(candidates, Vec::new()), "importReview", false);
+            return;
+        }
+        if let Some(worker) = self.jobs.get_mut(&id).and_then(|task| task.worker.take()) {
+            let _ = worker.join();
+        }
+        let Some(completed) = self.jobs.get(&id).map(|task| {
+            task.total.store(jobs.len(), Ordering::Relaxed);
+            task.completed.store(0, Ordering::Relaxed);
+            task.completed.clone()
+        }) else {
+            return;
+        };
+        let tx = self.tx.clone();
+        let store = self.previews.clone();
+        let worker_id = id.clone();
+        let restore_for_worker = restore_probes.clone();
+        let worker = std::thread::Builder::new().name("lightcraft-import-review-previews".into()).spawn(move || {
+            let rendered = lightcraft_engine::guard::catch("import review previews", || {
+                let mut previews = Vec::new();
+                for (index, job) in jobs {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let result = job.run();
+                    let quick = result.quick;
+                    if let Ok(image) = result.rendered
+                        && let Ok(bytes) = crate::preview::encode_png(&image.image)
+                        && let Ok(handle) = store.insert(bytes, "image/png")
+                    {
+                        let source = match quick {
+                            Some(QuickSource::Embedded) => "embedded",
+                            Some(QuickSource::Cached) => "cached",
+                            Some(QuickSource::Small) | None => "quick",
+                        };
+                        if let (Ok(width), Ok(height)) = (u32::try_from(image.image.width), u32::try_from(image.image.height)) {
+                            previews.push(CandidatePreview { index, revision: worker_id.clone(), handle, source, width, height });
+                        } else {
+                            let _ = store.acknowledge(&handle);
+                        }
+                    }
+                    completed.fetch_add(1, Ordering::Relaxed);
+                }
+                previews
+            })
+            .unwrap_or_default();
+            let cancelled = cancel.load(Ordering::Relaxed);
+            let _ =
+                tx.send(Event::ImportReviewPreviews { id: worker_id, candidates, previews: rendered, cancelled, restore_probes: restore_for_worker });
+        });
+        match worker {
+            Ok(worker) => {
+                if let Some(task) = self.jobs.get_mut(&id) {
+                    task.worker = Some(worker);
+                } else {
+                    let _ = worker.join();
+                }
+            }
+            Err(error) => {
+                session.import_probes = restore_probes;
+                self.finish(id, Err(format!("could not start import review previews: {error}")), "importReview", false);
+            }
+        }
+    }
+
     fn start_import_with_selection(&mut self, session: &mut Session, params: &Value, preserve_selection: bool) -> Result<Value, String> {
         if self.running_import() {
             return Err("an import is already running".into());
@@ -653,21 +771,27 @@ impl Tasks {
                     } else {
                         match result {
                             Ok(output) => {
-                                let duplicates = output.candidates.iter().filter(|candidate| candidate.duplicate.is_some()).count();
-                                let scanned = output.candidates.len();
                                 session.import_probes = output.probes;
-                                self.finish(
-                                    id,
-                                    Ok(json!({"candidates": output.candidates, "duplicates": duplicates, "scanned": scanned})),
-                                    "importReview",
-                                    false,
-                                );
+                                self.start_import_candidate_previews(session, id, output.candidates, restore_probes);
                             }
                             Err(error) => {
                                 session.import_probes = restore_probes;
                                 self.finish(id, Err(error), "importReview", false);
                             }
                         }
+                    }
+                }
+                Event::ImportReviewPreviews { id, candidates, previews, cancelled, restore_probes } => {
+                    let cancelled = cancelled || self.jobs.get(&id).is_some_and(|task| task.cancel.load(Ordering::Relaxed));
+                    if cancelled {
+                        for preview in previews {
+                            let _ = self.previews.acknowledge(&preview.handle);
+                        }
+                        session.import_probes = restore_probes;
+                        self.finish(id, Err("cancelled".into()), "importReview", true);
+                    } else {
+                        let result = import_review_result(candidates, previews);
+                        self.finish(id, result, "importReview", false);
                     }
                 }
                 Event::Preview { id, status, failed, cancelled } => {
@@ -929,6 +1053,28 @@ impl Tasks {
             self.notices.drain(..drop_count);
         }
     }
+}
+
+fn import_review_result(mut candidates: Vec<ImportCandidate>, previews: Vec<CandidatePreview>) -> Result<Value, String> {
+    let values = serde_json::to_value(&mut candidates).map_err(|error| format!("could not serialize import candidates: {error}"))?;
+    let Some(items) = values.as_array_mut() else { return Err("import candidates did not serialize as an array".into()) };
+    for preview in previews {
+        let Some(candidate) = items.get_mut(preview.index).and_then(Value::as_object_mut) else { continue };
+        candidate.insert(
+            "preview".into(),
+            json!({
+                "handle": preview.handle,
+                "revision": preview.revision,
+                "state": "provisional",
+                "source": preview.source,
+                "width": preview.width,
+                "height": preview.height,
+                "encoding": "png",
+            }),
+        );
+    }
+    let duplicates = items.iter().filter(|candidate| candidate.get("duplicate").is_some_and(|value| !value.is_null())).count();
+    Ok(json!({"candidates": values, "duplicates": duplicates, "scanned": items.len()}))
 }
 
 fn export_targets(session: &mut Session, params: &Value) -> Vec<PhotoId> {
@@ -1242,6 +1388,27 @@ mod tests {
         tasks.poll(&mut session);
         assert_eq!(tasks.completed_jobs().last().map(|task| task.state.as_str()), Some("cancelled"));
         assert!(tasks.pending_preview_ids.is_empty());
+    }
+
+    #[test]
+    fn import_review_result_marks_quick_handles_as_provisional() {
+        let candidate = ImportCandidate { path: "card/IMG_0001.CR3".into(), name: "IMG_0001.CR3".into(), format: "CR3".into(), ..Default::default() };
+        let value = import_review_result(
+            vec![candidate],
+            vec![CandidatePreview {
+                index: 0,
+                revision: "importReview-1".into(),
+                handle: "lc-preview-0000000000000001".into(),
+                source: "embedded",
+                width: 256,
+                height: 192,
+            }],
+        )
+        .expect("candidate preview result should serialize");
+        assert_eq!(value["candidates"][0]["preview"]["state"], "provisional");
+        assert_eq!(value["candidates"][0]["preview"]["source"], "embedded");
+        assert_eq!(value["candidates"][0]["preview"]["revision"], "importReview-1");
+        assert_eq!(value["candidates"][0]["preview"]["handle"], "lc-preview-0000000000000001");
     }
 
     #[test]

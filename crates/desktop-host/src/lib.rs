@@ -39,6 +39,7 @@ enum Request {
     Snapshot { reply: SyncSender<Result<Value, String>> },
     ViewSlice { generation: Option<u64>, offset: usize, limit: usize, reply: SyncSender<Result<Value, String>> },
     Preview { request: PreviewRequest, reply: Sender<Result<PreviewDescriptor, String>> },
+    PreviewQuick { request: PreviewRequest, reply: Sender<Result<PreviewDescriptor, String>> },
     MergePreview { request: MergePreviewRequest, reply: Sender<Result<MergePreviewDescriptor, String>> },
     MergePreviewCancel { request: MergePreviewCancelRequest, reply: SyncSender<Result<bool, String>> },
     Preferences { patch: Option<Value>, reply: SyncSender<Result<Value, String>> },
@@ -92,6 +93,11 @@ impl DesktopHandle {
     pub fn preview(&self, request: PreviewRequest) -> Result<PreviewDescriptor, String> {
         let (reply_tx, reply_rx) = channel();
         self.tx.send(Request::Preview { request, reply: reply_tx }).map_err(|_| "session owner is closed".to_string())?;
+        reply_rx.recv().map_err(|_| "session owner stopped before replying".to_string())?
+    }
+    pub fn preview_quick(&self, request: PreviewRequest) -> Result<PreviewDescriptor, String> {
+        let (reply_tx, reply_rx) = channel();
+        self.tx.send(Request::PreviewQuick { request, reply: reply_tx }).map_err(|_| "session owner is closed".to_string())?;
         reply_rx.recv().map_err(|_| "session owner stopped before replying".to_string())?
     }
     pub fn merge_preview(&self, request: MergePreviewRequest) -> Result<MergePreviewDescriptor, String> {
