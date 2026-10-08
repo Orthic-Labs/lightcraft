@@ -1,7 +1,7 @@
-use super::{AutoTone, auto_tone, percentile};
+use super::{auto_tone, percentile, AutoTone};
 use lightcraft_color::perceptual::oklab_from_2020;
 use lightcraft_color::transfer::decode_srgb8;
-use lightcraft_color::{REC2020, SRGB, luminance_2020};
+use lightcraft_color::{luminance_2020, REC2020, SRGB};
 use lightcraft_develop::DevelopSettings;
 use lightcraft_raster::{Rgb32f, Rgba8};
 
@@ -191,6 +191,32 @@ fn ordinary_underexposed_auto_reaches_middle_exposure_in_render() {
         mean(&pixels),
         mean(&legacy)
     );
+}
+
+#[test]
+fn auto_tone_does_not_leave_ordinary_raw_midtone_underexposed() {
+    // This scene is deliberately encoded below middle grey, while its bright region keeps it
+    // out of the low-key branch. A RAW loader may have already applied BaselineExposure; Auto
+    // must target the decoded scene itself without another fixed darkening offset.
+    let src = ordinary_underexposed_scene();
+    let a = auto_tone(&src, &SourceInfo::default(), &DevelopSettings::default());
+    let median = median_after(&src, a);
+    assert!(median.abs() < 0.08, "decoded median should reach middle grey: {median:.3}, settings {a:?}");
+}
+
+#[test]
+fn auto_tone_tracks_a_serialized_baseline_gain_once() {
+    // A DNG BaselineExposure is a multiplicative scene gain in load_bytes. Scaling this
+    // decoded proxy by +2 EV must move Auto exposure by −2 EV, leaving effective tone stable.
+    let src = ordinary_underexposed_scene();
+    let mut baseline = src.clone();
+    baseline.map_in_place(|p| p.map(|v| v * 4.0));
+    let a = auto_tone(&src, &SourceInfo::default(), &DevelopSettings::default());
+    let b = auto_tone(&baseline, &SourceInfo::default(), &DevelopSettings::default());
+    assert!((a.exposure - b.exposure - 2.0).abs() < 0.12, "BaselineExposure drifted Auto: {a:?} vs {b:?}");
+    let effective_a = median_after(&src, a);
+    let effective_b = median_after(&baseline, b);
+    assert!((effective_a - effective_b).abs() < 0.12, "effective medians diverged: {effective_a:.3}/{effective_b:.3}");
 }
 
 #[test]

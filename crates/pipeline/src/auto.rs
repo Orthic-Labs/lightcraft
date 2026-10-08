@@ -2,13 +2,13 @@
 
 use lightcraft_color::cct::xy_to_temp_tint;
 use lightcraft_color::perceptual::oklab_from_2020;
-use lightcraft_color::{REC2020, Xy, bradford, luminance_2020};
+use lightcraft_color::{bradford, luminance_2020, Xy, REC2020};
 use lightcraft_develop::DevelopSettings;
 use lightcraft_raster::Rgb32f;
 use serde::Serialize;
 
-use crate::SourceInfo;
 use crate::local::effective_wb;
+use crate::SourceInfo;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct AutoTone {
@@ -78,7 +78,9 @@ pub fn auto_tone(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings) -> AutoTo
         0.0
     };
     let median_gain = if low_key || high_key { 0.85 } else { 1.0 };
-    let mut exposure = ((target - median) * median_gain - 0.1).clamp(-4.0, 4.0);
+    // BaselineExposure has already been applied by the RAW loader. Keep an ordinary scene's
+    // median on target instead of adding a second, undocumented underexposure bias here.
+    let mut exposure = ((target - median) * median_gain).clamp(-4.0, 4.0);
     if backlit {
         // Let highlight recovery work, but do not spend several stops on a dark foreground
         // when a small bright tail (sun, window, or lamp) defines the upper percentile.
