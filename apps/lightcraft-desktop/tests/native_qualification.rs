@@ -2013,6 +2013,9 @@ fn native_hidden_control_journeys() {
                         assert_eq!(activity["inside"].as_bool(), Some(true), "background activity must stay within viewport: {activity}");
                         assert_eq!(activity["reachable"].as_bool(), Some(true), "background activity must not be obscured: {activity}");
                         control.screenshot_to(&scenario.dir().join("background-activity.png")).expect("background activity screenshot must save");
+                        // Task completion removes its Cancel button, returning focus to body.
+                        let focus_lost = control.eval("document.activeElement?.blur(); return document.activeElement === document.body;").expect("task focus-loss state must be reproducible");
+                        assert_eq!(focus_lost.as_bool(), Some(true), "task completion focus loss must be exercised");
                         control.key("escape").expect("background activity must dismiss with Escape");
                         wait_for_dom(control, "return document.querySelector('#lc-background-jobs') === null && document.activeElement === document.querySelector('.lc-background-activity > button');");
                         // Exercise actual React dialog, native IPC & encoder, rather than

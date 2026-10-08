@@ -26,9 +26,10 @@ export function BackgroundActivity() {
       trigger.current?.focus();
     };
     document.addEventListener('pointerdown', outside);
-    root.current?.addEventListener('keydown', escape);
-    const element = root.current;
-    return () => { document.removeEventListener('pointerdown', outside); element?.removeEventListener('keydown', escape); };
+    // A completing task can remove its focused Cancel button. Escape must still
+    // dismiss the open panel when the browser consequently returns focus to body.
+    document.addEventListener('keydown', escape, true);
+    return () => { document.removeEventListener('pointerdown', outside); document.removeEventListener('keydown', escape, true); };
   }, [open]);
   const cancel = async (id: string) => {
     if (cancelling.includes(id)) return;
