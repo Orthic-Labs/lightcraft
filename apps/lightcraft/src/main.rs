@@ -641,7 +641,7 @@ fn main() -> eframe::Result {
             app.integrated_titlebar = cfg!(target_os = "macos");
             app.notices.extend(prefs_warning);
             // what's on disk now: only changes are written
-            let mut writer = PrefsWriter {
+            let writer = PrefsWriter {
                 path: if in_memory { None } else { prefs_path() },
                 written: serde_json::to_vec_pretty(&app.ui).unwrap_or_default(),
                 library: app.ui.settings.library_path.clone(),
