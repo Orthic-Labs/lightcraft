@@ -56,8 +56,8 @@ export function applyUiCommand(id: string, ui: UiState): Partial<UiState> | null
   if (id.startsWith('view.') && id.slice(5) in view) return { view: view[id.slice(5)] };
   if (id.startsWith('panel.')) {
     const panel = id.slice(6);
-    if (panel === 'close') return { panel: null };
-    if (['edit','profiles','crop','remove','masking','redeye','presets','info','keywords','versions','activity'].includes(panel)) return { panel: panel as UiState['panel'], ...(['edit','profiles','crop','remove','masking','redeye','presets'].includes(panel) ? { view: 'detail' } : {}) };
+    if (panel === 'close') return { inspectorCollapsed: true };
+    if (['edit','profiles','crop','remove','masking','redeye','presets','info','keywords','versions','activity'].includes(panel)) return { panel: panel as UiState['panel'], inspectorCollapsed: false, ...(['edit','profiles','crop','remove','masking','redeye','presets'].includes(panel) ? { view: 'detail' } : {}) };
   }
   if (id.startsWith('section.')) return { view: 'detail', panel: 'edit', sections: { ...ui.sections, [id.slice(8)]: !ui.sections[id.slice(8)] } };
   if (id.startsWith('tool.')) {

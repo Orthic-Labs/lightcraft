@@ -113,11 +113,11 @@ export default function Inspector({ className = '' }: { className?: string }) {
       {!snapshot && <div className="lc-inspector__empty">Waiting for desktop session…</div>}
       </div>
     </div>
-    <ToolRail active={panel} choose={choose} chooseFromMore={(next) => { choose(next); closeMore(); }} open={moreOpen} setOpen={setMoreOpen} hiddenActive={hiddenPanelActive} buttonRef={moreButtonRef} menuRef={moreMenuRef} />
+    <ToolRail active={panel} choose={choose} chooseFromMore={(next) => { choose(next); closeMore(); }} open={moreOpen} setOpen={setMoreOpen} hiddenActive={hiddenPanelActive} buttonRef={moreButtonRef} menuRef={moreMenuRef} collapsed={ui.inspectorCollapsed} toggleCollapsed={() => desktop.setUi({ inspectorCollapsed: !ui.inspectorCollapsed })} />
   </aside>;
 }
 
-function ToolRail({ active, choose, chooseFromMore, open, setOpen, hiddenActive, buttonRef, menuRef }: { active: Panel; choose: (panel: Exclude<Panel, null>) => void; chooseFromMore: (panel: Exclude<Panel, null>) => void; open: boolean; setOpen: (open: boolean) => void; hiddenActive: boolean; buttonRef: React.RefObject<HTMLButtonElement | null>; menuRef: React.RefObject<HTMLDivElement | null> }) {
+function ToolRail({ active, choose, chooseFromMore, open, setOpen, hiddenActive, buttonRef, menuRef, collapsed, toggleCollapsed }: { active: Panel; choose: (panel: Exclude<Panel, null>) => void; chooseFromMore: (panel: Exclude<Panel, null>) => void; open: boolean; setOpen: (open: boolean) => void; hiddenActive: boolean; buttonRef: React.RefObject<HTMLButtonElement | null>; menuRef: React.RefObject<HTMLDivElement | null>; collapsed: boolean; toggleCollapsed: () => void }) {
   return <nav className="lc-inspector__rail" aria-label="Inspector tools">
     <div className="lc-inspector__rail-tools">
       {PANEL_ITEMS.map(item => <button key={item.id} type="button" className="lc-inspector__tool" data-panel={item.id} aria-label={item.label} aria-pressed={active === item.id} title={item.label} onClick={() => choose(item.id)}><span className="lc-inspector__tool-icon" aria-hidden="true"><Icon name={item.icon} size={17} /></span>{active === item.id && <FuseCurves fill="var(--rk-plane)" />}</button>)}
@@ -134,6 +134,7 @@ function ToolRail({ active, choose, chooseFromMore, open, setOpen, hiddenActive,
         {MORE_PANEL_ITEMS.map(item => <button key={item.id} type="button" role="menuitem" className="lc-inspector__more-item" data-panel={item.id} aria-current={active === item.id ? 'true' : undefined} onClick={() => chooseFromMore(item.id)}><Icon name={item.icon} size={16} /><span>{item.label}</span></button>)}
       </div>}
     </div>
+    <button type="button" className="lc-inspector__collapse" data-inspector-collapse="true" aria-label={collapsed ? 'Expand inspector' : 'Collapse inspector'} aria-expanded={!collapsed} title={collapsed ? 'Expand inspector' : 'Collapse inspector'} onClick={toggleCollapsed}><Icon name="chevron" size={17} /></button>
   </nav>;
 }
 

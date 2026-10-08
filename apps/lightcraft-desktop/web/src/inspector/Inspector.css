@@ -29,3 +29,10 @@
 .lc-inspector__tool{position:relative}.lc-inspector__tool[aria-pressed=true]{margin-left:-4px;width:calc(100% + 4px);border-radius:6px 0 0 6px;background:var(--i-bg);box-shadow:inset 2px 0 0 var(--i-accent)}
 .lc-inspector__tool .rk-fuse{right:auto;left:0;transform:scaleX(-1)!important}.lc-inspector__tool .rk-fuse--bottom{transform:scale(-1,-1)!important}
 .lc-inspector.is-collapsed{position:relative;z-index:20;overflow:visible}
+.lc-inspector__rail{justify-content:flex-start}.lc-inspector__rail-more{margin-top:auto}
+.lc-inspector__collapse{width:100%;height:34px;margin-top:4px;padding:3px;border-radius:6px;color:var(--i-muted);display:grid;place-items:center}
+.lc-inspector__collapse:hover{background:var(--rk-fill-2,var(--i-surface));color:var(--i-text)}
+.lc-inspector__collapse:focus-visible{outline:3px solid var(--i-accent);outline-offset:1px}
+.lc-inspector__collapse svg{transform:rotate(90deg);transition:transform .12s ease}
+.lc-inspector.is-collapsed .lc-inspector__collapse svg{transform:rotate(-90deg)}
+@media (prefers-reduced-motion:reduce){.lc-inspector__collapse svg{transition:none}}

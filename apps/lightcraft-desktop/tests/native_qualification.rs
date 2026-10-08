@@ -1158,6 +1158,17 @@ fn native_hidden_control_journeys() {
                             let develop = scenario.dir().join(format!("route-develop-{width}x{height}.png"));
                             control.screenshot_to(&develop).expect("develop route screenshot must be captured");
                             assert!(develop.is_file());
+                            click_dom(control, ".lc-inspector button[data-inspector-collapse]", "manual inspector collapse must execute");
+                            wait_for_dom(control, "return document.querySelector('.lc-inspector')?.classList.contains('is-collapsed') === true;");
+                            click_dom(control, ".lc-inspector button[data-more-tools]", "collapsed More tools must open");
+                            let collapsed_menu = control.eval("return (() => { const e = document.querySelector('.lc-inspector__more-menu'); if (!e) return null; const r = e.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return { width: document.querySelector('.lc-inspector')?.getBoundingClientRect().width, inside: r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight, reachable: e.contains(hit) }; })();").expect("collapsed More geometry must be queryable");
+                            assert!(collapsed_menu["width"].as_f64().is_some_and(|value| (value - 44.0).abs() < 2.0), "collapsed inspector must retain44px rail: {collapsed_menu}");
+                            assert_eq!(collapsed_menu["inside"].as_bool(), Some(true), "collapsed menu must remain inside viewport: {collapsed_menu}");
+                            assert_eq!(collapsed_menu["reachable"].as_bool(), Some(true), "collapsed More menu must be visible & reachable: {collapsed_menu}");
+                            control.key("Escape").expect("More dismissal must execute");
+                            click_dom(control, ".lc-inspector button[data-inspector-collapse]", "manual inspector expansion must execute");
+                            wait_for_dom(control, "return document.querySelector('.lc-inspector')?.classList.contains('is-collapsed') === false;");
+                            assert_workspace_design(control);
                             control.key("G").expect("library route key must execute");
                             wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
                         }
