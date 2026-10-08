@@ -59,8 +59,8 @@ impl Controller {
         Ok(Self {
             session,
             renderer: Renderer::new(store.clone()),
-            merge_previews: MergePreviews::new(store),
-            tasks: Tasks::with_store(store.clone()),
+            merge_previews: MergePreviews::new(store.clone()),
+            tasks: Tasks::with_store(store),
             auto_import: AutoImport::new(),
             snapshot_cache: crate::snapshot::CatalogSnapshotCache::default(),
             preferences: Map::new(),
