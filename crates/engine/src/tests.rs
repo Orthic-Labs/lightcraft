@@ -569,6 +569,31 @@ fn build_previews_fills_the_cache() {
     assert!(s.execute("library.buildPreviews", &json!({"size": "huge"})).is_err());
 }
 
+#[test]
+fn preview_build_marks_decodes_as_background_work() {
+    use lightcraft_catalog::{Op, Photo, PhotoId, Source};
+    use lightcraft_pipeline::SourceInfo;
+    use lightcraft_raster::Rgb32f;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let saw_background = std::sync::Arc::new(AtomicBool::new(false));
+    let marker = saw_background.clone();
+    let mut s = Session::new();
+    s.catalog
+        .apply(Op::AddPhoto {
+            photo: Box::new(Photo::new(PhotoId(1), Source::File { path: "background.png".into() }, "background.png", "PNG", 16, 16, "")),
+        })
+        .unwrap();
+    s.media.file_loader = Some(std::sync::Arc::new(move |_, _| {
+        marker.store(crate::memory::is_background(), Ordering::Relaxed);
+        Ok((Rgb32f::new(16, 16), SourceInfo::default()))
+    }));
+
+    let result = s.execute("library.buildPreviews", &json!({"ids": [1], "wait": true})).unwrap();
+    assert_eq!(result["done"], 1);
+    assert!(saw_background.load(Ordering::Relaxed), "preview decodes yield to interactive work");
+}
+
 /// Colour range: a click samples the colour under it, so the mask selects that colour (white
 /// in the mask view) and not a different one; ⇧ adds samples, up to five.
 #[test]

@@ -16,6 +16,7 @@ const EVENT_CAPACITY: usize = 64;
 const MAX_TASKS: usize = 128;
 const MAX_MERGE_IDS: usize = 256;
 const MAX_REVIEW_PATHS: usize = 512;
+const MAX_PENDING_PREVIEW_IDS: usize = 8_192;
 const MAX_COMPLETED_TASKS: usize = 64;
 
 struct Task {
@@ -74,6 +75,12 @@ enum Event {
         cancelled: bool,
         restore_probes: std::collections::HashMap<String, lightcraft_engine::media::ProbeInfo>,
     },
+    Preview {
+        id: String,
+        status: Value,
+        failed: usize,
+        cancelled: bool,
+    },
 }
 
 pub(crate) struct Tasks {
@@ -83,12 +90,13 @@ pub(crate) struct Tasks {
     next: u64,
     notices: Vec<String>,
     completed: VecDeque<TerminalTask>,
+    pending_preview_ids: VecDeque<u64>,
 }
 
 impl Tasks {
     pub(crate) fn new() -> Self {
         let (tx, rx) = sync_channel(EVENT_CAPACITY);
-        Self { jobs: BTreeMap::new(), tx, rx, next: 1, notices: Vec::new(), completed: VecDeque::new() }
+        Self { jobs: BTreeMap::new(), tx, rx, next: 1, notices: Vec::new(), completed: VecDeque::new(), pending_preview_ids: VecDeque::new() }
     }
 
     pub(crate) fn start_export(&mut self, session: &mut Session, params: &Value) -> Result<Value, String> {
@@ -167,6 +175,114 @@ impl Tasks {
 
     pub(crate) fn start_import(&mut self, session: &mut Session, params: &Value) -> Result<Value, String> {
         self.start_import_with_selection(session, params, false)
+    }
+
+    /// Start the engine's detached thumbnail/loupe build under the host task registry. The
+    /// engine owns render/cache semantics; this monitor mirrors its counters into `status.jobs`
+    /// so desktop clients get one progress surface for imports, previews and exports.
+    pub(crate) fn start_preview_build(&mut self, session: &mut Session, params: &Value) -> Result<Value, String> {
+        if self.running_kind("preview") {
+            return Err("a preview build is already running".into());
+        }
+        if self.jobs.len() >= MAX_TASKS {
+            return Err("too many background tasks".into());
+        }
+        let mut request = params.clone();
+        if let Some(values) = request.as_object_mut() {
+            // Desktop commands are always represented as a task; avoid blocking the owner
+            // thread when a caller carried over the CLI-only `wait` parameter.
+            values.insert("wait".into(), Value::Bool(false));
+        }
+        let result = session.execute("library.buildPreviews", &request).map_err(|error| error.to_string())?;
+        let state = session.preview_build.clone().ok_or_else(|| "preview build did not create progress state".to_string())?;
+        let total = Arc::new(AtomicUsize::new(state.total));
+        let completed = Arc::new(AtomicUsize::new(state.done.load(Ordering::Relaxed)));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let task_id = self.new_id("preview");
+        let task = Task {
+            id: task_id.clone(),
+            kind: "preview".into(),
+            label: "Build Previews".into(),
+            total: total.clone(),
+            completed: completed.clone(),
+            cancel: cancel.clone(),
+            worker: None,
+        };
+        let tx = self.tx.clone();
+        let id_for_worker = task_id.clone();
+        let worker_cancel = cancel.clone();
+        let state_for_worker = state.clone();
+        let worker = std::thread::Builder::new()
+            .name("lightcraft-preview-progress".into())
+            .spawn(move || {
+                while !state_for_worker.finished.load(Ordering::Acquire) {
+                    if worker_cancel.load(Ordering::Relaxed) {
+                        state_for_worker.cancel.store(true, Ordering::Relaxed);
+                    }
+                    completed.store(state_for_worker.done.load(Ordering::Relaxed), Ordering::Relaxed);
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                completed.store(state_for_worker.done.load(Ordering::Relaxed), Ordering::Relaxed);
+                let cancelled = worker_cancel.load(Ordering::Relaxed) || state_for_worker.cancel.load(Ordering::Relaxed);
+                let status = state_for_worker.json();
+                let failed = state_for_worker.failed.load(Ordering::Relaxed);
+                let _ = tx.send(Event::Preview { id: id_for_worker, status, failed, cancelled });
+            })
+            .map_err(|error| {
+                state.cancel.store(true, Ordering::Relaxed);
+                format!("could not start preview progress: {error}")
+            })?;
+        self.insert(Task { worker: Some(worker), ..task })?;
+        Ok(json!({"taskId": task_id, "kind": "preview", "total": result["total"]}))
+    }
+
+    fn start_preview_build_for_ids(&mut self, session: &mut Session, ids: &[u64]) {
+        if ids.is_empty() {
+            return;
+        }
+        let params = json!({"ids": ids, "size": "standard"});
+        if let Err(error) = self.start_preview_build(session, &params) {
+            log::warn!("automatic preview build: {error}");
+        }
+    }
+
+    fn schedule_preview_ids(&mut self, session: &mut Session, ids: &[u64]) {
+        let queued: HashSet<u64> = self.pending_preview_ids.iter().copied().collect();
+        let mut seen = queued;
+        let mut unique = Vec::new();
+        for id in ids.iter().copied().filter(|id| *id != 0) {
+            if seen.insert(id) {
+                unique.push(id);
+            }
+        }
+        if unique.is_empty() {
+            return;
+        }
+        let preview_cancelled = self.jobs.values().find(|job| job.kind == "preview").is_some_and(|job| job.cancel.load(Ordering::Relaxed))
+            || session.preview_build.as_ref().is_some_and(|state| state.cancel.load(Ordering::Relaxed));
+        if self.running_kind("preview") {
+            if preview_cancelled {
+                self.pending_preview_ids.clear();
+                return;
+            }
+            let mut dropped = 0;
+            for id in unique {
+                if self.pending_preview_ids.len() >= MAX_PENDING_PREVIEW_IDS {
+                    dropped += 1;
+                } else {
+                    self.pending_preview_ids.push_back(id);
+                }
+            }
+            if dropped > 0 {
+                self.notices.push(format!("preview queue full; dropped {dropped} photo(s)"));
+                if self.notices.len() > 32 {
+                    let drop_count = self.notices.len() - 32;
+                    self.notices.drain(..drop_count);
+                }
+            }
+            return;
+        }
+        self.start_preview_build_for_ids(session, &unique);
     }
 
     pub(crate) fn start_auto_import(&mut self, session: &mut Session, params: &Value) -> Result<Value, String> {
@@ -504,11 +620,19 @@ impl Tasks {
                     if let Some(selection) = selection_before {
                         session.selection = selection;
                     }
+                    let preview_ids = result
+                        .as_ref()
+                        .ok()
+                        .and_then(|report| report.get("imported"))
+                        .and_then(Value::as_array)
+                        .map(|ids| ids.iter().filter_map(Value::as_u64).collect::<Vec<_>>())
+                        .unwrap_or_default();
                     self.finish(id, result, "import", cancelled);
+                    self.schedule_preview_ids(session, &preview_ids);
                 }
                 Event::LightroomPrepared { id, result, cancelled } => self.poll_lightroom_prepared(session, id, result, cancelled),
                 Event::LightroomFinalized { id, report, result, index_path, commit_error } => {
-                    self.finish_lightroom(id, report, result, index_path, commit_error)
+                    self.finish_lightroom(session, id, report, result, index_path, commit_error)
                 }
                 Event::LightroomInspection { id, result, cancelled } => self.finish(id, result, "lightroomInspect", cancelled),
                 Event::ImportReview { id, result, cancelled, restore_probes } => {
@@ -534,6 +658,16 @@ impl Tasks {
                                 self.finish(id, Err(error), "importReview", false);
                             }
                         }
+                    }
+                }
+                Event::Preview { id, status, failed, cancelled } => {
+                    let cancelled = cancelled || self.jobs.get(&id).is_some_and(|task| task.cancel.load(Ordering::Relaxed));
+                    self.finish_preview(id, status, failed, cancelled);
+                    if cancelled {
+                        self.pending_preview_ids.clear();
+                    } else {
+                        let pending = self.pending_preview_ids.drain(..).collect::<Vec<_>>();
+                        self.start_preview_build_for_ids(session, &pending);
                     }
                 }
             }
@@ -605,19 +739,28 @@ impl Tasks {
                 }
             }
             Err(error) => {
-                self.finish_lightroom(id, report, Err(format!("could not start Lightroom archive finalization: {error}")), index_path, commit_error);
+                self.finish_lightroom(
+                    session,
+                    id,
+                    report,
+                    Err(format!("could not start Lightroom archive finalization: {error}")),
+                    index_path,
+                    commit_error,
+                );
             }
         }
     }
 
     fn finish_lightroom(
         &mut self,
+        session: &mut Session,
         id: String,
         mut report: Value,
         result: Result<(), String>,
         index_path: Option<String>,
         commit_error: Option<String>,
     ) {
+        let preview_ids = lightroom_preview_ids(&report);
         let Some(mut job) = self.jobs.remove(&id) else {
             self.notices.push("unknown lightroomImport task completed".into());
             return;
@@ -654,6 +797,7 @@ impl Tasks {
             let drop_count = self.notices.len() - 32;
             self.notices.drain(..drop_count);
         }
+        self.schedule_preview_ids(session, &preview_ids);
     }
 
     pub(crate) fn cancel(&mut self, id: Option<&str>) -> Result<Value, String> {
@@ -747,6 +891,34 @@ impl Tasks {
             self.notices.drain(..drop_count);
         }
     }
+
+    fn finish_preview(&mut self, id: String, status: Value, failed: usize, cancelled: bool) {
+        let Some(mut job) = self.jobs.remove(&id) else {
+            self.notices.push("unknown preview task completed".into());
+            return;
+        };
+        if let Some(worker) = job.worker.take() {
+            let _ = worker.join();
+        }
+        job.completed.store(job.total.load(Ordering::Relaxed), Ordering::Relaxed);
+        let (state, result, error, notice) = if cancelled {
+            ("cancelled", None, None, format!("{} cancelled", job.label))
+        } else if failed > 0 {
+            let error = format!("{failed} preview job(s) failed");
+            ("failed", Some(status), Some(error.clone()), format!("{} failed: {error}", job.label))
+        } else {
+            ("done", Some(status), None, format!("{} finished", job.label))
+        };
+        self.completed.push_back(TerminalTask { id: job.id, kind: job.kind, label: job.label, state: state.into(), result, error });
+        while self.completed.len() > MAX_COMPLETED_TASKS {
+            self.completed.pop_front();
+        }
+        self.notices.push(notice);
+        if self.notices.len() > 32 {
+            let drop_count = self.notices.len() - 32;
+            self.notices.drain(..drop_count);
+        }
+    }
 }
 
 fn export_targets(session: &mut Session, params: &Value) -> Vec<PhotoId> {
@@ -823,6 +995,16 @@ fn lightroom_inspection_report(data: &lightcraft_engine::lightroom_catalog::Cata
         "missing": missing,
         "warnings": data.warnings,
     })
+}
+
+fn lightroom_preview_ids(report: &Value) -> Vec<u64> {
+    let Some(mapping) = report.get("mapping").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut ids = mapping.values().filter_map(Value::as_u64).collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 fn append_warning(report: &mut Value, warning: String) {
@@ -970,6 +1152,18 @@ mod tests {
         }
     }
 
+    fn preview_task(id: &str, cancelled: bool) -> Task {
+        Task {
+            id: id.into(),
+            kind: "preview".into(),
+            label: "Build Previews".into(),
+            total: Arc::new(AtomicUsize::new(3)),
+            completed: Arc::new(AtomicUsize::new(0)),
+            cancel: Arc::new(AtomicBool::new(cancelled)),
+            worker: None,
+        }
+    }
+
     #[test]
     fn merge_completion_cancel_wins_worker_success_race() {
         let task = task_with_cancel(true);
@@ -999,6 +1193,59 @@ mod tests {
         assert_eq!(completed.len(), MAX_COMPLETED_TASKS);
         assert_eq!(completed.first().map(|task| task.id.as_str()), Some("merge-3"));
         assert_eq!(completed.last().map(|task| task.id.as_str()), Some("merge-66"));
+    }
+
+    #[test]
+    fn preview_ids_queue_behind_existing_job_with_bound_and_deduplication() {
+        let mut tasks = Tasks::new();
+        tasks.jobs.insert("preview-1".into(), preview_task("preview-1", false));
+        let mut session = Session::new();
+        tasks.schedule_preview_ids(&mut session, &[7, 8, 7]);
+        assert_eq!(tasks.pending_preview_ids.iter().copied().collect::<Vec<_>>(), vec![7, 8]);
+        tasks.schedule_preview_ids(&mut session, &[8, 9]);
+        assert_eq!(tasks.pending_preview_ids.iter().copied().collect::<Vec<_>>(), vec![7, 8, 9]);
+        tasks.pending_preview_ids.clear();
+        let many = (1..=(MAX_PENDING_PREVIEW_IDS as u64 + 4)).collect::<Vec<_>>();
+        tasks.schedule_preview_ids(&mut session, &many);
+        assert_eq!(tasks.pending_preview_ids.len(), MAX_PENDING_PREVIEW_IDS);
+    }
+
+    #[test]
+    fn preview_terminal_failure_keeps_failure_state_and_cancel_drops_queue() {
+        let mut tasks = Tasks::new();
+        tasks.jobs.insert("preview-1".into(), preview_task("preview-1", false));
+        let _ = tasks.tx.send(Event::Preview {
+            id: "preview-1".into(),
+            status: json!({"total": 3, "done": 3, "failed": 2}),
+            failed: 2,
+            cancelled: false,
+        });
+        let mut session = Session::new();
+        tasks.poll(&mut session);
+        assert_eq!(tasks.completed_jobs()[0].state, "failed");
+        assert_eq!(tasks.completed_jobs()[0].error.as_deref(), Some("2 preview job(s) failed"));
+
+        tasks.jobs.insert("preview-2".into(), preview_task("preview-2", false));
+        tasks.pending_preview_ids.push_back(9);
+        assert_eq!(tasks.cancel(Some("preview-2")).expect("cancel preview")["cancelled"], 1);
+        let _ = tasks.tx.send(Event::Preview { id: "preview-2".into(), status: json!({"done": 3}), failed: 0, cancelled: true });
+        tasks.poll(&mut session);
+        assert_eq!(tasks.completed_jobs().last().map(|task| task.state.as_str()), Some("cancelled"));
+        assert!(tasks.pending_preview_ids.is_empty());
+    }
+
+    #[test]
+    fn preview_queue_starts_next_host_job_after_terminal_event() {
+        let mut tasks = Tasks::new();
+        tasks.jobs.insert("preview-1".into(), preview_task("preview-1", false));
+        tasks.pending_preview_ids.push_back(1);
+        let mut session = Session::with_demo();
+        let _ = tasks.tx.send(Event::Preview { id: "preview-1".into(), status: json!({"done": 3}), failed: 0, cancelled: false });
+        tasks.poll(&mut session);
+        assert!(
+            tasks.statuses().iter().any(|job| job.kind == "preview")
+                || tasks.completed_jobs().iter().filter(|job| job.kind == "preview").count() >= 2
+        );
     }
 
     #[test]
@@ -1058,6 +1305,12 @@ mod tests {
     }
 
     #[test]
+    fn lightroom_mapping_ids_are_deduplicated_for_preview_queue() {
+        assert_eq!(lightroom_preview_ids(&json!({"mapping": {"1": 9, "2": 7, "3": 9}})), vec![7, 9]);
+        assert!(lightroom_preview_ids(&json!({"mapping": []})).is_empty());
+    }
+
+    #[test]
     fn lightroom_archive_failure_keeps_committed_report_and_actionable_warning() {
         let mut tasks = Tasks::new();
         tasks.jobs.insert(
@@ -1072,7 +1325,9 @@ mod tests {
                 worker: None,
             },
         );
+        let mut session = Session::new();
         tasks.finish_lightroom(
+            &mut session,
             "lightroomImport-1".into(),
             json!({"source": "catalog.lrcat", "photos": 2, "warnings": []}),
             Err("permission denied".into()),

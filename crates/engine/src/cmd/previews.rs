@@ -67,7 +67,10 @@ fn run_all(jobs: Vec<Vec<RenderJob>>, state: &PreviewBuild) {
         if state.cancel.load(Ordering::Relaxed) {
             break;
         }
-        let ok = photo_jobs.into_iter().all(|j| j.run().rendered.is_ok());
+        // Decodes for this queue must yield to loupe/export work.  File loaders use the
+        // thread-local background marker to wait on the shared working-memory gate; without
+        // this wrapper a detached preview worker was treated as interactive work.
+        let ok = crate::memory::in_background(|| photo_jobs.into_iter().all(|j| j.run().rendered.is_ok()));
         if !ok {
             state.failed.fetch_add(1, Ordering::Relaxed);
         }

@@ -173,6 +173,7 @@ impl Controller {
             "library.importPreview" => self.tasks.start_import_review(&mut self.session, params),
             "library.importLightroom" => self.tasks.start_lightroom_import(&mut self.session, params),
             "library.inspectLightroom" => self.tasks.start_lightroom_inspection(&mut self.session, params),
+            "library.buildPreviews" => self.tasks.start_preview_build(&mut self.session, params),
             "merge.hdr" | "merge.panorama" | "merge.hdrPanorama" => {
                 if params.get("preview").and_then(Value::as_bool).unwrap_or(false) {
                     self.session.execute(id, params).map_err(|error| error.to_string())
@@ -724,14 +725,18 @@ mod tests {
         let Ok(mut controller) = controller_result else { return };
         let imported = controller.run("library.import", &json!({"paths": [source.to_string_lossy()]}));
         assert!(imported.is_ok(), "PNG import should start: {:?}", imported.err());
+        let mut saw_preview_task = false;
         for _ in 0..2_000 {
             controller.poll();
+            saw_preview_task |= controller.tasks.statuses().iter().any(|job| job.kind == "preview");
+            saw_preview_task |= controller.tasks.completed_jobs().iter().any(|job| job.kind == "preview");
             if !controller.tasks.running() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(!controller.tasks.running(), "PNG import worker should finish");
+        assert!(saw_preview_task, "PNG import should enqueue host preview task");
         assert!(controller.notices.iter().any(|notice| notice == "Import Photos finished"), "PNG import should finish: {:?}", controller.notices);
 
         let snapshot = controller.snapshot();
