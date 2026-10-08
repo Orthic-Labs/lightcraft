@@ -2,13 +2,13 @@
 
 use lightcraft_color::cct::xy_to_temp_tint;
 use lightcraft_color::perceptual::oklab_from_2020;
-use lightcraft_color::{bradford, luminance_2020, Xy, REC2020};
+use lightcraft_color::{REC2020, Xy, bradford, luminance_2020};
 use lightcraft_develop::DevelopSettings;
 use lightcraft_raster::Rgb32f;
 use serde::Serialize;
 
-use crate::local::effective_wb;
 use crate::SourceInfo;
+use crate::local::effective_wb;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct AutoTone {
