@@ -16,7 +16,20 @@
 .lc-library-sidebar { min-width: 0; overflow: auto; padding: 12px 8px 14px; border-right: 1px solid var(--lc-border); background: var(--lc-sidebar, #eef0f3); }
 .lc-library-sidebar.is-collapsed { padding: 12px 5px; }
 .lc-source-group { margin: 0 0 18px; }
-.lc-source-group h2 { margin: 9px 12px 6px; color: var(--lc-muted); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.lc-source-group-header { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 28px; padding: 0 10px; border: 0; background: transparent; color: inherit; cursor: pointer; text-align: left; }
+.lc-source-group-header h2 { margin: 9px 2px 6px; color: var(--lc-muted); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.lc-source-group-header:hover h2, .lc-source-group-header:focus-visible h2 { color: inherit; }
+.lc-source-group-chevron { width: 14px; color: var(--lc-muted); font-size: 16px; line-height: 1; text-align: center; }
+.lc-source-group.is-collapsed { margin-bottom: 6px; }
+.lc-shell-library-sidebar { min-width: 0; }
+.lc-shell-sidebar-groups { min-height: 0; overflow: auto; }
+.lc-shell-sidebar-group { padding: 0 8px 8px; }
+.lc-shell-sidebar-group-header { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 30px; padding: 0 10px; border: 0; background: transparent; color: var(--rk-ink-2, currentColor); cursor: pointer; font: inherit; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-align: left; text-transform: uppercase; }
+.lc-shell-sidebar-group-header:hover, .lc-shell-sidebar-group-header:focus-visible { color: var(--rk-ink, currentColor); }
+.lc-shell-sidebar-group-header span:last-child { font-size: 16px; font-weight: 400; }
+.lc-shell-library-sidebar .rk-nav { min-height: 0; }
+.lc-shell-library-sidebar .rk-group h6 { display: none; }
+.rk-shell.is-collapsed .lc-shell-library-sidebar[hidden] { display: none; }
 .lc-source-item { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 32px; padding: 5px 10px; border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; text-align: left; font: inherit; }
 .lc-source-item:hover { background: color-mix(in srgb, currentColor 8%, transparent); }
 .lc-source-item.is-active { background: color-mix(in srgb, var(--lc-accent, #0165dd) 15%, transparent); color: var(--lc-accent, #0165dd); font-weight: 650; }
@@ -40,6 +53,7 @@
 .lc-sort-wrap { position: relative; }
 .lc-sort-menu { position: absolute; top: calc(100% + 5px); right: 0; z-index: 8; min-width: 166px; padding: 5px; border: 1px solid var(--lc-border); border-radius: 8px; background: var(--lc-popover, #fff); box-shadow: 0 10px 24px #0002; }
 .lc-sort-menu button, .lc-grid-menu button { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 7px 8px; border: 0; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; text-align: left; font: inherit; font-size: 12px; }
+.lc-sort-menu button:disabled { cursor: default; opacity: .45; }
 .lc-sort-menu button:hover, .lc-grid-menu button:hover { background: color-mix(in srgb, currentColor 9%, transparent); }
 .lc-sort-menu hr { border: 0; border-top: 1px solid var(--lc-border); }
 .lc-filter-bar { display: flex; align-items: center; gap: 7px; min-height: 48px; padding: 7px 14px; border-bottom: 1px solid var(--lc-border); background: var(--lc-chrome, #fff); position: relative; flex-wrap: wrap; }

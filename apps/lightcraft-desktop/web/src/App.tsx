@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { AppShell, ShellProvider, createThemeStore, useCommands, useShortcuts, type Command, type NavGroup } from '@rightkit/app-shell/react';
 import { getPlatform } from '@rightkit/platform-ui';
 import { createShell } from '@rightkit/shell';
 import { DesktopProvider, useDesktop } from './desktop';
 import { paletteCommands } from './commands';
 import { Icon } from './icons';
-import { LibraryWorkspace, libraryGroups, type LibraryGroup } from './library';
+import { LibraryShellSidebar, LibraryWorkspace, libraryGroups, type LibraryGroup } from './library';
 import { StageWorkspace } from './stage/StageWorkspace';
 import { Inspector } from './inspector';
 import { DialogHost } from './dialogs';
@@ -59,6 +59,16 @@ function Workspace() {
   const groups = useMemo(() => libraryGroups(snapshot), [snapshot]);
   const navGroups = useMemo(() => sourceNav(groups, t), [groups, t]);
   const navItems = useMemo(() => groups.flatMap((group) => group.items), [groups]);
+  const navigate = useCallback((id: string) => {
+    const item = navItems.find((candidate) => candidate.id === id);
+    if (!item) return;
+    setUi({ view: 'photoGrid' });
+    if (item.nativeAction) void native(item.nativeAction, item.params ?? {}).then((result) => {
+      const path = result && typeof result === 'object' && 'path' in result && typeof (result as { path?: unknown }).path === 'string' ? (result as { path: string }).path : undefined;
+      if (path) void run(item.command, { ...(item.params ?? {}), path });
+    }).catch(() => undefined);
+    else void run(item.command, item.params ?? {});
+  }, [navItems, native, run, setUi]);
   const commands = useMemo(() => paletteCommands(snapshot, (id) => run(id), locale), [locale, run, snapshot]);
   useCommands(commands);
   useEffect(() => {
@@ -70,16 +80,8 @@ function Workspace() {
     <AppShell
       groups={navGroups}
       activeId={sourceId(snapshot)}
-      onNavigate={(id) => {
-        const item = navItems.find((candidate) => candidate.id === id);
-        if (!item) return;
-        setUi({ view: 'photoGrid' });
-        if (item.nativeAction) void native(item.nativeAction, item.params ?? {}).then((result) => {
-          const path = result && typeof result === 'object' && 'path' in result && typeof (result as { path?: unknown }).path === 'string' ? (result as { path: string }).path : undefined;
-          if (path) void run(item.command, { ...(item.params ?? {}), path });
-        }).catch(() => undefined);
-        else void run(item.command, item.params ?? {});
-      }}
+      onNavigate={navigate}
+      sidebar={<LibraryShellSidebar groups={navGroups} sectionIds={groups.map((group) => group.id)} activeId={sourceId(snapshot)} onNavigate={navigate} />}
       title={t(ui.view === 'photoGrid' || ui.view === 'squareGrid' ? 'Library' : ui.view[0].toUpperCase() + ui.view.slice(1))}
       wordmark={<span className="lc-wordmark"><span>Light</span>Craft</span>}
       sidebarWidth={ui.sidebarCollapsed ? 48 : ui.sidebarWidth}

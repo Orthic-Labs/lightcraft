@@ -85,13 +85,7 @@ impl Tasks {
             crate::validate_id(id.0)?;
         }
         let destination = lightcraft_engine::export::Destination {
-            dir: params
-                .get("dir")
-                .and_then(Value::as_str)
-                .or_else(|| session.last_export.as_ref().and_then(|last| last.get("dir")).and_then(Value::as_str))
-                .map(str::to_string)
-                .filter(|dir| !dir.trim().is_empty())
-                .unwrap_or_else(default_export_dir),
+            dir: export_directory(session, params)?,
             exact: params.get("path").and_then(Value::as_str).map(str::to_string),
         };
         if destination.dir.contains('\0') || destination.exact.as_deref().is_some_and(|path| path.contains('\0')) {
@@ -433,10 +427,22 @@ fn export_targets(session: &mut Session, params: &Value) -> Vec<PhotoId> {
     ids
 }
 
-fn default_export_dir() -> String {
-    std::env::var_os("HOME")
-        .map(|home| std::path::PathBuf::from(home).join("Pictures/LightCraft Exports").to_string_lossy().to_string())
-        .unwrap_or_else(|| ".".to_string())
+fn export_directory(session: &Session, params: &Value) -> Result<String, String> {
+    if let Some(value) = params.get("dir") {
+        let dir = value.as_str().ok_or_else(|| "Choose an export folder first.".to_string())?;
+        if dir.trim().is_empty() {
+            return Err("Choose an export folder first.".into());
+        }
+        return Ok(dir.to_string());
+    }
+    session
+        .last_export
+        .as_ref()
+        .and_then(|last| last.get("dir"))
+        .and_then(Value::as_str)
+        .filter(|dir| !dir.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "Choose an export folder first.".into())
 }
 
 fn merge_label(command: &str) -> String {
@@ -597,5 +603,16 @@ mod tests {
         assert_eq!(completed.len(), MAX_COMPLETED_TASKS);
         assert_eq!(completed.first().map(|task| task.id.as_str()), Some("merge-3"));
         assert_eq!(completed.last().map(|task| task.id.as_str()), Some("merge-66"));
+    }
+
+    #[test]
+    fn blank_export_directory_requires_user_choice() {
+        let mut session = Session::new();
+        let expected = "Choose an export folder first.";
+        assert_eq!(export_directory(&session, &json!({})).expect_err("first export must require a folder"), expected);
+        assert_eq!(export_directory(&session, &json!({"dir": "/chosen"})).expect("explicit export folder"), "/chosen");
+        session.last_export = Some(json!({"dir": "/previous"}));
+        assert_eq!(export_directory(&session, &json!({})).expect("previous export folder"), "/previous");
+        assert_eq!(export_directory(&session, &json!({"dir": "  "})).expect_err("blank export destination must be rejected"), expected);
     }
 }

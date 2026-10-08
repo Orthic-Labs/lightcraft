@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type KeyboardEvent, type UIEvent } from 'react';
+import { navNeighborIndex } from '@rightkit/app-shell';
+import { AppearanceMenu, NavList, PaletteTrigger, useShell, type NavGroup } from '@rightkit/app-shell/react';
 import type { DesktopSnapshot, PhotoSummary } from '../types';
 import { useDesktop } from '../desktop';
 import { PhotoPreview } from '../preview/PhotoPreview';
@@ -56,14 +58,64 @@ function NavIcon({ icon }: { icon: string }) {
   return <span className={`lc-nav-icon lc-nav-icon-${icon}`} aria-hidden="true">{glyph[icon] ?? '·'}</span>;
 }
 
-function SourceSidebar({ snapshot, collapsed, onNavigate }: { snapshot: DesktopSnapshot | null; collapsed: boolean; onNavigate: (item: LibraryNavItem) => void }) {
+type SidebarCollapseState = Record<string, boolean>;
+
+export function LibraryShellSidebar({ groups, sectionIds, activeId, onNavigate }: { groups: readonly NavGroup[]; sectionIds: readonly string[]; activeId: string; onNavigate: (id: string) => void }) {
+  const { ui, setUi, t } = useDesktop();
+  const shell = useShell();
+  const groupsRef = useRef<HTMLDivElement>(null);
+  const collapsedSections = useMemo(() => Object.fromEntries(Object.entries(ui.sections).filter(([key, value]) => key.startsWith('sidebar:') && value === true).map(([key]) => [key.slice(8), true])), [ui.sections]);
+  const toggleSection = (id: string) => {
+    const key = `sidebar:${id}`;
+    setUi({ sections: { ...ui.sections, [key]: !collapsedSections[id] } });
+  };
+  useEffect(() => {
+    const buttons = Array.from(groupsRef.current?.querySelectorAll<HTMLButtonElement>('button[data-nav-id]') ?? []);
+    if (!buttons.length) return;
+    const selected = buttons.find((button) => button.dataset.navId === activeId) ?? buttons[0];
+    buttons.forEach((button) => { button.tabIndex = button === selected ? 0 : -1; });
+  }, [activeId, collapsedSections, groups, ui.sidebarCollapsed]);
+  const onKeyDownCapture = (event: KeyboardEvent<HTMLDivElement>) => {
+    const buttons = Array.from(groupsRef.current?.querySelectorAll<HTMLButtonElement>('button[data-nav-id]') ?? []);
+    const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button[data-nav-id]') : null;
+    if (!target) return;
+    const current = buttons.indexOf(target);
+    const next = navNeighborIndex('vertical', event.key, current < 0 ? 0 : current, buttons.length);
+    if (next === null || !buttons[next]) return;
+    event.preventDefault();
+    event.stopPropagation();
+    buttons[next].focus();
+  };
+  return <aside className="rk-side lc-shell-library-sidebar" aria-label={t('Sections')} hidden={ui.sidebarCollapsed}>
+    <PaletteTrigger onOpen={shell.palette.show} label={t('Jump to')} />
+    <div className="lc-shell-sidebar-groups" ref={groupsRef} onKeyDownCapture={onKeyDownCapture}>
+      {groups.map((group, index) => {
+        const id = sectionIds[index] ?? `group-${index}`;
+        const sectionCollapsed = !ui.sidebarCollapsed && collapsedSections[id] === true;
+        const visibleGroup = sectionCollapsed ? { ...group, items: [] } : group;
+        return <section className={`lc-shell-sidebar-group${sectionCollapsed ? ' is-collapsed' : ''}`} key={id}>
+          <button className="lc-shell-sidebar-group-header" type="button" aria-expanded={!sectionCollapsed} onClick={() => toggleSection(id)}>
+            <span>{group.title}</span><span aria-hidden="true">{sectionCollapsed ? '›' : '⌄'}</span>
+          </button>
+          <NavList groups={[visibleGroup]} activeId={activeId} onNavigate={onNavigate} label={group.title} />
+        </section>;
+      })}
+    </div>
+    <div className="rk-side__foot"><footer className="rk-brand-foot"><span className="rk-wordmark"><span>Light</span>Craft</span><AppearanceMenu value={ui.theme} onChange={(theme) => setUi({ theme })} labels={{ appearance: t('Appearance'), theme: { system: t('System'), light: t('Light'), dark: t('Dark') } }} /></footer></div>
+  </aside>;
+}
+
+function SourceSidebar({ snapshot, collapsed, collapsedSections, onToggleSection, onNavigate }: { snapshot: DesktopSnapshot | null; collapsed: boolean; collapsedSections: SidebarCollapseState; onToggleSection: (id: string) => void; onNavigate: (item: LibraryNavItem) => void }) {
   const groups = useMemo(() => libraryGroups(snapshot), [snapshot]);
   return (
     <aside className={`lc-library-sidebar${collapsed ? ' is-collapsed' : ''}`} aria-label="Library sources">
-      {groups.map((group) => (
-        <section className="lc-source-group" key={group.id}>
-          {!collapsed && <h2>{group.title}</h2>}
-          {group.items.map((item) => (
+      {groups.map((group) => {
+        const sectionCollapsed = collapsedSections[group.id] === true;
+        return <section className={`lc-source-group${sectionCollapsed ? ' is-collapsed' : ''}`} key={group.id}>
+          {!collapsed && <button className="lc-source-group-header" type="button" aria-expanded={!sectionCollapsed} onClick={() => onToggleSection(group.id)}>
+            <h2>{group.title}</h2><span className="lc-source-group-chevron" aria-hidden="true">{sectionCollapsed ? '›' : '⌄'}</span>
+          </button>}
+          {(!sectionCollapsed || collapsed) && group.items.map((item) => (
             <button
               className={`lc-source-item${navIsActive(snapshot, item) ? ' is-active' : ''}`}
               type="button"
@@ -79,7 +131,7 @@ function SourceSidebar({ snapshot, collapsed, onNavigate }: { snapshot: DesktopS
             </button>
           ))}
         </section>
-      ))}
+      })}
       {!collapsed && <div className="lc-sidebar-status" aria-live="polite">
         {snapshot?.status.unsaved && <span>Unsaved changes</span>}
         {snapshot?.status.importing && <span>Importing…</span>}
@@ -235,10 +287,16 @@ function VirtualPhotoGrid({ snapshot, mode, thumbSize }: { snapshot: DesktopSnap
   );
 }
 
+function sortIsRandom(sort: string): boolean {
+  return /(?:key:\s*Random|key:\s*random|"key"\s*:\s*"random")/.test(sort);
+}
+
 function Header({ snapshot, mode, setMode }: { snapshot: DesktopSnapshot; mode: 'photoGrid' | 'squareGrid'; setMode: (mode: 'photoGrid' | 'squareGrid') => void }) {
   const { run, setDialog, setUi } = useDesktop();
   const sourceLabel = typeof snapshot.source === 'object' && snapshot.source && 'label' in snapshot.source ? String((snapshot.source as { label?: unknown }).label) : sourceKey(snapshot.source) === 'all' ? 'All Photos' : sourceKey(snapshot.source);
   const [sortOpen, setSortOpen] = useState(false);
+  const randomSort = sortIsRandom(snapshot.sort);
+  const sort = (key: string) => { setSortOpen(false); void run('library.sort', { key }); };
   return <header className="lc-library-header">
     <div className="lc-library-title"><h1>{sourceLabel}</h1><span>{snapshot.selection.length > 1 ? `${snapshot.selection.length} selected · ` : ''}{snapshot.total} photos</span></div>
     <div className="lc-library-actions">
@@ -246,7 +304,7 @@ function Header({ snapshot, mode, setMode }: { snapshot: DesktopSnapshot; mode: 
       <button type="button" className="lc-header-action" onClick={() => setDialog({ kind: 'export' })}>Export</button>
       <button type="button" className={`lc-view-toggle ${mode === 'photoGrid' ? 'is-active' : ''}`} aria-pressed={mode === 'photoGrid'} onClick={() => { setMode('photoGrid'); setUi({ view: 'photoGrid' }); }}>▦ Photo Grid</button>
       <button type="button" className={`lc-view-toggle ${mode === 'squareGrid' ? 'is-active' : ''}`} aria-pressed={mode === 'squareGrid'} onClick={() => { setMode('squareGrid'); setUi({ view: 'squareGrid' }); }}>▦ Square</button>
-      <div className="lc-sort-wrap"><button type="button" className="lc-header-action" aria-expanded={sortOpen} onClick={() => setSortOpen((value) => !value)}>Sort ▾</button>{sortOpen && <div className="lc-sort-menu" role="menu">{[['captureDate', 'Capture date'], ['importDate', 'Import date'], ['editDate', 'Modified'], ['fileName', 'Filename'], ['rating', 'Rating']].map(([key, label]) => <button type="button" role="menuitem" key={key} onClick={() => { setSortOpen(false); void run('library.sort', { key }); }}>{label}</button>)}<hr /><button type="button" role="menuitem" onClick={() => { setSortOpen(false); void run('library.sort', { ascending: true }); }}>Ascending</button><button type="button" role="menuitem" onClick={() => { setSortOpen(false); void run('library.sort', { ascending: false }); }}>Descending</button></div>}</div>
+      <div className="lc-sort-wrap"><button type="button" className="lc-header-action" aria-expanded={sortOpen} onClick={() => setSortOpen((value) => !value)}>Sort ▾</button>{sortOpen && <div className="lc-sort-menu" role="menu">{[['captureDate', 'Capture date'], ['importDate', 'Import date'], ['editDate', 'Modified'], ['fileName', 'Filename'], ['rating', 'Rating'], ['fileSize', 'File size']].map(([key, label]) => <button type="button" role="menuitem" key={key} onClick={() => sort(key)}>{label}</button>)}<button type="button" role="menuitem" className="lc-sort-random" onClick={() => sort('random')}>Random</button><hr />{randomSort && <button type="button" role="menuitem" onClick={() => { setSortOpen(false); void run('library.shuffle', {}); }}>Reshuffle</button>}<button type="button" role="menuitem" disabled={randomSort} aria-disabled={randomSort} onClick={() => { if (!randomSort) { setSortOpen(false); void run('library.sort', { ascending: true }); } }}>Ascending</button><button type="button" role="menuitem" disabled={randomSort} aria-disabled={randomSort} onClick={() => { if (!randomSort) { setSortOpen(false); void run('library.sort', { ascending: false }); } }}>Descending</button></div>}</div>
     </div>
   </header>;
 }
@@ -264,7 +322,13 @@ export default function LibraryWorkspace({ showSidebar = true }: { showSidebar?:
   const [filterText, setFilterText] = useState(ui.filterText ?? '');
   const mode: 'photoGrid' | 'squareGrid' = ui.view === 'squareGrid' ? 'squareGrid' : 'photoGrid';
   const thumbSize = Math.max(MIN_THUMB, Math.min(MAX_THUMB, ui.thumbSize || 180));
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(ui.sidebarCollapsed);
+  const sidebarCollapsed = ui.sidebarCollapsed;
+  // Namespaced UI keys retain section state independently from shell sidebarCollapsed.
+  const collapsedSections = useMemo<SidebarCollapseState>(() => Object.fromEntries(Object.entries(ui.sections).filter(([key, value]) => key.startsWith('sidebar:') && value === true).map(([key]) => [key.slice(8), true])), [ui.sections]);
+  const toggleSection = useCallback((id: string) => {
+    const key = `sidebar:${id}`;
+    setUi({ sections: { ...ui.sections, [key]: !collapsedSections[id] } });
+  }, [collapsedSections, setUi, ui.sections]);
   useEffect(() => { const handle = window.setTimeout(() => { setUi({ filterText }); void run('library.filter', { text: filterText }); }, 220); return () => window.clearTimeout(handle); }, [filterText, run, setUi]);
   const navigate = useCallback(async (item: LibraryNavItem) => {
     if (item.id === 'local') {
@@ -279,9 +343,9 @@ export default function LibraryWorkspace({ showSidebar = true }: { showSidebar?:
   }, [native, run]);
   if (!snapshot) return <main className="lc-library-empty" role="status">Reconnect to load library.</main>;
   return <div className={`lc-library-workspace${showSidebar ? '' : ' lc-library-workspace-shell-nav'}`} style={{ '--lc-sidebar-width': showSidebar ? (sidebarCollapsed ? '48px' : `${ui.sidebarWidth || 268}px`) : '0px' } as CSSProperties}>
-    {showSidebar && <SourceSidebar snapshot={snapshot} collapsed={sidebarCollapsed} onNavigate={navigate} />}
+    {showSidebar && <SourceSidebar snapshot={snapshot} collapsed={sidebarCollapsed} collapsedSections={collapsedSections} onToggleSection={toggleSection} onNavigate={navigate} />}
     <section className="lc-library-main" aria-label="Library">
-      {showSidebar && <div className="lc-library-sidebar-toggle"><button type="button" aria-label={sidebarCollapsed ? 'Expand library sidebar' : 'Collapse library sidebar'} aria-pressed={sidebarCollapsed} onClick={() => { const next = !sidebarCollapsed; setSidebarCollapsed(next); setUi({ sidebarCollapsed: next }); }}>☰</button></div>}
+      {showSidebar && <div className="lc-library-sidebar-toggle"><button type="button" aria-label={sidebarCollapsed ? 'Expand library sidebar' : 'Collapse library sidebar'} aria-pressed={sidebarCollapsed} onClick={() => setUi({ sidebarCollapsed: !sidebarCollapsed })}>☰</button></div>}
       <Header snapshot={snapshot} mode={mode} setMode={(next) => setUi({ view: next })} />
       <FilterBar snapshot={snapshot} filterText={filterText} setFilterText={setFilterText} />
       <VirtualPhotoGrid snapshot={snapshot} mode={mode} thumbSize={thumbSize} />
