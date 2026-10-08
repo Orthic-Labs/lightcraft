@@ -1015,7 +1015,17 @@ fn build_shell() -> rightkit_shell::Shell {
 }
 
 pub fn run() {
-    let context = tauri::generate_context!();
+    let mut context = tauri::generate_context!();
+    if unattended_qa_enabled() {
+        for window in &mut context.config_mut().app.windows {
+            if window.label == "main" {
+                // Tauri creates config windows before RightKit can receive a readiness event.
+                // Keep QA's initially invisible main window from becoming the foreground window
+                // during that creation step; production keeps config's normal focus default.
+                window.focus = false;
+            }
+        }
+    }
     let primary = context.config().identifier == PRIMARY_IDENTIFIER;
     let early_marker = early_gpu_marker_path(primary);
     let preflight_marker = early_marker.is_some();
