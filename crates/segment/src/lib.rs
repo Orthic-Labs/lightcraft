@@ -91,6 +91,16 @@ pub fn is_model_dir(dir: &Path) -> bool {
 /// are size-bounded before parsing. The official checkpoint size is pinned by the fetch manifest.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn validate_model_dir(dir: &Path) -> Result<()> {
+    validate_model_dir_with_progress(dir, |_, _| true)
+}
+
+/// Validate a selected checkpoint while reporting streamed weight-hash progress. Returning
+/// `false` from callback cancels before model files are activated.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn validate_model_dir_with_progress<F>(dir: &Path, mut progress: F) -> Result<()>
+where
+    F: FnMut(u64, u64) -> bool,
+{
     if !dir.is_dir() {
         return Err(Error::Missing(dir.to_path_buf()));
     }
@@ -105,7 +115,11 @@ pub fn validate_model_dir(dir: &Path) -> Result<()> {
             fetch::SAM3_WEIGHTS_SIZE
         )));
     }
-    let verified = fetch::verify_file(weights_spec, &weights_path).map_err(|e| Error::Model(format!("{}: {e}", weights_path.display())))?;
+    let verified = fetch::verify_file_progress(weights_spec, &weights_path, |done, total| progress(done, total))
+        .map_err(|e| Error::Model(format!("{}: {e}", weights_path.display())))?;
+    let Some(verified) = verified else {
+        return Err(Error::Model("SAM 3 model validation cancelled".into()));
+    };
     if !verified {
         return Err(Error::Model(format!("{}: SHA-256 does not match the pinned SAM 3 manifest", weights_path.display())));
     }

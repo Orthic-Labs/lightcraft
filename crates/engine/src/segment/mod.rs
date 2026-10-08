@@ -157,6 +157,23 @@ impl Segmenter {
     /// Whether this build can compute AI masks at all.
     pub const AVAILABLE: bool = cfg!(feature = "sam");
 
+    /// Validate a user-selected folder without mutating a session. Desktop hosts run this on a
+    /// worker thread so hashing a large checkpoint never blocks owner-thread commands.
+    pub fn validate_model_dir_with_progress<F>(dir: &std::path::Path, progress: F) -> Result<(), String>
+    where
+        F: FnMut(u64, u64) -> bool,
+    {
+        #[cfg(feature = "sam")]
+        {
+            lightcraft_segment::validate_model_dir_with_progress(dir, progress).map_err(|e| e.to_string())
+        }
+        #[cfg(not(feature = "sam"))]
+        {
+            let _ = (dir, progress);
+            Err("AI masks are not available in this build".into())
+        }
+    }
+
     /// Whether the model's files are in place.
     pub fn installed(&self) -> bool {
         #[cfg(feature = "sam")]

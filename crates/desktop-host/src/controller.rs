@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -27,6 +28,24 @@ pub struct Controller {
     last_error: Option<String>,
     segmenter_dir: Option<PathBuf>,
     segmenter_mirrors_file: Option<PathBuf>,
+    sam_validation: Option<SamValidationTask>,
+    sam_validation_status: Option<SamValidationStatus>,
+}
+
+struct SamValidationTask {
+    path: PathBuf,
+    cancel: std::sync::Arc<AtomicBool>,
+    progress: std::sync::Arc<AtomicU64>,
+    result: Receiver<Result<(), String>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+struct SamValidationStatus {
+    path: PathBuf,
+    done: u64,
+    total: u64,
+    error: Option<String>,
+    finished: bool,
 }
 
 impl Controller {
@@ -68,6 +87,8 @@ impl Controller {
             last_error: None,
             segmenter_dir,
             segmenter_mirrors_file,
+            sam_validation: None,
+            sam_validation_status: None,
         })
     }
 
@@ -164,7 +185,17 @@ impl Controller {
     }
 
     fn run(&mut self, id: &str, params: &Value) -> Result<Value, String> {
+        self.poll_sam_validation();
         let result = lightcraft_engine::guard::catch("desktop command", || match id {
+            "segment.model.status" => {
+                let mut status = self.session.execute(id, params).map_err(|error| error.to_string())?;
+                if let Some(object) = status.as_object_mut() {
+                    object.insert("validation".into(), self.sam_validation_json());
+                }
+                Ok(status)
+            }
+            "segment.model.selectFolder" => self.start_sam_validation(params),
+            "segment.model.cancelSelection" => self.cancel_sam_validation(),
             "app.export" => self.tasks.start_export(&mut self.session, params),
             "app.exportPrevious" => {
                 let previous = self.session.last_export.clone().ok_or_else(|| "nothing exported yet — use Export…".to_string())?;
@@ -211,6 +242,92 @@ impl Controller {
         let value = crate::snapshot::snapshot(&mut self.session, &self.tasks, &self.preferences, &self.notices, error, &mut self.snapshot_cache)?;
         self.last_error = None;
         Ok(value)
+    }
+
+    fn start_sam_validation(&mut self, params: &Value) -> Result<Value, String> {
+        let path = params.get("path").and_then(Value::as_str).ok_or_else(|| "segment.model.selectFolder requires path".to_string())?;
+        if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
+            return Err("invalid SAM 3 model folder".into());
+        }
+        if self.sam_validation.is_some() {
+            return Err("SAM 3 model folder validation is already running".into());
+        }
+        let path = PathBuf::from(path);
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let progress = std::sync::Arc::new(AtomicU64::new(0));
+        let (tx, result) = std::sync::mpsc::sync_channel(1);
+        let worker_path = path.clone();
+        let worker_cancel = cancel.clone();
+        let worker_progress = progress.clone();
+        let worker = std::thread::Builder::new()
+            .name("sam3-validate".into())
+            .spawn(move || {
+                let result = lightcraft_engine::segment::Segmenter::validate_model_dir_with_progress(&worker_path, |done, total| {
+                    worker_progress.store(done, Ordering::Relaxed);
+                    !worker_cancel.load(Ordering::Relaxed)
+                });
+                let _ = tx.send(result);
+            })
+            .map_err(|error| format!("could not start SAM 3 folder validation: {error}"))?;
+        self.sam_validation_status =
+            Some(SamValidationStatus { path: path.clone(), done: 0, total: lightcraft_engine::segment::MODEL_BYTES, error: None, finished: false });
+        self.sam_validation = Some(SamValidationTask { path: path.clone(), cancel, progress, result, worker: Some(worker) });
+        Ok(json!({"pending": true, "path": path.to_string_lossy()}))
+    }
+
+    fn cancel_sam_validation(&mut self) -> Result<Value, String> {
+        let cancelled = self.sam_validation.as_ref().is_some_and(|task| {
+            task.cancel.store(true, Ordering::Relaxed);
+            true
+        });
+        Ok(json!({"cancelled": cancelled}))
+    }
+
+    fn poll_sam_validation(&mut self) {
+        let Some(task) = self.sam_validation.as_ref() else { return };
+        if let Some(status) = self.sam_validation_status.as_mut() {
+            status.done = task.progress.load(Ordering::Relaxed).min(status.total);
+        }
+        let result = match task.result.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("SAM 3 model validation worker stopped".into()),
+        };
+        let Some(mut task) = self.sam_validation.take() else { return };
+        if let Some(worker) = task.worker.take() {
+            let _ = worker.join();
+        }
+        let path = task.path;
+        match result {
+            Ok(()) => {
+                self.segmenter_dir = Some(path.clone());
+                self.session.segmenter.configure_model_dir(Some(path.clone()));
+                if let Some(status) = self.sam_validation_status.as_mut() {
+                    status.done = status.total;
+                    status.error = None;
+                    status.finished = true;
+                }
+            }
+            Err(error) => {
+                if let Some(status) = self.sam_validation_status.as_mut() {
+                    status.error = Some(error);
+                    status.finished = true;
+                }
+            }
+        }
+    }
+
+    fn sam_validation_json(&self) -> Value {
+        let Some(status) = self.sam_validation_status.as_ref() else { return Value::Null };
+        let running = self.sam_validation.is_some();
+        json!({
+            "running": running,
+            "path": status.path.to_string_lossy(),
+            "done": status.done,
+            "total": status.total,
+            "error": status.error,
+            "finished": status.finished && !running,
+        })
     }
 
     fn slice(&mut self, generation: Option<u64>, offset: usize, limit: usize) -> Result<Value, String> {
@@ -339,6 +456,7 @@ impl Controller {
     }
 
     fn poll(&mut self) {
+        self.poll_sam_validation();
         if let Err(error) = lightcraft_engine::guard::catch("desktop task poll", || self.tasks.poll(&mut self.session)) {
             self.last_error = Some(error);
         }
@@ -358,6 +476,12 @@ impl Controller {
     }
 
     pub(crate) fn shutdown(&mut self) -> Result<(), String> {
+        if let Some(mut task) = self.sam_validation.take() {
+            task.cancel.store(true, Ordering::Relaxed);
+            if let Some(worker) = task.worker.take() {
+                let _ = worker.join();
+            }
+        }
         self.auto_import.stop()?;
         self.tasks.cancel(None)?;
         self.poll();

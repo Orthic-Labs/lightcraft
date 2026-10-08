@@ -906,10 +906,26 @@ function SamModelSetupDialogHost({ desktop }: { desktop: DesktopContextValue }) 
       const path = typeof selected === 'string' ? selected : selected && typeof selected === 'object' && 'path' in selected ? text((selected as AnyRecord).path) : '';
       if (!path) return;
       await desktop.run('segment.model.selectFolder', { path });
+      for (;;) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 250));
+        const next = await desktop.run('segment.model.status', {}) as AnyRecord;
+        setStatus(next);
+        const validation = next.validation && typeof next.validation === 'object' ? next.validation as AnyRecord : {};
+        if (!bool(validation.running)) {
+          const validationError = text(validation.error);
+          if (validationError) throw new Error(validationError);
+          break;
+        }
+      }
       await desktop.native('preferences.patch', { sam3Dir: path });
       await load();
     } catch (reason) { setError(errorText(reason)); }
     finally { setBusy(false); }
+  };
+  const cancelValidation = async () => {
+    setError('');
+    try { await desktop.run('segment.model.cancelSelection', {}); }
+    catch (reason) { setError(errorText(reason)); }
   };
   const openFolder = async () => {
     const path = text(status?.dir);
@@ -919,13 +935,18 @@ function SamModelSetupDialogHost({ desktop }: { desktop: DesktopContextValue }) 
   };
   const downloadState = (status?.download && typeof status.download === 'object') ? status.download as AnyRecord : {};
   const running = bool(downloadState.running);
-  const installed = bool(status?.installed);
+  const validation = status?.validation && typeof status.validation === 'object' ? status.validation as AnyRecord : {};
+  const validating = bool(validation.running);
+  const installed = bool(status?.installed) && !validating;
   const mirrors = num(status?.mirrors);
   const done = num(downloadState.done);
   const total = num(downloadState.total);
   const percent = total > 0 ? Math.min(100, Math.round(done / total * 100)) : 0;
+  const validationDone = num(validation.done);
+  const validationTotal = num(validation.total, 3439938512);
+  const validationPercent = validationTotal > 0 ? Math.min(100, Math.round(validationDone / validationTotal * 100)) : 0;
   const sizeGb = (num(status?.sizeBytes, 3439938512) / 1e9).toFixed(1);
-  return <Frame title="SAM 3 Model Setup" busy={busy} onClose={() => desktop.setDialog(null)} dismissible={!running} actions={<><Button disabled={busy} onClick={() => desktop.setDialog(null)}>{running ? 'Close' : 'Cancel'}</Button>{installed ? <Button primary onClick={() => desktop.setDialog(null)}>Continue</Button> : running ? <Button disabled={busy} onClick={() => void cancelDownload()}>Cancel Download</Button> : <Button primary disabled={busy || !accepted || mirrors === 0} onClick={() => void download()}>Download</Button>}</>}>
+  return <Frame title="SAM 3 Model Setup" busy={busy} onClose={() => desktop.setDialog(null)} dismissible={!running && !validating} actions={<><Button disabled={busy && !validating} onClick={() => desktop.setDialog(null)}>{running || validating ? 'Close' : 'Cancel'}</Button>{installed ? <Button primary onClick={() => desktop.setDialog(null)}>Continue</Button> : running ? <Button disabled={busy} onClick={() => void cancelDownload()}>Cancel Download</Button> : validating ? <Button onClick={() => void cancelValidation()}>Cancel Verification</Button> : <Button primary disabled={busy || !accepted || mirrors === 0} onClick={() => void download()}>Download</Button>}</>}>
     <Note>Object & Describe masks use SAM 3, Meta’s segmentation model. Everything else works without it.</Note>
     <p>A one-time download of about {sizeGb} GB is saved in:</p>
     <code className="lc-path-value">{text(status?.dir, 'No model folder configured')}</code>
@@ -935,6 +956,7 @@ function SamModelSetupDialogHost({ desktop }: { desktop: DesktopContextValue }) 
     {!installed && !running && <Check checked={accepted} onChange={setAccepted}>I accept SAM License terms & want to download this model.</Check>}
     {mirrors === 0 && !installed && <Note tone="warning">No HTTPS download mirror is configured. Set LIGHTCRAFT_SAM3_MIRRORS or install files manually, then select their folder.</Note>}
     {running && <div className="lc-progress" aria-live="polite"><div className="lc-progress-label"><span>{text(downloadState.file, 'Downloading SAM 3…')}</span><span>{percent}%</span></div><progress max={100} value={percent} /></div>}
+    {validating && <div className="lc-progress" aria-live="polite"><div className="lc-progress-label"><span>Verifying SAM 3 model folder…</span><span>{validationPercent}%</span></div><progress max={100} value={validationPercent} /></div>}
     {installed && <Note>SAM 3 files are installed. Object & Describe masks are ready.</Note>}
     {error && <Note tone="error">{error}</Note>}
     {text(downloadState.error) && <Note tone="error">{text(downloadState.error)}</Note>}

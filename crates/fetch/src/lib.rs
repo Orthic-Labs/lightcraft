@@ -287,16 +287,25 @@ fn short(m: &str) -> String {
 
 /// Whether `path` is already the right file (exact size and hash when pinned).
 fn verified(f: &FileSpec<'_>, path: &Path) -> Result<bool, DownloadError> {
-    let Ok(meta) = std::fs::metadata(path) else { return Ok(false) };
+    verify_file_progress(f, path, |_, _| true).map(|result| result.unwrap_or(false))
+}
+
+/// Verify an existing file while reporting streamed hash progress. `None` means callback
+/// requested cancellation; no file is changed.
+pub fn verify_file_progress<F>(f: &FileSpec<'_>, path: &Path, mut progress: F) -> Result<Option<bool>, DownloadError>
+where
+    F: FnMut(u64, u64) -> bool,
+{
+    let Ok(meta) = std::fs::metadata(path) else { return Ok(Some(false)) };
     if !meta.is_file() || meta.len() == 0 {
-        return Ok(false);
+        return Ok(Some(false));
     }
     if f.size.is_some_and(|s| s != meta.len()) || meta.len() > f.max {
-        return Ok(false);
+        return Ok(Some(false));
     }
     match f.sha256 {
-        Some(want) => Ok(sha256_file(path).map_err(DownloadError::Disk)? == want),
-        None => Ok(true),
+        Some(want) => Ok(sha256_file_progress(path, &mut progress).map_err(DownloadError::Disk)?.map(|got| got == want)),
+        None => Ok(Some(true)),
     }
 }
 
@@ -309,17 +318,30 @@ pub fn verify_file(f: &FileSpec<'_>, path: &Path) -> Result<bool, DownloadError>
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
+    sha256_file_progress(path, &mut |_, _| true)?.ok_or_else(|| "hash verification cancelled".into())
+}
+
+fn sha256_file_progress<F>(path: &Path, progress: &mut F) -> Result<Option<String>, String>
+where
+    F: FnMut(u64, u64) -> bool,
+{
     let mut file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
+    let total = file.metadata().map_err(|e| format!("{}: {e}", path.display()))?.len();
+    let mut done = 0;
     loop {
         let n = file.read(&mut buf).map_err(|e| format!("{}: {e}", path.display()))?;
         if n == 0 {
             break;
         }
         h.update(buf.get(..n).unwrap_or_default());
+        done = done.saturating_add(n as u64);
+        if !progress(done, total) {
+            return Ok(None);
+        }
     }
-    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(Some(h.finalize().iter().map(|b| format!("{b:02x}")).collect()))
 }
 
 fn part_path(dir: &Path, name: &str) -> PathBuf {
