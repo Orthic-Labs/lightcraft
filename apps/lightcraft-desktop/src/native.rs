@@ -513,6 +513,13 @@ fn control_json(value: Value) -> Result<String, String> {
 }
 
 #[cfg(feature = "qa-native")]
+fn qa_window_state(app: &AppHandle<Wry>) -> Result<Value, String> {
+    let window = app.get_webview_window("main").ok_or_else(|| "main window is unavailable".to_string())?;
+    let native = rightkit_shell::windows::readback(&window)?;
+    Ok(json!({"visible": native.visible, "focused": native.focused, "main": native.main, "level": native.level}))
+}
+
+#[cfg(feature = "qa-native")]
 fn qa_viewport(app: &AppHandle<Wry>, args: &Value) -> Result<Value, String> {
     let object = args.as_object().ok_or_else(|| "lc_qa_viewport expects an object".to_string())?;
     let width = object.get("width").and_then(Value::as_u64).ok_or_else(|| "lc_qa_viewport requires width".to_string())?;
@@ -529,6 +536,7 @@ fn qa_viewport(app: &AppHandle<Wry>, args: &Value) -> Result<Value, String> {
             "outerSize": size(window.outer_size()),
             "innerPosition": position(window.inner_position()),
             "outerPosition": position(window.outer_position()),
+            "isVisible": window.is_visible().ok(),
             "isDecorated": window.is_decorated().ok(),
             "isResizable": window.is_resizable().ok(),
             "isMaximized": window.is_maximized().ok(),
@@ -646,6 +654,7 @@ fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<Strin
             }
             value
         }
+        "lc_qa_window_state" => qa_window_state(app)?,
         "lc_qa_viewport" => qa_viewport(app, &args)?,
         "lc_native" => {
             let object = args.as_object().ok_or_else(|| "lc_native expects an object".to_string())?;
@@ -716,6 +725,7 @@ fn qa_control_plugin() -> Option<TauriPlugin<Wry>> {
         .command("lc_merge_preview", |app, args| control_dispatch(app, "lc_merge_preview", args))
         .command("lc_merge_preview_cancel", |app, args| control_dispatch(app, "lc_merge_preview_cancel", args))
         .command("lc_preview_ack", |app, args| control_dispatch(app, "lc_preview_ack", args))
+        .command("lc_qa_window_state", |app, args| control_dispatch(app, "lc_qa_window_state", args))
         .command("lc_qa_viewport", |app, args| control_dispatch(app, "lc_qa_viewport", args))
         .command("lc_native", |app, args| control_dispatch(app, "lc_native", args))
         .command("lc_preferences", |app, args| control_dispatch(app, "lc_preferences", args));

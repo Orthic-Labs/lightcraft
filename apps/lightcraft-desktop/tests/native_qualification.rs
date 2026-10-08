@@ -65,7 +65,7 @@ fn scenario_workspace(scenario: &rightkit_qa::harness::Scenario) -> rightkit_qa:
 fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, _catalog: &Path) -> (rightkit_qa::control::Control, PathBuf) {
     let ws = scenario_workspace(scenario);
     let data = ws.data_dir.clone();
-    let env = ws
+    let mut env = ws
         .env
         .iter()
         .filter(|(key, _)| {
@@ -85,6 +85,9 @@ fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, _cata
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect::<Vec<_>>();
+    // Keep the actual app window invisible without globally hiding NSApplication,
+    // which can suspend WKWebView layout. This app flag also disables Shell reveal.
+    env.push(("LIGHTCRAFT_DESKTOP_QA".into(), "1".into()));
     #[cfg(target_os = "macos")]
     let launch_binary = binary
         .ancestors()
@@ -95,7 +98,7 @@ fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, _cata
     let launch_binary = binary.to_path_buf();
     let spec = LaunchSpec {
         binary: launch_binary,
-        mode: Mode::Hidden,
+        mode: if cfg!(target_os = "macos") { Mode::Background } else { Mode::Hidden },
         env,
         startup_timeout: Duration::from_secs(90),
         label: "lightcraft-desktop-native".into(),
@@ -579,6 +582,7 @@ fn set_native_viewport(control: &rightkit_qa::control::Control, width: u64, heig
     eprintln!("[qa] viewport native={result}; DOM={dom_size}");
     let settled = wait_for_dom(control, &format!("return window.innerWidth === {width} && window.innerHeight === {height};"));
     assert_eq!(settled.as_bool(), Some(true), "WebView inner size must match requested QA viewport");
+    assert_native_window_hidden(control);
     result
 }
 
@@ -996,6 +1000,12 @@ fn copy_tree(source: &Path, destination: &Path) {
     }
 }
 
+fn assert_native_window_hidden(control: &rightkit_qa::control::Control) {
+    let state = control.command("lc_qa_window_state", &Value::Null).expect("native QA window state must reply");
+    assert_eq!(state["visible"].as_bool(), Some(false), "native QA window must stay invisible: {state}");
+    assert_eq!(state["focused"].as_bool(), Some(false), "native QA window must never receive OS focus: {state}");
+}
+
 fn with_control<T>(
     binary: &Path,
     scenario: &rightkit_qa::harness::Scenario,
@@ -1003,9 +1013,15 @@ fn with_control<T>(
     body: impl FnOnce(&rightkit_qa::control::Control, &Path) -> T,
 ) -> T {
     let (mut control, data) = launch_hidden(binary, scenario, catalog);
-    let result = catch_unwind(AssertUnwindSafe(|| body(&control, &data)));
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        assert_native_window_hidden(&control);
+        let value = body(&control, &data);
+        assert_native_window_hidden(&control);
+        value
+    }));
+    eprintln!("[qa] journey body: name={} passed={}", scenario.name(), result.is_ok());
     if result.is_err() {
-        let state = control.eval("return {url: location.href, title: document.title, width: window.innerWidth, height: window.innerHeight, rootChildren: document.getElementById('root')?.childElementCount, activeElement: document.activeElement?.outerHTML.slice(0, 500), preview: document.querySelector('.stage-preview')?.outerHTML, previewStates: Array.from(document.querySelectorAll('[data-preview-state]')).map(node => ({state: node.getAttribute('data-preview-state'), html: node.outerHTML.slice(0, 1000)})), body: document.body.innerText.slice(0, 4000)};");
+        let state = control.eval("return {url: location.href, title: document.title, width: window.innerWidth, height: window.innerHeight, rootChildren: document.getElementById('root')?.childElementCount, layout: ['html', 'body', '#root', '.rk-shell', '.rk-body', '.rk-plane', '.lc-content', '.lc-library-layout', '.lc-library-center', '.lc-library-workspace', '.lc-stage-layout', '.lc-inspector', '.lc-inspector__rail'].map(selector => { const e = document.querySelector(selector); if (!e) return {selector, missing: true}; const r = e.getBoundingClientRect(), s = getComputedStyle(e); return {selector, className: e.className, rect: {x: r.x, y: r.y, width: r.width, height: r.height, right: r.right}, display: s.display, rows: s.gridTemplateRows, columns: s.gridTemplateColumns, visibility: s.visibility}; }), activeElement: document.activeElement?.outerHTML.slice(0, 500), preview: document.querySelector('.stage-preview')?.outerHTML, previewStates: Array.from(document.querySelectorAll('[data-preview-state]')).map(node => ({state: node.getAttribute('data-preview-state'), html: node.outerHTML.slice(0, 1000)})), body: document.body.innerText.slice(0, 4000)};");
         eprintln!("[qa] failure DOM={state:?}");
         if let Ok(state) = state {
             let path = scenario.dir().join("failure-dom.json");
