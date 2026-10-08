@@ -854,6 +854,8 @@ mod tests {
         let path = d.join("ui.json");
         let ui = UiState::default();
         let original = serde_json::to_vec_pretty(&ui).unwrap();
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(&path, &original).unwrap();
         let mut writer =
             PrefsWriter { path: Some(path.clone()), written: original.clone(), recovery_gpu_preference: Some(true), ..Default::default() };
         let mut recovery_ui = ui;
