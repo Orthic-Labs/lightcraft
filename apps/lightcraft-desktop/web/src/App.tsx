@@ -11,7 +11,7 @@ import { Inspector } from './inspector';
 import { DialogHost } from './dialogs';
 import './app.css';
 
-const themeStore = createThemeStore({ storageKey: 'lightcraft.theme' });
+const themeStore = createThemeStore({ storageKey: 'lightcraft.theme', storage: null });
 const shell = createShell();
 
 const sourceIcons: Record<string, 'library' | 'search' | 'import' | 'export' | 'chevron'> = {
@@ -52,6 +52,8 @@ function ShortcutBindings({ commands }: { commands: Command[] }) {
 function Workspace() {
   const desktop = useDesktop();
   const { snapshot, ui, setUi, run, native, error, notice } = desktop;
+  // Rust preferences own persisted choice; RightKit applies matching CSS tokens.
+  useEffect(() => { themeStore.save(ui.theme); }, [ui.theme]);
   const groups = useMemo(() => libraryGroups(snapshot), [snapshot]);
   const navGroups = useMemo(() => sourceNav(groups), [groups]);
   const navItems = useMemo(() => groups.flatMap((group) => group.items), [groups]);
@@ -84,7 +86,7 @@ function Workspace() {
       bridge={shell.bridge()}
       platform={getPlatform()}
       theme={ui.theme}
-      onThemeChange={(theme) => { setUi({ theme }); themeStore.save(theme); }}
+      onThemeChange={(theme) => { setUi({ theme }); }}
       commands={commands}
       titlebarEnd={<div className="lc-title-status" aria-live="polite">{snapshot?.status.unsaved && <span className="lc-status-dot" title="Unsaved changes" />} {error && <span className="lc-title-error">{error}</span>}{notice && !error && <span>{notice}</span>}</div>}
     >

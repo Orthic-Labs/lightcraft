@@ -19,6 +19,34 @@ const displayValue = (value: unknown): string => {
   return String(value ?? 'Unknown');
 };
 
+let lastNonOverlayFocus: HTMLElement | null = null;
+function restorableFocusTarget(value: Element | null): value is HTMLElement {
+  if (!(value instanceof HTMLElement) || !value.isConnected || value === document.body) return false;
+  if (value.closest('.rk-overlay, .lc-dialog-backdrop, [aria-hidden="true"]')) return false;
+  let node: HTMLElement | null = value;
+  while (node) { if (node.inert) return false; node = node.parentElement; }
+  return true;
+}
+function focusCandidate(value: EventTarget | null): Element | null {
+  if (!(value instanceof Element)) return null;
+  return value.matches('button,a[href],input,select,textarea,[tabindex]:not([tabindex="-1"])') ? value : value.closest('button,a[href],input,select,textarea,[tabindex]:not([tabindex="-1"])');
+}
+function useFocusHistory() {
+  useEffect(() => {
+    const remember = (event: FocusEvent) => {
+      const target = focusCandidate(event.target);
+      if (restorableFocusTarget(target)) lastNonOverlayFocus = target;
+    };
+    const rememberPointer = (event: PointerEvent) => {
+      const target = focusCandidate(event.target);
+      if (restorableFocusTarget(target)) lastNonOverlayFocus = target;
+    };
+    document.addEventListener('focusin', remember, true);
+    document.addEventListener('pointerdown', rememberPointer, true);
+    return () => { document.removeEventListener('focusin', remember, true); document.removeEventListener('pointerdown', rememberPointer, true); };
+  }, []);
+}
+
 function useModalScope(open: boolean, onClose: () => void, dismissible = true) {
   const ref = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
@@ -28,6 +56,7 @@ function useModalScope(open: boolean, onClose: () => void, dismissible = true) {
   useEffect(() => {
     if (!open) return;
     const active = document.activeElement as HTMLElement | null;
+    const restoreTarget = restorableFocusTarget(active) ? active : lastNonOverlayFocus;
     const root = ref.current;
     const siblings = Array.from(document.body.children).filter((node) => node !== root?.parentElement);
     const previous = siblings.map((node) => ({ node, inert: (node as HTMLElement).inert, hidden: node.getAttribute('aria-hidden') }));
@@ -44,7 +73,7 @@ function useModalScope(open: boolean, onClose: () => void, dismissible = true) {
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     };
     document.addEventListener('keydown', keydown);
-    return () => { document.removeEventListener('keydown', keydown); previous.forEach(({ node, inert, hidden }) => { (node as HTMLElement).inert = inert; if (hidden === null) node.removeAttribute('aria-hidden'); else node.setAttribute('aria-hidden', hidden); }); active?.focus?.(); };
+    return () => { document.removeEventListener('keydown', keydown); previous.forEach(({ node, inert, hidden }) => { (node as HTMLElement).inert = inert; if (hidden === null) node.removeAttribute('aria-hidden'); else node.setAttribute('aria-hidden', hidden); }); if (restorableFocusTarget(restoreTarget)) restoreTarget.focus(); };
   // onClose & dismissible are interaction policy, not scope lifecycle; refs prevent input rerenders from resetting focus.
   }, [open]);
   return ref;
@@ -306,6 +335,7 @@ function LightroomResult({ d, desktop }: { d: DialogState; desktop: DesktopConte
 }
 
 export default function DialogHost({ desktop: provided }: HostProps = {}) {
+  useFocusHistory();
   const hookContext = useDesktop(); const context = provided || hookContext; const { dialog } = context; if (!dialog) return null; const kind = dialog.kind.toLowerCase();
   if (kind === 'unsavedquit') return <UnsavedQuitDialog d={dialog} desktop={context} />;
   if (kind === 'confirmdelete' || kind === 'confirm-delete') return <ConfirmDeleteDialog d={dialog} desktop={context} />;

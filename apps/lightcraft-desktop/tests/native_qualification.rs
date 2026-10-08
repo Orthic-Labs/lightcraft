@@ -670,6 +670,8 @@ fn native_hidden_control_journeys() {
                 with_control(&binary, scenario, &inputs.catalog, |control, _data| {
                     let reopened = control.command("lc_preferences", &Value::Null).expect("preferences reopen must reply after process restart");
                     assert_eq!(reopened["qaSentinel"].as_str(), Some("preserved"), "unknown preference fields must survive process restart");
+                    assert_eq!(reopened["ui"]["theme"].as_str(), Some("dark"), "dark theme choice must survive restart");
+                    wait_for_dom(control, "return document.documentElement.getAttribute('data-theme') === 'dark';");
                     let dark = scenario.dir().join("dark-theme.png");
                     control.screenshot_to(&dark).expect("dark theme screenshot must be captured");
                     assert!(dark.is_file());
@@ -677,6 +679,9 @@ fn native_hidden_control_journeys() {
                     control.command("lc_preferences", &json!({"ui": {"theme": "light"}})).expect("light theme preference must persist");
                 });
                 with_control(&binary, scenario, &inputs.catalog, |control, _data| {
+                    let reopened = control.command("lc_preferences", &Value::Null).expect("light preference must reopen");
+                    assert_eq!(reopened["ui"]["theme"].as_str(), Some("light"), "light theme choice must survive restart");
+                    wait_for_dom(control, "return document.documentElement.getAttribute('data-theme') === 'light';");
                     let light = scenario.dir().join("light-theme.png");
                     control.screenshot_to(&light).expect("light theme screenshot must be captured");
                     assert!(light.is_file());
