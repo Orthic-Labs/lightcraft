@@ -304,6 +304,41 @@ fn choose_inspector_panel(control: &rightkit_qa::control::Control, panel: &str) 
     click_dom(control, &selector, "inspector tool must select its actual panel");
 }
 
+fn assert_inspector_panels_fit(control: &rightkit_qa::control::Control) {
+    let before = snapshot(control);
+    run(control, "version.create", json!({"name": "A deliberately long saved version name for narrow inspector layout"}));
+    for (panel, title) in [
+        ("edit", "Edit"),
+        ("crop", "Crop & Geometry"),
+        ("remove", "Remove"),
+        ("masking", "Masking"),
+        ("presets", "Presets"),
+        ("info", "Info"),
+        ("profiles", "Profiles"),
+        ("redeye", "Red Eye"),
+        ("versions", "Versions"),
+        ("activity", "History"),
+        ("keywords", "Keywords"),
+    ] {
+        choose_inspector_panel(control, panel);
+        wait_for_dom(
+            control,
+            &format!(
+                "return (() => {{ const e = document.querySelector('.lc-inspector__header'); return !!e && e.textContent.includes({title:?}) && !e.textContent.includes('Loading'); }})();"
+            ),
+        );
+        let bounds = control.eval("return (() => { const e = document.querySelector('.lc-inspector__scroll'); return {width:e.clientWidth, scrollWidth:e.scrollWidth}; })();").expect("inspector overflow must be measurable");
+        eprintln!("[qa] inspector {panel}: {bounds}");
+        let width = bounds["width"].as_u64().expect("inspector width must be numeric");
+        let scroll_width = bounds["scrollWidth"].as_u64().expect("inspector scroll width must be numeric");
+        assert!(scroll_width <= width + 1, "inspector {panel} controls must fit without horizontal scrolling: {bounds}");
+    }
+    run(control, "edit.undo", json!({}));
+    assert_eq!(snapshot(control)["undo"], before["undo"], "layout fixture version must be undone");
+    choose_inspector_panel(control, "edit");
+    wait_for_dom(control, "return document.querySelector('input[aria-label=Exposure]') !== null;");
+}
+
 fn assert_workspace_design(control: &rightkit_qa::control::Control) {
     let design = control.eval(r#"return (() => {
         const rect = (selector) => document.querySelector(selector)?.getBoundingClientRect();
@@ -1401,6 +1436,7 @@ fn native_hidden_control_journeys() {
                             choose_inspector_panel(control, "edit");
                             wait_for_dom(control, "return document.querySelector('input[id=\"ctl-light.exposure\"]') !== null;");
                             assert_primary_editing_usable(control);
+                            assert_inspector_panels_fit(control);
                             click_dom(control, ".lc-inspector__section-head", "Light section must collapse by pointer");
                             wait_for_dom(control, "return document.querySelector('input[id=\"ctl-light.exposure\"]') === null;");
                             control.key(if cfg!(target_os = "macos") { "Cmd+1" } else { "Ctrl+1" }).expect("Light shortcut must reopen canonical section state");

@@ -40,3 +40,12 @@
 .lc-inspector__rail-tools,.lc-inspector__rail-more{margin-inline:4px}
 .lc-inspector__collapse{width:calc(100% - 8px);margin-inline:4px}
 .lc-inspector__button.primary{border-color:var(--rk-brand,#0165dd);background:var(--rk-brand,#0165dd);color:var(--rk-accent-ink,#fff)}
+
+/* Text entry shares row space with labels & actions inside narrow inspectors. */
+.lc-inspector__row input:not([type=range]):not([type=number]){min-width:0;flex:1 1 0;width:0}
+
+/* Saved versions & metadata actions wrap instead of extending beyond sidebar. */
+.lc-list__item{flex-wrap:wrap}
+.lc-list__item>strong{min-width:0;max-width:100%;flex-basis:100%}
+.lc-list__item>small{min-width:0;max-width:100%;overflow-wrap:anywhere}
+.lc-list__item>button:first-child:not(.lc-inspector__button){min-width:0;flex:1 1 0;text-align:left}
