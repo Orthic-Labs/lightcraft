@@ -11,7 +11,7 @@ const DEFAULT_UI: UiState = {
   sidebarCollapsed: false, inspectorCollapsed: false, sidebarWidth: 246, inspectorWidth: 292,
   thumbSize: 180, filmstrip: true, filterBar: true, referenceId: null, compareIds: [], navigator: false,
   slideshow: false, infoOverlay: 0, maskOverlay: false, maskOverlayMode: 'selected', maskPins: true,
-  clipping: false, theme: 'system', locale: 'en', sections: { light: true, color: true, effects: true, detail: false, optics: false },
+  clipping: false, theme: 'system', locale: 'en', sections: { light: true, color: true, effects: false, detail: false, optics: false },
   autoAdvance: false, gridInfo: true, softProof: false, brushSize: 100, brushFeather: 50, cropOverlay: 'thirds', filterText: '',
   startupView: 'last', confirmDelete: false, gpu: true, previewEdge: 2560, memoryMb: 0, externalEditor: '', filmNames: true, filmBadges: true,
 };

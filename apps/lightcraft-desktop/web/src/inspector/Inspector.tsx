@@ -43,6 +43,18 @@ const SECTION_LABELS: Record<string, string> = {
   light: 'Light', curve: 'Tone Curve', color: 'Color', mixer: 'Color Mixer', bwMix: 'B&W Mixer', grading: 'Color Grading', effects: 'Effects', vignette: 'Vignette', grain: 'Grain', detail: 'Detail', optics: 'Optics', geometry: 'Geometry', profile: 'Profile', calibration: 'Calibration', pointColor: 'Point Color', redEye: 'Red Eye',
 };
 
+const SECTION_ALIASES: Record<string, string> = {
+  light: 'Light', color: 'Color', exposure: 'Exposure', curve: 'Tone Curve', tonecurve: 'Tone Curve',
+  mixer: 'Color Mixer', colormixer: 'Color Mixer', bwmix: 'B&W Mixer', bwmixer: 'B&W Mixer',
+  grading: 'Color Grading', colorgrading: 'Color Grading', effects: 'Effects', vignette: 'Vignette', grain: 'Grain', detail: 'Detail',
+  optics: 'Optics', geometry: 'Geometry', profile: 'Profile', calibration: 'Calibration',
+  pointcolor: 'Point Color', redeye: 'Red Eye',
+};
+const SECTION_ORDER = ['Light', 'Color', 'Exposure', 'Tone Curve', 'Color Mixer', 'B&W Mixer', 'Color Grading', 'Effects', 'Vignette', 'Grain', 'Detail', 'Optics', 'Geometry', 'Profile', 'Calibration', 'Point Color', 'Red Eye'];
+
+function sectionToken(value: string): string { return value.trim().toLowerCase().replace(/[^a-z0-9]/g, ''); }
+function canonicalSection(value: string): string { const trimmed = value.trim(); return SECTION_ALIASES[sectionToken(trimmed)] ?? (trimmed || 'Light'); }
+
 function object(value: unknown): Json { return value && typeof value === 'object' && !Array.isArray(value) ? value as Json : {}; }
 function array(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
 function text(value: unknown, fallback = ''): string { return typeof value === 'string' ? value : fallback; }
@@ -169,11 +181,19 @@ function EditPanel({ desktop }: { desktop: InspectorDesktop }) {
   const values = snapshot?.controlValues ?? {};
   const grouped = useMemo(() => {
     const map = new Map<string, ControlSpec[]>();
-    for (const ctl of controls) { const key = ctl.section || 'Light'; const list = map.get(key) ?? []; list.push(ctl); map.set(key, list); }
+    for (const ctl of controls) { const key = canonicalSection(ctl.section || 'Light'); const list = map.get(key) ?? []; list.push(ctl); map.set(key, list); }
     return map;
   }, [controls]);
-  const sectionOpen = (key: string) => ui.sections[key] ?? ['Light', 'Color', 'Effects', 'Detail', 'Optics', 'Tone Curve', 'Color Mixer', 'B&W Mixer', 'Color Grading', 'Geometry', 'Profile', 'Calibration', 'Point Color', 'Red Eye', 'light', 'color', 'effects', 'detail', 'optics'].includes(key);
-  const toggleSection = (key: string) => setUi({ sections: { ...ui.sections, [key]: !sectionOpen(key) } });
+  const sectionOpen = (key: string) => {
+    const canonical = canonicalSection(key);
+    const matches = Object.entries(ui.sections).filter(([stored]) => canonicalSection(stored) === canonical);
+    const exact = matches.find(([stored]) => stored === canonical);
+    if (exact) return exact[1];
+    const alias = matches[0];
+    if (alias) return alias[1];
+    return canonical === 'Light' || canonical === 'Color';
+  };
+  const toggleSection = (key: string) => { const canonical = canonicalSection(key); setUi({ sections: { ...ui.sections, [canonical]: !sectionOpen(canonical) } }); };
   const settings = object(snapshot?.develop);
   const profile = object(settings.profile);
   const profileId = text(profile.id, 'lc.color');
@@ -184,8 +204,8 @@ function EditPanel({ desktop }: { desktop: InspectorDesktop }) {
     <div className="lc-profile"><span>Profile</span><select value={profileId} onChange={e => void run('develop.profile', { id: e.target.value, amount: num(profile.amount, 100) })} aria-label="Profile"><option value={profileId}>{profileId}</option></select><button type="button" className="lc-inspector__button" onClick={() => setUi({ panel: 'profiles', view: 'detail' })}>Browse</button></div>
     <WhiteBalanceMode run={run} settings={settings} />
     {grouped.size === 0 && <div className="lc-inspector__empty">Controls are unavailable until active photo loads.</div>}
-    {[...grouped.entries()].map(([key, list]) => <ControlSection key={key} name={key} controls={list} values={values} open={sectionOpen(key)} toggle={() => toggleSection(key)} run={run} settings={settings} />)}
-    {(grouped.has('Tone Curve') || grouped.has('Curve') || grouped.has('curve')) && <CurveEditor run={run} settings={settings} />}
+    {[...grouped.entries()].sort(([a], [b]) => { const ai = SECTION_ORDER.indexOf(a); const bi = SECTION_ORDER.indexOf(b); return (ai < 0 ? SECTION_ORDER.length : ai) - (bi < 0 ? SECTION_ORDER.length : bi); }).map(([key, list]) => <ControlSection key={key} name={key} controls={list} values={values} open={sectionOpen(key)} toggle={() => toggleSection(key)} run={run} settings={settings} />)}
+    {grouped.has('Tone Curve') && sectionOpen('Tone Curve') && <CurveEditor run={run} settings={settings} />}
     <div className="lc-inspector__section"><button type="button" className="lc-inspector__section-head" data-open={sectionOpen('PointColor')} onClick={() => toggleSection('PointColor')}><span /><span>Point Color</span></button>{sectionOpen('PointColor') && <PointColorPanel run={run} settings={settings} />}</div>
   </>;
 }
@@ -198,8 +218,8 @@ function WhiteBalanceMode({ run, settings }: { run: Run; settings: Json }) {
 }
 
 function ControlSection({ name, controls, values, open, toggle, run, settings }: { name: string; controls: ControlSpec[]; values: Record<string, number>; open: boolean; toggle: () => void; run: Run; settings: Json }) {
-  const curveSection = name === 'Tone Curve' || name === 'Curve' || name === 'curve';
-  const mixerSection = name === 'Color Mixer' || name === 'Mixer' || name === 'mixer';
+  const curveSection = canonicalSection(name) === 'Tone Curve';
+  const mixerSection = canonicalSection(name) === 'Color Mixer';
   return <section className="lc-inspector__section"><button type="button" className="lc-inspector__section-head" data-open={open} onClick={toggle}><span /><span>{SECTION_LABELS[name] ?? name}</span><small>{controls.length}</small></button>{open && <div className="lc-inspector__section-body">{controls.map(spec => <ControlRow key={spec.id} spec={spec} value={num(values[spec.id], spec.default)} run={run} />)}{curveSection && <div className="lc-inspector__actions"><CurvePresetPicker run={run} /><button type="button" className="lc-inspector__button" onClick={() => void run('curve.reset', { channel: 'all' })}>Reset curve</button></div>}{mixerSection && <MixerLegend settings={settings} />}</div>}</section>;
 }
 

@@ -327,6 +327,22 @@ fn assert_workspace_design(control: &rightkit_qa::control::Control) {
     }
 }
 
+fn assert_primary_editing_usable(control: &rightkit_qa::control::Control) {
+    let editing = control.eval(r#"return (() => {
+        const headings = [...document.querySelectorAll('.lc-inspector__section-head > span:nth-child(2)')].map(node => node.textContent.trim());
+        const exposure = document.querySelector('input[id="ctl-light.exposure"]');
+        const rect = exposure?.getBoundingClientRect();
+        const body = document.querySelector('.lc-inspector__body')?.getBoundingClientRect();
+        return { headings, visible: !!rect && !!body && rect.width > 200 && rect.top >= body.top && rect.bottom <= body.bottom && rect.bottom <= innerHeight };
+    })();"#).expect("primary editing geometry must be queryable");
+    let headings = editing["headings"].as_array().expect("editing headings must be present");
+    assert!(
+        headings.len() >= 2 && headings[0].as_str() == Some("Light") && headings[1].as_str() == Some("Color"),
+        "primary Light & Color groups must lead inspector: {editing}"
+    );
+    assert_eq!(editing["visible"].as_bool(), Some(true), "Exposure must be usable without scrolling inspector: {editing}");
+}
+
 fn set_native_viewport(control: &rightkit_qa::control::Control, width: u64, height: u64) -> Value {
     let result = control.command("lc_qa_viewport", &json!({"width": width, "height": height})).expect("QA viewport resize command must execute");
     assert_eq!(result["requested"]["width"].as_u64(), Some(width), "QA viewport must report requested width");
@@ -1262,6 +1278,9 @@ fn native_hidden_control_journeys() {
                             control.key("D").expect("develop route key must execute");
                             wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
                             assert_layout_settled(control, ".stage-workspace.stage-detail");
+                            choose_inspector_panel(control, "edit");
+                            wait_for_dom(control, "return document.querySelector('input[id=\"ctl-light.exposure\"]') !== null;");
+                            assert_primary_editing_usable(control);
                             assert_workspace_design(control);
                             let route = control
                                 .eval("return document.querySelector('.stage-view-mode select')?.value || '';")
