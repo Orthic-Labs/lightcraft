@@ -16,6 +16,7 @@ use std::path::Path;
 
 const MAX_COUNT: usize = 10_000;
 const MAX_EDGE: usize = 4_096;
+const MAX_SELECTED: usize = 256;
 
 struct TempDir(std::path::PathBuf);
 
@@ -119,6 +120,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let count = env_usize("COUNT", 1_300, MAX_COUNT)?;
     let jpeg_edge = env_usize("JPEG_EDGE", 1_600, MAX_EDGE)?;
     let raw_edge = env_usize("RAW_EDGE", 1_200, MAX_EDGE)?;
+    let selected_count = env_usize("SELECTED_COUNT", 16, MAX_SELECTED)?;
     let root = std::env::temp_dir().join(format!("lightcraft-import-bench-{}", std::process::id()));
     let temp = TempDir(root);
     std::fs::create_dir_all(&temp.0)?;
@@ -153,19 +155,51 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let copy_root = temp.0.join("library");
     let import_paths: Vec<String> =
-        candidates.iter().filter(|c| c.error.is_none() && c.duplicate.is_none()).take(8).map(|c| c.path.clone()).collect();
+        candidates.iter().filter(|c| c.error.is_none() && c.duplicate.is_none()).take(selected_count).map(|c| c.path.clone()).collect();
     let opts = ImportOptions { mode: ImportMode::Copy, destination: Some(copy_root.to_string_lossy().into()), ..Default::default() };
     let mut job = import::ImportJob::new(&mut session, opts.clone())?;
-    let prepared = job.prepare(&import_paths, &std::sync::atomic::AtomicBool::new(false));
-    let report = import::commit_prepared(&mut session, &opts, job.now(), prepared)?;
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut batch_count = 0;
+    let mut imported = 0;
+    let mut failed = 0;
+    let mut sidecars_applied = 0;
+    let mut prepare_elapsed = std::time::Duration::ZERO;
+    let mut commit_elapsed = std::time::Duration::ZERO;
+    for batch in import_paths.chunks(8) {
+        batch_count += 1;
+        let prepare_started = std::time::Instant::now();
+        let prepared = job.prepare(batch, &cancel);
+        prepare_elapsed += prepare_started.elapsed();
+        let commit_started = std::time::Instant::now();
+        let report = import::commit_prepared(&mut session, &opts, job.now(), prepared)?;
+        commit_elapsed += commit_started.elapsed();
+        imported += report.imported.len();
+        failed += report.failed.len();
+        sidecars_applied += report.sidecars;
+    }
     let selected_metrics = job.metrics.snapshot();
     println!(
-        "selected-import requested={} imported={} failed={} sidecars={} probe_reads={}",
+        "selected-import requested={} batches={} imported={} failed={} sidecars={} transfer_kind=verified-copy prepare_ms={:.1} commit_ms={:.1}",
         import_paths.len(),
-        report.imported.len(),
-        report.failed.len(),
-        report.sidecars,
-        selected_metrics.probes
+        batch_count,
+        imported,
+        failed,
+        sidecars_applied,
+        prepare_elapsed.as_secs_f64() * 1_000.0,
+        commit_elapsed.as_secs_f64() * 1_000.0,
+    );
+    println!(
+        "selected-metrics probes={} bytes_read={} cache_hits={} cache_misses={} sidecars={} transfers={} transfer_failures={} probe_ms={:.1} sidecar_ms={:.1} transfer_ms={:.1}",
+        selected_metrics.probes,
+        selected_metrics.bytes_read,
+        selected_metrics.cache_hits,
+        selected_metrics.cache_misses,
+        selected_metrics.sidecars,
+        selected_metrics.transfers,
+        selected_metrics.transfer_failures,
+        selected_metrics.probe_ns as f64 / 1e6,
+        selected_metrics.sidecar_ns as f64 / 1e6,
+        selected_metrics.transfer_ns as f64 / 1e6,
     );
     let cancel = std::sync::atomic::AtomicBool::new(true);
     let mut cancelled_job = import::ImportJob::new(&mut session, ImportOptions::default())?;
