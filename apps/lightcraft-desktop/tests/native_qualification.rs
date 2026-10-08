@@ -381,6 +381,19 @@ fn wait_task(control: &rightkit_qa::control::Control, task_id: &str) -> Value {
     panic!("native task {task_id} did not publish exact completedJobs receipt within 90 seconds");
 }
 
+fn task_result(control: &rightkit_qa::control::Control, id: &str, params: Value) -> Value {
+    let started = run(control, id, params);
+    let task_id = started["taskId"].as_str().expect("background command must return task id");
+    let state = wait_task(control, task_id);
+    state["status"]["completedJobs"]
+        .as_array()
+        .expect("completed task history must exist")
+        .iter()
+        .find(|job| job["id"].as_str() == Some(task_id))
+        .expect("exact task must be retained")["result"]
+        .clone()
+}
+
 fn import_file(control: &rightkit_qa::control::Control, path: &Path) -> Value {
     let preview = run(control, "library.importPreview", json!({"paths": [path]}));
     assert!(preview["candidates"].as_array().is_some_and(|items| !items.is_empty()), "real fixture must produce an import candidate: {preview}");
@@ -1420,13 +1433,17 @@ fn native_hidden_control_journeys() {
                         assert!(rendered["naturalHeight"].as_u64().is_some_and(|height| height > 0));
                     }
                     "lightroomImport" => {
-                        let first = run(control, "library.importLightroom", json!({"path": inputs.catalog, "updateExisting": false}));
+                        let inspected = task_result(control, "library.inspectLightroom", json!({"path": inputs.catalog}));
+                        assert_eq!(inspected["photos"].as_u64(), Some(2));
+                        let first = task_result(control, "library.importLightroom", json!({"path": inputs.catalog, "updateExisting": false}));
                         assert_eq!(first["photos"].as_u64(), Some(2), "Lightroom fixture must import master & virtual copy: {first}");
                         assert_eq!(first["collections"].as_u64(), Some(2), "nested Lightroom collections must import: {first}");
                         assert_eq!(first["missing"].as_array().map(Vec::len), Some(0));
                         let mapping = first["mapping"].clone();
-                        let second = run(control, "library.importLightroom", json!({"path": inputs.catalog, "updateExisting": true}));
+                        let second = task_result(control, "library.importLightroom", json!({"path": inputs.catalog, "updateExisting": true}));
                         assert_eq!(second["mapping"], mapping, "reimport must preserve source identities");
+                        assert_eq!(second["archive"], first["archive"], "unchanged source must reuse bounded archive");
+                        fs::write(scenario.dir().join("lightroom-import.json"), serde_json::to_vec_pretty(&json!({"inspection": inspected, "first": first, "reimport": second})).expect("Lightroom receipt must serialize")).expect("Lightroom receipt must save");
                         assert_eq!(snapshot(control)["counts"]["catalog"].as_u64(), Some(2));
                     }
                     "engineExport" => {
@@ -1434,6 +1451,15 @@ fn native_hidden_control_journeys() {
                         let id = imported["active"].as_u64().expect("PNG import must select photo");
                         control.key("D").expect("develop route key must execute for engine export journey");
                         wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
+                        wait_for_dom(control, "return document.querySelector('.lc-histogram svg path[stroke=\"#df6464\"]')?.getAttribute('d')?.includes('L') === true && document.querySelector('.lc-histogram__footer')?.textContent.includes('samples') === true;");
+                        let curve_before = snapshot(control)["develop"]["curve"].clone();
+                        click_dom(control, ".lc-curve-picker > button", "curve preset picker must open");
+                        wait_for_dom(control, "return document.querySelector('[aria-label=\"Tone curve presets\"]') !== null;");
+                        click_dom(control, ".lc-curve-picker__menu [role=menuitemradio]:nth-child(3)", "Strong Contrast preset must apply");
+                        let curve_changed = wait_for_snapshot(control, |state| state["develop"]["curve"] != curve_before, "curve preset must change Rust develop settings");
+                        assert_ne!(curve_changed["develop"]["curve"], curve_before);
+                        run(control, "edit.undo", json!({}));
+                        assert_eq!(snapshot(control)["develop"]["curve"], curve_before, "curve preset must be undoable");
                         let decoded_before = wait_for_rendered_preview(control, "img.stage-preview", None);
                         assert!(decoded_before["naturalWidth"].as_u64().is_some_and(|width| width > 0));
                         assert!(decoded_before["naturalHeight"].as_u64().is_some_and(|height| height > 0));

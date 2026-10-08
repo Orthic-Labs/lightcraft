@@ -44,6 +44,23 @@ function array(value: unknown): unknown[] { return Array.isArray(value) ? value 
 function text(value: unknown, fallback = ''): string { return typeof value === 'string' ? value : fallback; }
 function num(value: unknown, fallback = 0): number { return typeof value === 'number' && Number.isFinite(value) ? value : fallback; }
 
+const HISTOGRAM_BINS = 256;
+
+function histogramBins(value: unknown): number[] {
+  const source = array(value);
+  return Array.from({ length: HISTOGRAM_BINS }, (_, index) => {
+    const bin = source[index];
+    return typeof bin === 'number' && Number.isFinite(bin) && bin >= 0 ? bin : 0;
+  });
+}
+
+function curvePresetResult(value: unknown): { presets: Json[]; current: string | null } {
+  const result = object(value);
+  const presets = array(result.presets).map(object).filter(preset => text(preset.name).trim().length > 0);
+  const current = text(result.current).trim();
+  return { presets, current: current || null };
+}
+
 export default function Inspector({ className = '' }: { className?: string }) {
   const desktop = useDesktop() as InspectorDesktop;
   const { snapshot, ui } = desktop;
@@ -81,11 +98,23 @@ function Header({ title, detail }: { title: string; detail?: string }) { return 
 
 function Histogram({ histogram, clipping, setClipping }: { histogram: unknown; clipping: boolean; setClipping: (v: boolean) => void }) {
   const data = object(histogram);
-  const channels = array(data.luminance ?? data.values ?? data.rgb).filter(v => typeof v === 'number').map(v => num(v));
-  const path = channels.length > 1 ? channels.map((v, i) => `${i ? 'L' : 'M'} ${(i / (channels.length - 1)) * 100} ${100 - Math.max(0, Math.min(100, v))}`).join(' ') : '';
+  const red = histogramBins(data.r);
+  const green = histogramBins(data.g);
+  const blue = histogramBins(data.b);
+  const luma = histogramBins(data.luma);
+  const channels = [red, green, blue, luma];
+  const peak = Math.max(1, ...channels.flatMap(channel => channel));
+  const path = (values: number[]) => values.map((value, index) => {
+    const x = (index / (HISTOGRAM_BINS - 1)) * 100;
+    const y = 100 - (value / peak) * 100;
+    return `${index ? 'L' : 'M'} ${x} ${y}`;
+  }).join(' ');
+  const area = `${path(luma)} L 100 100 L 0 100 Z`;
+  const fallbackTotal = luma.reduce((sum, value) => { const next = sum + value; return Number.isFinite(next) ? next : Number.MAX_SAFE_INTEGER; }, 0);
+  const sampleCount = Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, num(data.total, fallbackTotal)));
   return <div className="lc-histogram" aria-label="Histogram">
-    <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img"><path d="M0 100H100" stroke="currentColor" opacity=".18" fill="none" />{path && <path d={path} stroke="#9eabc1" strokeWidth="1.4" vectorEffect="non-scaling-stroke" fill="none" />}</svg>
-    <div className="lc-histogram__footer"><span>{channels.length ? `${channels.length} samples` : 'Histogram'}</span><label className="lc-histogram__toggle"><span><input type="checkbox" checked={clipping} onChange={e => setClipping(e.target.checked)} /> Clipping</span></label></div>
+    <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="RGB and luminance histogram"><title>RGB and luminance histogram</title><path d="M0 100H100" stroke="currentColor" opacity=".18" fill="none" aria-hidden="true" /><path d={area} fill="#7d899d" opacity=".28" aria-hidden="true" /><path d={path(red)} stroke="#df6464" strokeWidth="1.1" vectorEffect="non-scaling-stroke" fill="none" aria-hidden="true" /><path d={path(green)} stroke="#58be86" strokeWidth="1.1" vectorEffect="non-scaling-stroke" fill="none" aria-hidden="true" /><path d={path(blue)} stroke="#6496e9" strokeWidth="1.1" vectorEffect="non-scaling-stroke" fill="none" aria-hidden="true" /><path d={path(luma)} stroke="#e0e4eb" strokeWidth="1.4" vectorEffect="non-scaling-stroke" fill="none" aria-hidden="true" /></svg>
+    <div className="lc-histogram__footer"><span>{sampleCount ? `${sampleCount} samples` : 'Histogram'}</span><label className="lc-histogram__toggle"><span><input type="checkbox" checked={clipping} onChange={e => setClipping(e.target.checked)} /> Clipping</span></label></div>
   </div>;
 }
 
@@ -125,7 +154,63 @@ function WhiteBalanceMode({ run, settings }: { run: Run; settings: Json }) {
 }
 
 function ControlSection({ name, controls, values, open, toggle, run, settings }: { name: string; controls: ControlSpec[]; values: Record<string, number>; open: boolean; toggle: () => void; run: Run; settings: Json }) {
-  return <section className="lc-inspector__section"><button type="button" className="lc-inspector__section-head" data-open={open} onClick={toggle}><span /><span>{SECTION_LABELS[name] ?? name}</span><small>{controls.length}</small></button>{open && <div className="lc-inspector__section-body">{controls.map(spec => <ControlRow key={spec.id} spec={spec} value={num(values[spec.id], spec.default)} run={run} />)}{(name === 'Tone Curve' || name === 'Curve' || name === 'curve') && <div className="lc-inspector__actions"><button type="button" className="lc-inspector__button" onClick={() => void run('curve.presets', {})}>Curve presets</button><button type="button" className="lc-inspector__button" onClick={() => void run('curve.reset', { channel: 'all' })}>Reset curve</button></div>}{(name === 'Color Mixer' || name === 'Mixer' || name === 'mixer') && <MixerLegend settings={settings} />}</div>}</section>;
+  const curveSection = name === 'Tone Curve' || name === 'Curve' || name === 'curve';
+  const mixerSection = name === 'Color Mixer' || name === 'Mixer' || name === 'mixer';
+  return <section className="lc-inspector__section"><button type="button" className="lc-inspector__section-head" data-open={open} onClick={toggle}><span /><span>{SECTION_LABELS[name] ?? name}</span><small>{controls.length}</small></button>{open && <div className="lc-inspector__section-body">{controls.map(spec => <ControlRow key={spec.id} spec={spec} value={num(values[spec.id], spec.default)} run={run} />)}{curveSection && <div className="lc-inspector__actions"><CurvePresetPicker run={run} /><button type="button" className="lc-inspector__button" onClick={() => void run('curve.reset', { channel: 'all' })}>Reset curve</button></div>}{mixerSection && <MixerLegend settings={settings} />}</div>}</section>;
+}
+
+function CurvePresetPicker({ run }: { run: Run }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [presets, setPresets] = useState<Json[]>([]);
+  const [current, setCurrent] = useState<string | null>(null);
+  const [error, setError] = useState('');
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuId = 'curve-preset-menu';
+
+  const close = () => {
+    setOpen(false);
+    buttonRef.current?.focus();
+  };
+  const load = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const result = curvePresetResult(await run('curve.presets', {}));
+      setPresets(result.presets);
+      setCurrent(result.current);
+      setOpen(true);
+    } catch (reason: unknown) {
+      setError(String(reason));
+      setOpen(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+  const apply = async (preset: Json) => {
+    const name = text(preset.name).trim();
+    if (!name) return;
+    setCurrent(name);
+    close();
+    try {
+      await run('curve.applyPreset', { name });
+    } catch (reason: unknown) {
+      setError(String(reason));
+      setOpen(true);
+    }
+  };
+  useEffect(() => {
+    if (!open) return undefined;
+    const first = pickerRef.current?.querySelector<HTMLButtonElement>('[role="menuitemradio"]');
+    first?.focus();
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') close(); };
+    const onPointerDown = (event: PointerEvent) => { if (!pickerRef.current?.contains(event.target as Node)) setOpen(false); };
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => { document.removeEventListener('keydown', onKeyDown); document.removeEventListener('pointerdown', onPointerDown); };
+  }, [open]);
+  return <div className="lc-curve-picker" ref={pickerRef}><button ref={buttonRef} type="button" className="lc-inspector__button" aria-haspopup="menu" aria-expanded={open} aria-controls={menuId} aria-busy={loading} onClick={() => { if (open) close(); else void load(); }}>Curve presets <span aria-hidden="true">⌄</span></button>{open && <div id={menuId} className="lc-curve-picker__menu" role="menu" aria-label="Tone curve presets">{loading ? <div className="lc-curve-picker__message" role="menuitem" aria-disabled="true" aria-live="polite">Loading presets…</div> : error ? <><div className="lc-curve-picker__message" role="menuitem" aria-disabled="true">{error}</div><button type="button" role="menuitem" onClick={() => void load()}>Retry</button></> : presets.length ? presets.map(preset => { const name = text(preset.name).trim(); const selected = current === name; return <button type="button" role="menuitemradio" aria-checked={selected} aria-current={selected ? 'true' : undefined} key={name} onClick={() => void apply(preset)}><span>{name}</span>{selected && <span aria-hidden="true">✓</span>}</button>; }) : <div className="lc-curve-picker__message" role="menuitem" aria-disabled="true">No curve presets available.</div>}</div>}</div>;
 }
 
 function ControlRow({ spec, value, run }: { spec: ControlSpec; value: number; run: Run }) {
