@@ -228,12 +228,11 @@ fn run(rx: &mpsc::Receiver<Job>, shared: &Shared, idle: Duration) {
         }
         // A model-folder change invalidates every queued request. Run reset first so stale jobs
         // cannot retain the previous checkpoint while the new folder becomes active.
-        if let Some(index) = queue.iter().position(|job| matches!(job.kind, Kind::Reset)) {
-            if index > 0 {
-                if let Some(reset) = queue.remove(index) {
-                    queue.push_front(reset);
-                }
-            }
+        if let Some(index) = queue.iter().position(|job| matches!(job.kind, Kind::Reset))
+            && index > 0
+            && let Some(reset) = queue.remove(index)
+        {
+            queue.push_front(reset);
         }
         let Some(mut job) = queue.pop_front() else { continue };
         let reset_dir = matches!(job.kind, Kind::Reset).then(|| job.dir.clone());
