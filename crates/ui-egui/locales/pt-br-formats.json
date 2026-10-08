@@ -152,6 +152,7 @@
   "Focus {:.0}": "Foco {:.0}",
   "Folder “{}” (and its subfolders)": "Pasta “{}” (e suas subpastas)",
   "Found {n} missing photo{}; {left} still missing{unsure}": "{n} foto{0} ausente{0} encontrada{0}; {left} ainda ausente(s){unsure}",
+  "Scan failed: {error}": "Falha na verificação: {error}",
   "Import failed: {e}": "Falha na importação: {e}",
   "Imported {profiles} profile{} (Profile browser ▸ their groups)": "{profiles} perfil(is) importado(s){:.0} (Navegador de perfis ▸ seus grupos)",
   "Insert at the cursor (also written {})": "Inserir no cursor (também escrito {})",

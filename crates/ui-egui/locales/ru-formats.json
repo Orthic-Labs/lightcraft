@@ -62,6 +62,7 @@
   "Found {n} missing photo{}; {left} still missing{unsure}": "Найдено отсутствующих фото: {n}{:.0}; всё ещё отсутствует: {left}{unsure}",
   "Healed {n} dust spot{}": "Убрано пылинок: {n}{:.0}",
   "Import cancelled · {} photo{} added": "Импорт отменён · добавлено фото: {}{:.0}",
+  "Scan failed: {error}": "Ошибка сканирования: {error}",
   "Import failed: {e}": "Ошибка импорта: {e}",
   "Imported {n} point curve preset{}": "Импортировано пресетов точечной кривой: {n}{:.0}",
   "Imported {n} preset{}": "Импортировано пресетов: {n}{:.0}",

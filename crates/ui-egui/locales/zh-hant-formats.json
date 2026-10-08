@@ -152,6 +152,7 @@
   "Focus {:.0}": "焦點 {:.0}",
   "Folder “{}” (and its subfolders)": "資料夾「{}」（含子資料夾）",
   "Found {n} missing photo{}; {left} still missing{unsure}": "已找到 {n} 張遺失的照片{:.0}；仍有 {left} 張遺失{unsure}",
+  "Scan failed: {error}": "掃描失敗：{error}",
   "Import failed: {e}": "匯入失敗：{e}",
   "Imported {profiles} profile{} (Profile browser ▸ their groups)": "已匯入 {profiles} 個描述檔{:.0}（描述檔瀏覽器 ▸ 各自的群組）",
   "Insert at the cursor (also written {})": "在游標處插入（也可寫成 {}）",

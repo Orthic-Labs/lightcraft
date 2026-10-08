@@ -152,6 +152,7 @@
   "Focus {:.0}": "ピント {:.0}",
   "Folder “{}” (and its subfolders)": "フォルダ「{}」（サブフォルダを含む）",
   "Found {n} missing photo{}; {left} still missing{unsure}": "見つからない写真を{n}枚見つけました{:.0}。{left}枚はまだ見つかりません{unsure}",
+  "Scan failed: {error}": "スキャンに失敗しました：{error}",
   "Import failed: {e}": "読み込みに失敗しました：{e}",
   "Imported {profiles} profile{} (Profile browser ▸ their groups)": "{profiles}個のプロファイルを読み込みました{:.0}（プロファイルブラウザー ▸ 各グループ）",
   "Insert at the cursor (also written {})": "カーソル位置に挿入（{}とも表記可）",

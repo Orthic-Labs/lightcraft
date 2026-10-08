@@ -59,6 +59,7 @@
   "Found {n} missing photo{}; {left} still missing{unsure}": "Fotos que faltaban encontradas: {n}{:.0}; siguen faltando: {left}{unsure}",
   "Healed {n} dust spot{}": "{n} mancha{0} de polvo corregida{0}",
   "Import cancelled · {} photo{} added": "Importación cancelada · {0} foto{1} añadida{1}",
+  "Scan failed: {error}": "Error de exploración: {error}",
   "Import failed: {e}": "Error de importación: {e}",
   "Imported {n} point curve preset{}": "{n} ajuste{0} preestablecido{0} de curva de puntos importado{0}",
   "Imported {n} preset{}": "{n} ajuste{0} preestablecido{0} importado{0}",
