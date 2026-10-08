@@ -14,7 +14,7 @@ use wasm_bindgen_futures::JsFuture;
 use crate::backend::Backend;
 use crate::backup::{
     ACTIVE_LIBRARY, MAX_RESTORE_DIRECTORY_BYTES, MAX_RESTORE_ENTRY_BYTES, README, ZipEntry, ZipWriter, data_offset, find_central, original_entry,
-    parse_central, restore_key, restored_dir_name, tail_len, valid_hash, verify, verify_original_hash,
+    parse_central, preflight_restore_entry, restore_key, restored_dir_name, tail_len, valid_hash, verify,
 };
 use crate::files::{Files, LIBRARY_FILES};
 use crate::store::storage_key;
@@ -241,20 +241,21 @@ pub async fn restore(file: web_sys::File, backend: Backend) -> Result<String, St
         .collect();
 
     // Preflight every accepted entry before touching storage. In particular, an existing original
-    // key does not exempt archive bytes from CRC or content-hash validation.
+    // key does not exempt archive bytes from CRC or content-hash validation, nor does a corrupt
+    // existing payload get reused.
+    let mut writes = Vec::with_capacity(accepted.len());
     for entry in &accepted {
         let data = read_entry(&file, len, entry.zip).await?;
-        if let Some(hash) = &entry.original_hash {
-            verify_original_hash(hash, &data)?;
-        }
+        let existing = if entry.original_hash.is_some() { backend.read(&entry.key).await? } else { None };
+        let write = preflight_restore_entry(entry.zip, &data, entry.original_hash.as_deref(), existing.as_deref())?;
+        writes.push(write);
     }
 
     // All archive validation passed. Read entries again for writes so memory stays bounded to one
     // entry and a later invalid archive entry can never leave an earlier original behind.
     let mut written = 0usize;
-    for entry in &accepted {
-        // originals are named by their content: one already stored is the same file
-        if entry.original_hash.is_some() && backend.exists(&entry.key).await? {
+    for (entry, write) in accepted.iter().zip(writes) {
+        if !write {
             continue;
         }
         let data = read_entry(&file, len, entry.zip).await?;

@@ -253,6 +253,15 @@ pub fn verify_original_hash(hash: &str, data: &[u8]) -> Result<(), String> {
     if crate::store::content_hash(data) == hash { Ok(()) } else { Err(format!("originals/{hash}: content hash mismatch")) }
 }
 
+/// Validate one accepted entry during restore preflight. Returns whether its storage key needs a
+/// write: library files always do, while a matching existing original can be reused safely.
+pub fn preflight_restore_entry(entry: &ZipEntry, data: &[u8], original_hash: Option<&str>, existing_original: Option<&[u8]>) -> Result<bool, String> {
+    verify(entry, data)?;
+    let Some(hash) = original_hash else { return Ok(true) };
+    verify_original_hash(hash, data)?;
+    Ok(!existing_original.is_some_and(|bytes| bytes.len() as u64 <= MAX_RESTORE_ENTRY_BYTES && crate::store::content_hash(bytes) == hash))
+}
+
 /// A name for the restored library's folder.
 pub fn restored_dir_name(now_ms: f64) -> String {
     format!("library-restored-{}", now_ms.max(0.0) as u64)
@@ -331,5 +340,62 @@ mod tests {
         verify(entry, &zip[start..start + replacement.len()]).unwrap();
         assert!(verify_original_hash(&hash, replacement).is_err());
         assert!(verify_original_hash(&hash, original).is_ok());
+    }
+
+    #[test]
+    fn preflight_repairs_corrupt_original_but_reuses_matching_key() {
+        let original = b"original image";
+        let hash = crate::store::content_hash(original);
+        let entry =
+            ZipEntry { name: original_entry(&hash, "photo.png"), crc: crc32fast::hash(original), size: original.len() as u64, header: 0, method: 0 };
+        assert!(preflight_restore_entry(&entry, original, Some(&hash), Some(b"blue image")).unwrap());
+        assert!(!preflight_restore_entry(&entry, original, Some(&hash), Some(original)).unwrap());
+        assert!(preflight_restore_entry(&entry, original, Some(&hash), None).unwrap());
+    }
+
+    #[test]
+    fn late_invalid_entry_keeps_preflight_write_phase_empty() {
+        let original = b"original image";
+        let hash = crate::store::content_hash(original);
+        let original_entry = ZipEntry {
+            name: super::original_entry(&hash, "photo.png"),
+            crc: crc32fast::hash(original),
+            size: original.len() as u64,
+            header: 0,
+            method: 0,
+        };
+        let catalog_entry = ZipEntry { name: "library/catalog.log".into(), crc: crc32fast::hash(b"catalog"), size: 7, header: 0, method: 0 };
+        let checks = [(&original_entry, &original[..], Some(hash.as_str()), Some(&b"corrupt"[..])), (&catalog_entry, &b"tampered"[..], None, None)];
+        let mut plan = Vec::new();
+        let result = checks
+            .iter()
+            .try_for_each(|(entry, data, hash, existing)| preflight_restore_entry(entry, data, *hash, *existing).map(|write| plan.push(write)));
+        let active_before = "library";
+        let active_after = result.as_ref().ok().map(|_| "library-restored").unwrap_or(active_before);
+        let writes = result.ok().map(|_| plan).unwrap_or_default();
+        assert!(writes.is_empty());
+        assert_eq!(active_after, active_before);
+    }
+
+    #[test]
+    fn valid_retry_repairs_existing_corrupt_key_then_reuses_it() {
+        let original = b"original image";
+        let hash = crate::store::content_hash(original);
+        let entry = ZipEntry {
+            name: super::original_entry(&hash, "photo.png"),
+            crc: crc32fast::hash(original),
+            size: original.len() as u64,
+            header: 0,
+            method: 0,
+        };
+        let corrupt = b"blue image";
+        let should_repair = preflight_restore_entry(&entry, original, Some(&hash), Some(corrupt)).unwrap();
+        assert!(should_repair);
+        let mut stored = corrupt.to_vec();
+        if should_repair {
+            stored = original.to_vec();
+        }
+        assert_eq!(stored, original);
+        assert!(!preflight_restore_entry(&entry, original, Some(&hash), Some(&stored)).unwrap());
     }
 }
