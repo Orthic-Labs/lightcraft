@@ -147,7 +147,10 @@ fn assert_library_header_contrast(control: &rightkit_qa::control::Control, mode:
     let action_ratios = colors["actionRatios"].as_array().expect("library Import & Export colors must be reported");
     eprintln!("[qa] {mode} library header contrast: {colors}");
     assert!(title_ratio >= 4.5, "{mode} library title contrast must meet WCAG AA: {colors}");
-    assert!(action_ratios.len() >= 2 && action_ratios.iter().all(|ratio| ratio.as_f64().is_some_and(|value| value >= 4.5)), "{mode} Import & Export contrast must meet WCAG AA: {colors}");
+    assert!(
+        action_ratios.len() >= 2 && action_ratios.iter().all(|ratio| ratio.as_f64().is_some_and(|value| value >= 4.5)),
+        "{mode} Import & Export contrast must meet WCAG AA: {colors}"
+    );
 }
 
 fn click_dom(control: &rightkit_qa::control::Control, selector: &str, message: &str) {
