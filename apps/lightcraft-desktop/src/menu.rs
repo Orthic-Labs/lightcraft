@@ -4,12 +4,35 @@
 
 use rightkit_shell::{MenuEntry, MenuGroup, MenuSpec};
 
+fn modifier() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "Cmd"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "Ctrl"
+    }
+}
+
+fn accelerator(key: &str) -> String {
+    key.strip_prefix("Cmd+").map_or_else(|| key.to_string(), |suffix| format!("{}+{suffix}", modifier()))
+}
+
 fn group(label: &str, entries: &[(&str, &str, Option<&str>)]) -> MenuGroup {
     MenuGroup {
         label: label.into(),
         entries: entries
             .iter()
-            .map(|(id, title, accelerator)| accelerator.map_or_else(|| MenuEntry::item(id, title), |key| MenuEntry::accel(id, title, key)))
+            .map(|(id, title, key)| {
+                key.map_or_else(
+                    || MenuEntry::item(id, title),
+                    |key| {
+                        let key = accelerator(key);
+                        MenuEntry::accel(id, title, key.as_str())
+                    },
+                )
+            })
             .collect(),
     }
 }
@@ -19,7 +42,7 @@ fn group(label: &str, entries: &[(&str, &str, Option<&str>)]) -> MenuGroup {
 pub fn spec() -> MenuSpec {
     MenuSpec {
         app_name: "LightCraft".into(),
-        settings: Some(("app.settings".into(), "Cmd+,".into())),
+        settings: Some(("app.settings".into(), accelerator("Cmd+,"))),
         groups: vec![
             group(
                 "File",
@@ -110,5 +133,27 @@ pub fn spec() -> MenuSpec {
             MenuEntry::item("app.help", "LightCraft Help"),
             MenuEntry::item("app.github", "LightCraft on GitHub"),
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::accelerator;
+
+    #[test]
+    fn platform_modifier_is_used_only_for_command_shortcuts() {
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(accelerator("Cmd+Z"), "Cmd+Z");
+            assert_eq!(accelerator("Cmd+Shift+I"), "Cmd+Shift+I");
+            assert_eq!(accelerator("Cmd+,"), "Cmd+,");
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(accelerator("Cmd+Z"), "Ctrl+Z");
+            assert_eq!(accelerator("Cmd+Shift+I"), "Ctrl+Shift+I");
+            assert_eq!(accelerator("Cmd+,"), "Ctrl+,");
+        }
+        assert_eq!(accelerator("Shift+C"), "Shift+C");
     }
 }
