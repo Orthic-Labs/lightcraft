@@ -66,6 +66,25 @@ export function rotateNormalizedPoint(value: Point, degrees: number, aspect: num
   }, aspect);
 }
 
+export function outputAspectFor(develop: DevelopShape, sourceAspect: number): number {
+  const crop = cropOf(develop);
+  const aspect = orientedAspectFor(develop, sourceAspect);
+  return aspect * Math.max(0.001, crop.rect.x1 - crop.rect.x0) / Math.max(0.001, crop.rect.y1 - crop.rect.y0);
+}
+
+/** Map source-oriented normalized coordinates into rendered crop output coordinates. */
+export function normalizedToOutputPoint(value: Point, develop: DevelopShape, sourceAspect: number): Point {
+  const crop = cropOf(develop);
+  const aspect = orientedAspectFor(develop, sourceAspect);
+  const straight = rotateNormalizedPoint(value, crop.angle, aspect);
+  let x = (straight.x - crop.rect.x0) / Math.max(0.001, crop.rect.x1 - crop.rect.x0);
+  let y = (straight.y - crop.rect.y0) / Math.max(0.001, crop.rect.y1 - crop.rect.y0);
+  const cropValue = record(develop.crop);
+  if (cropValue.flip_h === true || cropValue.flipH === true) x = 1 - x;
+  if (cropValue.flip_v === true || cropValue.flipV === true) y = 1 - y;
+  return { x, y };
+}
+
 export function normalizedPhotoPoint(
   clientX: number,
   clientY: number,
@@ -90,11 +109,10 @@ export function normalizedPhotoPoint(
   ty -= Number.isFinite(pan.y) ? pan.y : 0;
   tx = (tx - 0.5) / safeZoom + 0.5;
   ty = (ty - 0.5) / safeZoom + 0.5;
-  const radians = -crop.angle * Math.PI / 180;
-  const dx = tx * bounds.width - bounds.width / 2;
-  const dy = ty * bounds.height - bounds.height / 2;
-  const screenX = bounds.left + bounds.width / 2 + dx * Math.cos(radians) - dy * Math.sin(radians);
-  const screenY = bounds.top + bounds.height / 2 + dx * Math.sin(radians) + dy * Math.cos(radians);
+  // Native preview already applies CropGeometry's straighten angle. Stage only
+  // applies pan/zoom, so keep pointer inversion in rendered output pixels.
+  const screenX = bounds.left + tx * bounds.width;
+  const screenY = bounds.top + ty * bounds.height;
   let px = drawWidth > 0 ? (screenX - drawLeft) / drawWidth : 0.5;
   let py = drawHeight > 0 ? (screenY - drawTop) / drawHeight : 0.5;
   px = Math.max(0, Math.min(1, px));

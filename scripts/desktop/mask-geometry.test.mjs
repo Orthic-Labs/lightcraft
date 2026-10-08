@@ -40,12 +40,11 @@ const clientForSource = (source, { sourceAspect, orientation, crop, angle, zoom,
   const px = (straight.x - crop.x0) / (crop.x1 - crop.x0);
   const py = (straight.y - crop.y0) / (crop.y1 - crop.y0);
   const image = { x: drawLeft + px * drawWidth, y: drawTop + py * drawHeight };
-  const radians = angle * Math.PI / 180;
   const dx = image.x - (bounds.left + bounds.width / 2);
   const dy = image.y - (bounds.top + bounds.height / 2);
   return {
-    x: bounds.left + (bounds.width / 2 + (dx * Math.cos(radians) - dy * Math.sin(radians)) * zoom) + pan.x * bounds.width,
-    y: bounds.top + (bounds.height / 2 + (dx * Math.sin(radians) + dy * Math.cos(radians)) * zoom) + pan.y * bounds.height,
+    x: bounds.left + (bounds.width / 2 + dx * zoom) + pan.x * bounds.width,
+    y: bounds.top + (bounds.height / 2 + dy * zoom) + pan.y * bounds.height,
   };
 };
 
