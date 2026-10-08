@@ -47,8 +47,10 @@ fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, _cata
     let sequence = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
     let run_id = format!("lightcraft-{}-{}-{}-{sequence}", scenario.name(), std::process::id(), timestamp);
-    let ws = workspace::create(&cache, Some(&run_id), "lightcraft").expect("isolated RightKit workspace must initialize");
-    let data = ws.data_dir.clone();
+    let mut ws = workspace::create(&cache, Some(&run_id), "lightcraft").expect("isolated RightKit workspace must initialize");
+    let data = scenario.dir().join("app-data");
+    fs::create_dir_all(&data).expect("stable scenario app data directory must initialize");
+    ws.env.insert("RIGHTKIT_QA_DATA_DIR".into(), data.to_string_lossy().into_owned());
     let env = ws
         .env
         .iter()
