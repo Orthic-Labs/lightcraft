@@ -89,12 +89,18 @@ impl eframe::App for App {
 /// alone on Windows unless `LIGHTCRAFT_GPU_BACKEND` / `WGPU_BACKEND` say otherwise (issue #136:
 /// with Vulkan in the set, wgpu loads the Vulkan driver even when it then picks DX12).
 fn window_backend(recovery: bool) -> eframe::wgpu::Backends {
-    if recovery {
+    window_backend_for(recovery, lightcraft_engine::gpu::enabled(), lightcraft_engine::gpu::backend::window_backends(), std::env::consts::OS)
+}
+
+fn window_backend_for(recovery: bool, gpu_enabled: bool, configured: eframe::wgpu::Backends, os: &str) -> eframe::wgpu::Backends {
+    if recovery || (os == "windows" && !gpu_enabled) {
         // A stale marker means a previous process died while touching a driver. Ignore any
-        // persisted/ambient override for this launch and use platform default backend.
-        lightcraft_engine::gpu::backend::default_window_backends(std::env::consts::OS)
+        // persisted/ambient override for this launch and use platform default backend. The same
+        // safe default applies when engine GPU rendering is disabled, since egui still needs a
+        // renderer and must not load an ambient Vulkan driver in that mode.
+        lightcraft_engine::gpu::backend::default_window_backends(os)
     } else {
-        lightcraft_engine::gpu::backend::window_backends()
+        configured
     }
 }
 
@@ -873,7 +879,16 @@ mod tests {
                 assert_eq!(b, eframe::wgpu::Backends::METAL);
             }
         }
+
         assert!(!b.is_empty());
+    }
+
+    #[test]
+    fn disabled_gpu_uses_safe_windows_window_backend() {
+        let configured = eframe::wgpu::Backends::VULKAN;
+        assert_eq!(window_backend_for(false, false, configured, "windows"), eframe::wgpu::Backends::DX12);
+        assert_eq!(window_backend_for(false, true, configured, "windows"), configured);
+        assert_eq!(window_backend_for(true, true, configured, "windows"), eframe::wgpu::Backends::DX12);
     }
 
     /// Issue #234: Windows opens links with the URL protocol handler (the default browser), not
