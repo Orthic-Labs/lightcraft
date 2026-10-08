@@ -420,6 +420,49 @@ fn assert_png_pixels(path: &Path, expected_width: u32, expected_height: u32) {
     assert!(pixels[..info.buffer_size()].iter().any(|&pixel| pixel != 0), "exported PNG pixels must not be all zero");
 }
 
+fn set_dialog_field(control: &rightkit_qa::control::Control, label: &str, value: &str) {
+    let label_json = serde_json::to_string(label).expect("field label must serialize");
+    let value_json = serde_json::to_string(value).expect("field value must serialize");
+    let changed = control.eval(&format!(r#"return (() => {{
+        const field = [...document.querySelectorAll('.lc-dialog .lc-field')].find((node) => node.querySelector('span')?.textContent === {label_json});
+        const node = field?.querySelector('input,select,textarea');
+        if (!node) return false;
+        const prototype = node instanceof HTMLSelectElement ? HTMLSelectElement.prototype : node instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(prototype, 'value').set.call(node, {value_json});
+        node.dispatchEvent(new Event(node instanceof HTMLSelectElement ? 'change' : 'input', {{bubbles:true}}));
+        return node.value === {value_json};
+    }})();"#)).expect("dialog field input must execute in native WebView");
+    assert_eq!(changed.as_bool(), Some(true), "native Export field {label} must accept input");
+    wait_for_dom(
+        control,
+        &format!(
+            "return [...document.querySelectorAll('.lc-dialog .lc-field')].find((node) => node.querySelector('span')?.textContent === {label_json})?.querySelector('input,select,textarea')?.value === {value_json};"
+        ),
+    );
+}
+
+fn top_left_magenta_pixels(path: &Path) -> usize {
+    let mut decoder = png::Decoder::new(Cursor::new(fs::read(path).expect("watermark PNG must be readable")));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info().expect("watermark PNG must decode");
+    let mut pixels = vec![0; reader.output_buffer_size().expect("watermark buffer must be available")];
+    let info = reader.next_frame(&mut pixels).expect("watermark pixels must decode");
+    let channels = match info.color_type {
+        png::ColorType::Rgb => 3,
+        png::ColorType::Rgba => 4,
+        _ => panic!("rendered watermark PNG must contain RGB channels"),
+    };
+    pixels[..info.buffer_size()]
+        .chunks_exact(channels)
+        .enumerate()
+        .filter(|(index, pixel)| {
+            let x = *index % info.width as usize;
+            let y = *index / info.width as usize;
+            x < info.width as usize / 2 && y < info.height as usize / 2 && pixel[0] > 240 && pixel[1] < 20 && pixel[2] > 240
+        })
+        .count()
+}
+
 fn tree_fingerprint(path: &Path) -> String {
     fn walk(root: &Path, path: &Path, rows: &mut Vec<String>) {
         let mut entries =
@@ -1234,6 +1277,46 @@ fn native_hidden_control_journeys() {
                             .find(|path| path.is_file())
                             .expect("export must write file");
                         assert_png_pixels(&exported, 96, 64);
+                        // Exercise actual React dialog, native IPC & encoder, rather than
+                        // proving only engine export with hand-authored command parameters.
+                        click_dom(control, ".rk-search--trigger", "Export palette trigger must execute");
+                        wait_for_dom(control, "return document.querySelector('.rk-palette') !== null;");
+                        for key in ["e", "x", "p", "o", "r", "t"] {
+                            control.key(key).expect("Export palette search must execute");
+                        }
+                        wait_for_dom(control, "return document.querySelector('[data-command=\"dialog.export\"]') !== null;");
+                        click_dom(control, "[data-command=\"dialog.export\"]", "Export command must open real dialog");
+                        wait_for_dom(control, "return document.querySelector('.lc-dialog h2')?.textContent === 'Export';");
+                        set_dialog_field(control, "Export folder", &output.display().to_string());
+                        set_dialog_field(control, "Format", "png");
+                        set_dialog_field(control, "Size", "96");
+                        set_dialog_field(control, "Naming template", "dialog-{name}");
+                        set_dialog_field(control, "Sharpen", "screen");
+                        wait_for_dom(control, "return [...document.querySelectorAll('.lc-dialog .lc-field span')].some((node) => node.textContent === 'Sharpen amount');");
+                        set_dialog_field(control, "Sharpen amount", "high");
+                        assert_eq!(control.eval("return (() => { const node = [...document.querySelectorAll('.lc-dialog .lc-check')].find((item) => item.querySelector('span')?.textContent === 'Watermark')?.querySelector('input'); if (!node) return false; node.click(); return node.checked; })();").expect("watermark checkbox must execute").as_bool(), Some(true));
+                        wait_for_dom(control, "return document.querySelector('.lc-dialog textarea') !== null;");
+                        set_dialog_field(control, "Watermark text", "MMMM\nMMMM");
+                        set_dialog_field(control, "Size (%)", "15");
+                        set_dialog_field(control, "Opacity (%)", "100");
+                        set_dialog_field(control, "Colour", "#ff00ff");
+                        set_dialog_field(control, "Watermark position", "topLeft");
+                        let dialog_fields = control.eval("return Object.fromEntries([...document.querySelectorAll('.lc-dialog .lc-field')].map((field) => [field.querySelector('span')?.textContent, field.querySelector('input,select,textarea')?.value]));").expect("actual Export fields must be recorded");
+                        assert_eq!(dialog_fields["Watermark text"].as_str(), Some("MMMM\nMMMM"), "multiline watermark must survive React input");
+                        assert_eq!(dialog_fields["Sharpen amount"].as_str(), Some("high"));
+                        let dialog_screenshot = scenario.dir().join("export-dialog.png");
+                        control.screenshot_to(&dialog_screenshot).expect("actual Export dialog screenshot must save");
+                        click_dom(control, ".lc-dialog-actions .lc-button-primary", "real Export submit must execute");
+                        let dialog_exported = output.join("dialog-procedural-rgb-01.png");
+                        let export_deadline = Instant::now() + Duration::from_secs(30);
+                        while !dialog_exported.is_file() && Instant::now() < export_deadline {
+                            sleep(Duration::from_millis(50));
+                        }
+                        assert!(dialog_exported.is_file(), "React Export dialog must create named PNG; native state={}", snapshot(control));
+                        assert_png_pixels(&dialog_exported, 96, 64);
+                        let baseline_magenta = top_left_magenta_pixels(&exported);
+                        let watermark_magenta = top_left_magenta_pixels(&dialog_exported);
+                        assert!(watermark_magenta >= baseline_magenta + 5, "React watermark must add visible top-left magenta pixels: before={baseline_magenta}, after={watermark_magenta}");
                         let receipt = scenario.dir().join("engine-export.json");
                         fs::write(
                             &receipt,
@@ -1248,12 +1331,18 @@ fn native_hidden_control_journeys() {
                                 "editedExposure": edited["develop"]["light"]["exposure"].clone(),
                                 "undoRestored": undone["develop"]["light"]["exposure"] == before_exposure,
                                 "exportedPng": exported,
+                                "dialogFields": dialog_fields,
+                                "dialogExportedPng": dialog_exported,
+                                "baselineTopLeftMagentaPixels": baseline_magenta,
+                                "watermarkedTopLeftMagentaPixels": watermark_magenta,
                             }))
                             .expect("engine export receipt must serialize"),
                         )
                         .expect("engine export receipt must be writable");
                         scenario.keep("engine-export-stage.png", &screenshot);
                         scenario.keep("engine-export.json", &receipt);
+                        scenario.keep("export-dialog.png", &dialog_screenshot);
+                        scenario.keep("dialog-export.png", &dialog_exported);
                     }
                     _ => unreachable!("scenario inventory is static"),
                 });

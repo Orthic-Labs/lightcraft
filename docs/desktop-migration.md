@@ -35,6 +35,8 @@ Current candidate route is unsigned development qualification. macOS receives re
 
 Hidden `rightkit-qa` journeys target actual WKWebView & WebView2 through embedded `rightkit-control`: typed IPC, bounded generation-aware slices, native previews, preference restart persistence, edit gestures/undo/cancel, tool state, real imports, decoded exports & catalog backup/restore. Screenshot evidence supports rendered-state inspection; passing source checks alone does not establish native behavior.
 
+React Export exposes existing engine sharpening, TIFF/DNG compression & text/graphic watermark options. Multiline text, editable destination/graphic paths & the native graphic picker retain baseline behavior. The native `engineExport` journey also opens the actual dialog, edits fields, submits through IPC & checks named PNG dimensions plus visible top-left watermark pixels. This coverage supplements the engine edit/undo/export receipt.
+
 QA startup uses isolated data directories & empty catalogs unless demo is explicitly requested. `qa-native` gates automation. Normal startup preserves native data paths; candidate app identifier `ai.storyteller.lightcraft.preview` keeps preview preferences isolated during coexistence.
 
 ## Cutover
