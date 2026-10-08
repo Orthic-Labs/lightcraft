@@ -1039,6 +1039,7 @@ fn native_hidden_control_journeys() {
                         assert_ne!(crop["develop"]["crop"], before["develop"]["crop"], "crop command must change crop geometry");
                         click_dom(control, ".stage-toolstrip button[aria-label='Crop']", "crop tool click must execute");
                         wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Crop']")?.classList.contains('selected') === true;"#);
+                        wait_for_rendered_preview(control, "img.stage-preview", None);
                         control.screenshot_to(&scenario.dir().join("tool-crop.png")).expect("crop tool screenshot must be captured");
 
                         run(control, "mask.add", json!({"kind": "radial", "center": [0.5, 0.5], "rx": 0.2, "ry": 0.2}));
@@ -1046,6 +1047,8 @@ fn native_hidden_control_journeys() {
                         assert_eq!(masked["develop"]["masks"].as_array().map(Vec::len), Some(1), "mask command must create mask state");
                         click_dom(control, ".stage-toolstrip button[aria-label='Masking']", "masking tool click must execute");
                         wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Masking']")?.classList.contains('selected') === true;"#);
+                        wait_for_rendered_preview(control, "img.stage-preview", None);
+                        wait_for_dom(control, "return document.querySelector('.lc-inspector__header small')?.textContent === '1 masks';");
                         control.screenshot_to(&scenario.dir().join("tool-masking.png")).expect("masking tool screenshot must be captured");
 
                         run(control, "spot.add", json!({"mode": "remove", "points": [[0.5, 0.5]], "size": 0.05, "source": [0.1, 0.0]}));
@@ -1053,6 +1056,7 @@ fn native_hidden_control_journeys() {
                         assert_eq!(spotted["develop"]["spots"].as_array().map(Vec::len), Some(1), "remove tool command must create spot state");
                         click_dom(control, ".stage-toolstrip button[aria-label='Remove']", "remove tool click must execute");
                         wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Remove']")?.classList.contains('selected') === true;"#);
+                        wait_for_rendered_preview(control, "img.stage-preview", None);
                         control.screenshot_to(&scenario.dir().join("tool-remove.png")).expect("remove tool screenshot must be captured");
 
                         run(control, "redeye.add", json!({"center": [0.5, 0.5], "rx": 0.1, "ry": 0.1}));
@@ -1060,6 +1064,7 @@ fn native_hidden_control_journeys() {
                         assert_eq!(red_eye["develop"]["red_eye"].as_array().map(Vec::len), Some(1), "red-eye command must create correction state");
                         click_dom(control, ".stage-toolstrip button[aria-label='Red Eye']", "red-eye tool click must execute");
                         wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Red Eye']")?.classList.contains('selected') === true;"#);
+                        wait_for_rendered_preview(control, "img.stage-preview", None);
                         control.screenshot_to(&scenario.dir().join("tool-red-eye.png")).expect("red-eye tool screenshot must be captured");
                         assert_eq!(red_eye["active"].as_u64(), Some(active));
                     }

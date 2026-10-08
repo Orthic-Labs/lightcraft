@@ -221,8 +221,9 @@ function PreviewPane({
   onHistogram: (value: unknown) => void;
 }) {
   if (photoId == null) return <div className={`stage-empty ${className ?? ""}`}>Select a photo to view its decoded preview</div>;
-  if (!photo) return <div className={`stage-empty ${className ?? ""}`}>Loading photo metadata…</div>;
-  const dimensions = previewDimensions(photo, previewEdge);
+  // Metadata inspection is asynchronous; request real pixels immediately for a valid ID.
+  // Native renderer preserves source aspect, while inspected metadata later sizes the request.
+  const dimensions = photo ? previewDimensions(photo, previewEdge) : { width: previewEdge, height: previewEdge };
   return <PhotoPreview photoId={photoId} slot={slot} viewGeneration={viewGeneration} width={dimensions.width} height={dimensions.height} quality="full" before={before} className={className} onHistogram={onHistogram} />;
 }
 
