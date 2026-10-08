@@ -95,9 +95,11 @@ fn ext_upper(name: &str) -> String {
 /// Probe a file's bytes: kind, dimensions (oriented), metadata. Raws are described from their
 /// headers ([`lightcraft_raw::probe_info`]): no pixel data is decompressed.
 pub fn probe_bytes(name: &str, bytes: &[u8]) -> Result<ProbeInfo, String> {
-    let content_hash = Some(lightcraft_preview::hash_bytes(bytes).to_string());
     let m = lightcraft_meta::extract(bytes);
     let (meta, captured) = meta_of(&m);
+    // Header metadata is the review path's cheap signal. Compute one whole-file hash only after
+    // it has been extracted; callers retain this value for deduplication and copy verification.
+    let content_hash = Some(lightcraft_preview::hash_bytes(bytes).to_string());
     if lightcraft_raw::probe(bytes).is_some() {
         let raw = match lightcraft_raw::probe_info(bytes) {
             Ok(r) => r,
@@ -169,6 +171,7 @@ pub fn probe_bytes(name: &str, bytes: &[u8]) -> Result<ProbeInfo, String> {
         format,
         kind: MediaKind::Image,
         file_size: bytes.len() as u64,
+        source_stamp: None,
         captured,
         meta,
         as_shot_wb: None,
@@ -389,10 +392,14 @@ pub fn fs_hooks() -> (FileLoader, FileProbe) {
         r
     });
     let probe: FileProbe = Arc::new(|path: &str| {
-        let len = std::fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0);
+        let metadata = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+        let len = metadata.len() as usize;
         let _permit = crate::memory::work_gate().acquire(len);
         let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-        probe_bytes(path, &bytes)
+        let stamp = metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos());
+        let mut info = probe_bytes(path, &bytes)?;
+        info.source_stamp = stamp;
+        Ok(info)
     });
     (loader, probe)
 }

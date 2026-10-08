@@ -66,6 +66,9 @@ impl ImportScanOptions {
     }
 }
 
+/// Upper bound on concurrent native probe reads. Memory gating bounds bytes in flight as well.
+const MAX_IMPORT_PROBE_WORKERS: usize = 8;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ImportMode {
     /// Reference the files where they are.
@@ -403,9 +406,19 @@ pub(crate) fn probe_paths(s: &Session, paths: &[String]) -> Vec<Result<ProbeInfo
 }
 
 fn probe_all(probe: Option<&crate::media::FileProbe>, paths: &[String], progress: &ScanProgress) -> Vec<Result<ProbeInfo, String>> {
+    probe_all_with_cancel(probe, paths, progress, &progress.cancel)
+}
+
+fn probe_all_with_cancel(
+    probe: Option<&crate::media::FileProbe>,
+    paths: &[String],
+    progress: &ScanProgress,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Vec<Result<ProbeInfo, String>> {
     use std::sync::atomic::Ordering::Relaxed;
+    let started = web_time::Instant::now();
     let Some(probe) = probe.cloned() else {
-        return paths
+        let results = paths
             .iter()
             .map(|p| {
                 Ok(ProbeInfo {
@@ -414,10 +427,12 @@ fn probe_all(probe: Option<&crate::media::FileProbe>, paths: &[String], progress
                 })
             })
             .collect();
+        progress.metrics.probe_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+        return results;
     };
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8).min(paths.len().max(1));
+        let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, MAX_IMPORT_PROBE_WORKERS).min(paths.len().max(1));
         if n > 1 {
             let mut results: Vec<Option<Result<ProbeInfo, String>>> = vec![None; paths.len()];
             let next = std::sync::atomic::AtomicUsize::new(0);
@@ -430,30 +445,53 @@ fn probe_all(probe: Option<&crate::media::FileProbe>, paths: &[String], progress
                             if i >= paths.len() {
                                 break;
                             }
-                            if progress.cancel.load(Relaxed) {
+                            if cancel.load(Relaxed) {
                                 break;
                             }
                             let r = probe(&paths[i]);
+                            if r.is_ok() {
+                                progress.metrics.probes.fetch_add(1, Relaxed);
+                            } else {
+                                progress.metrics.probe_failures.fetch_add(1, Relaxed);
+                            }
+                            if let Ok(info) = &r {
+                                progress.metrics.bytes_read.fetch_add(info.file_size, Relaxed);
+                            }
                             progress.done.fetch_add(1, Relaxed);
                             out.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
                         }
                     });
                 }
             });
+            progress.metrics.probe_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+            if cancel.load(Relaxed) {
+                progress.metrics.cancelled.store(true, Relaxed);
+            }
             return results.into_iter().map(|r| r.unwrap_or_else(|| Err("not probed".into()))).collect();
         }
     }
-    paths
+    let results: Vec<Result<ProbeInfo, String>> = paths
         .iter()
         .map(|p| {
-            if progress.cancel.load(Relaxed) {
+            if cancel.load(Relaxed) {
+                progress.metrics.cancelled.store(true, Relaxed);
                 return Err("cancelled".into());
             }
             let r = probe(p);
+            if r.is_ok() {
+                progress.metrics.probes.fetch_add(1, Relaxed);
+            } else {
+                progress.metrics.probe_failures.fetch_add(1, Relaxed);
+            }
+            if let Ok(info) = &r {
+                progress.metrics.bytes_read.fetch_add(info.file_size, Relaxed);
+            }
             progress.done.fetch_add(1, Relaxed);
             r
         })
-        .collect()
+        .collect();
+    progress.metrics.probe_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+    results
 }
 
 /// Copy `src` into `root`/`folders` as `name` (default: its own name), made unique with -1, -2…;
@@ -490,6 +528,78 @@ pub struct ScanProgress {
     pub total: std::sync::atomic::AtomicUsize,
     pub done: std::sync::atomic::AtomicUsize,
     pub cancel: std::sync::atomic::AtomicBool,
+    /// Fixed-size counters/timers for import diagnostics. No per-file history is retained.
+    pub metrics: std::sync::Arc<ImportMetrics>,
+}
+
+impl ScanProgress {
+    fn with_metrics(metrics: std::sync::Arc<ImportMetrics>) -> Self {
+        Self { total: Default::default(), done: Default::default(), cancel: Default::default(), metrics }
+    }
+}
+
+/// Bounded import instrumentation suitable for a progress panel or a CI probe. Counters are
+/// monotonic for one scan/job; stage times are nanoseconds and never retain paths or samples.
+#[derive(Default)]
+pub struct ImportMetrics {
+    pub expanded: std::sync::atomic::AtomicUsize,
+    pub skipped_paths: std::sync::atomic::AtomicUsize,
+    pub cache_hits: std::sync::atomic::AtomicUsize,
+    pub cache_misses: std::sync::atomic::AtomicUsize,
+    pub probes: std::sync::atomic::AtomicUsize,
+    pub probe_failures: std::sync::atomic::AtomicUsize,
+    pub bytes_read: std::sync::atomic::AtomicU64,
+    pub sidecars: std::sync::atomic::AtomicUsize,
+    pub transfers: std::sync::atomic::AtomicUsize,
+    pub transfer_failures: std::sync::atomic::AtomicUsize,
+    pub cancelled: std::sync::atomic::AtomicBool,
+    pub expand_ns: std::sync::atomic::AtomicU64,
+    pub probe_ns: std::sync::atomic::AtomicU64,
+    pub sidecar_ns: std::sync::atomic::AtomicU64,
+    pub transfer_ns: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportMetricsSnapshot {
+    pub expanded: usize,
+    pub skipped_paths: usize,
+    pub cache_hits: usize,
+    pub cache_misses: usize,
+    pub probes: usize,
+    pub probe_failures: usize,
+    pub bytes_read: u64,
+    pub sidecars: usize,
+    pub transfers: usize,
+    pub transfer_failures: usize,
+    pub cancelled: bool,
+    pub expand_ns: u64,
+    pub probe_ns: u64,
+    pub sidecar_ns: u64,
+    pub transfer_ns: u64,
+}
+
+impl ImportMetrics {
+    pub fn snapshot(&self) -> ImportMetricsSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        ImportMetricsSnapshot {
+            expanded: self.expanded.load(Relaxed),
+            skipped_paths: self.skipped_paths.load(Relaxed),
+            cache_hits: self.cache_hits.load(Relaxed),
+            cache_misses: self.cache_misses.load(Relaxed),
+            probes: self.probes.load(Relaxed),
+            probe_failures: self.probe_failures.load(Relaxed),
+            bytes_read: self.bytes_read.load(Relaxed),
+            sidecars: self.sidecars.load(Relaxed),
+            transfers: self.transfers.load(Relaxed),
+            transfer_failures: self.transfer_failures.load(Relaxed),
+            cancelled: self.cancelled.load(Relaxed),
+            expand_ns: self.expand_ns.load(Relaxed),
+            probe_ns: self.probe_ns.load(Relaxed),
+            sidecar_ns: self.sidecar_ns.load(Relaxed),
+            transfer_ns: self.transfer_ns.load(Relaxed),
+        }
+    }
 }
 
 /// The result of [`scan_with`]: the candidates, and the probes to keep for the import that follows.
@@ -560,20 +670,37 @@ pub fn scan_with_policy(s: &mut Session, paths: &[String], policy: RawJpegImport
     out.candidates
 }
 
+fn cached_probe_is_current(path: &str, info: &ProbeInfo) -> bool {
+    let Some(metadata) = std::fs::metadata(path).ok() else { return false };
+    metadata.len() == info.file_size
+        && info.source_stamp.is_none_or(|stamp| {
+            metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).is_some_and(|d| d.as_nanos() == stamp)
+        })
+}
+
 /// [`scan`] without the session, so it can run on a worker thread. Stops early (returning what it
 /// has) when `progress.cancel` is set.
 pub fn scan_with(mut input: ScanInput, paths: &[String], progress: &ScanProgress) -> ScanOutput {
     use std::sync::atomic::Ordering::Relaxed;
+    let expand_started = web_time::Instant::now();
     let files = expand_with_options(paths, input.skip.as_deref(), &input.scan_options);
+    progress.metrics.expanded.fetch_add(files.len(), Relaxed);
+    progress.metrics.expand_ns.fetch_add(expand_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
     let todo: Vec<String> = files.iter().filter(|f| !input.by_path.contains_key(Path::new(f))).cloned().collect();
+    progress.metrics.skipped_paths.fetch_add(files.len().saturating_sub(todo.len()), Relaxed);
     progress.total.store(todo.len(), Relaxed);
-    // probes from a preceding `scan` are reused when the file is unchanged (same size)
+    // probes from a preceding `scan` are reused only when size and native modification stamp match
     let cached: Vec<Option<ProbeInfo>> = todo
         .iter()
         .map(|f| {
             let info = input.cache.remove(f)?;
-            let size = std::fs::metadata(f).map(|m| m.len()).ok();
-            (size.is_none() || size == Some(info.file_size)).then_some(info)
+            let valid = cached_probe_is_current(f, &info);
+            if valid {
+                progress.metrics.cache_hits.fetch_add(1, Relaxed);
+            } else {
+                progress.metrics.cache_misses.fetch_add(1, Relaxed);
+            }
+            valid.then_some(info)
         })
         .collect();
     let missing: Vec<String> = todo.iter().zip(&cached).filter(|(_, c)| c.is_none()).map(|(f, _)| f.clone()).collect();
@@ -688,6 +815,8 @@ pub struct ImportJob {
     /// Files found so far (folders expanded) and handled so far, for progress.
     pub total: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub done: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Fixed-size diagnostics shared by preparation workers and their caller.
+    pub metrics: std::sync::Arc<ImportMetrics>,
 }
 
 /// The outcome of [`ImportJob::prepare`] for one batch, in file order.
@@ -840,6 +969,7 @@ impl ImportJob {
             now: (s.clock)(),
             total: Default::default(),
             done: Default::default(),
+            metrics: Default::default(),
         })
     }
 
@@ -854,8 +984,11 @@ impl ImportJob {
     /// Expand `paths` (folders recursively, the library's own folder skipped) into the files an
     /// import would handle; counted in [`ImportJob::total`].
     pub fn expand(&self, paths: &[String]) -> Vec<String> {
+        let started = web_time::Instant::now();
         let files = expand_with_options(paths, self.lib_dir.as_deref(), &self.opts.scan);
         self.total.fetch_add(files.len(), std::sync::atomic::Ordering::Relaxed);
+        self.metrics.expanded.fetch_add(files.len(), std::sync::atomic::Ordering::Relaxed);
+        self.metrics.expand_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, std::sync::atomic::Ordering::Relaxed);
         files
     }
 
@@ -888,15 +1021,28 @@ impl ImportJob {
         }
 
         // files a preceding scan already probed are not read again (a network share is slow to read)
-        let cached: Vec<Option<ProbeInfo>> = todo.iter().map(|f| self.cache.remove(f)).collect();
+        let cached: Vec<Option<ProbeInfo>> = todo
+            .iter()
+            .map(|f| {
+                let info = self.cache.remove(f)?;
+                if cached_probe_is_current(f, &info) {
+                    self.metrics.cache_hits.fetch_add(1, Relaxed);
+                    Some(info)
+                } else {
+                    self.metrics.cache_misses.fetch_add(1, Relaxed);
+                    None
+                }
+            })
+            .collect();
         let missing: Vec<String> = todo.iter().zip(&cached).filter(|(_, c)| c.is_none()).map(|(f, _)| f.clone()).collect();
-        let progress = ScanProgress::default();
-        let mut fresh = probe_all(self.probe.as_ref(), &missing, &progress).into_iter();
+        let progress = ScanProgress::with_metrics(self.metrics.clone());
+        let mut fresh = probe_all_with_cancel(self.probe.as_ref(), &missing, &progress, cancel).into_iter();
         let probed: Vec<Result<ProbeInfo, String>> =
             cached.into_iter().map(|c| c.map(Ok).unwrap_or_else(|| fresh.next().unwrap_or_else(|| Err("not probed".into())))).collect();
         crate::memory::release();
         for (path, info) in todo.into_iter().zip(probed) {
             if cancel.load(Relaxed) {
+                self.metrics.cancelled.store(true, Relaxed);
                 break;
             }
             self.done.fetch_add(1, Relaxed);
@@ -918,6 +1064,7 @@ impl ImportJob {
             // the XMP sidecar (or a raw's embedded XMP), read before copying: its capture time files
             // and names the copy when the file itself has none
             let raw = info.kind == MediaKind::Raw;
+            let sidecar_started = web_time::Instant::now();
             let packet = crate::sidecar::find_sidecar(&path, self.naming)
                 .and_then(|f| std::fs::read_to_string(f).ok())
                 .or_else(|| info.xmp.clone().filter(|_| raw));
@@ -928,9 +1075,14 @@ impl ImportJob {
                     None
                 }
             });
+            self.metrics.sidecar_ns.fetch_add(sidecar_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+            if sidecar.is_some() {
+                self.metrics.sidecars.fetch_add(1, Relaxed);
+            }
             if info.captured.is_none() {
                 info.captured = sidecar.as_ref().and_then(|sc| sc.captured.clone());
             }
+            let transfer_started = web_time::Instant::now();
             let mut placed = None;
             let stored = match (mode, &self.copy_root) {
                 (ImportMode::Copy | ImportMode::Move, Some(root))
@@ -958,6 +1110,8 @@ impl ImportJob {
                                 dst
                             }
                             Err(e) => {
+                                self.metrics.transfer_failures.fetch_add(1, Relaxed);
+                                self.metrics.transfer_ns.fetch_add(transfer_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
                                 out.items.push(PreparedItem::Failed(path, e));
                                 continue;
                             }
@@ -970,6 +1124,8 @@ impl ImportJob {
                         match copy_into(root, &path, &folders, name.as_deref(), info.content_hash.as_deref()) {
                             Ok(p) => p,
                             Err(e) => {
+                                self.metrics.transfer_failures.fetch_add(1, Relaxed);
+                                self.metrics.transfer_ns.fetch_add(transfer_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
                                 out.items.push(PreparedItem::Failed(path, e));
                                 continue;
                             }
@@ -983,6 +1139,10 @@ impl ImportJob {
                 }
                 _ => path.clone(),
             };
+            if matches!(mode, ImportMode::Copy | ImportMode::Move) {
+                self.metrics.transfers.fetch_add(1, Relaxed);
+                self.metrics.transfer_ns.fetch_add(transfer_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+            }
             if let Some(h) = &info.content_hash {
                 self.by_hash.insert(h.clone(), None);
             }
@@ -1242,6 +1402,7 @@ impl Session {
 #[cfg(test)]
 mod prepared_tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn revalidate_add_only_converts_matching_ready_item() {
@@ -1290,5 +1451,82 @@ mod prepared_tests {
         let files = expand_with_options(&[explicit.to_string_lossy().into()], None, &options);
         assert_eq!(files, vec![explicit.to_string_lossy().to_string()]);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cancelled_scan_does_not_start_probe_workers() {
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let calls_for_probe = calls.clone();
+        let probe: crate::media::FileProbe = std::sync::Arc::new(move |_| {
+            calls_for_probe.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(ProbeInfo { format: "JPEG".into(), file_size: 1, ..Default::default() })
+        });
+        let input = ScanInput {
+            probe: Some(probe),
+            skip: None,
+            by_path: HashMap::new(),
+            by_hash: HashMap::new(),
+            cache: HashMap::new(),
+            raw_jpeg_policy: Default::default(),
+            scan_options: Default::default(),
+        };
+        let progress = ScanProgress::default();
+        progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let out = scan_with(input, &["cancel-a.jpg".into(), "cancel-b.raw".into()], &progress);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(out.candidates.iter().all(|c| c.error.as_deref() == Some("not probed")));
+        assert!(progress.metrics.snapshot().cancelled);
+    }
+
+    #[test]
+    fn scan_keeps_order_and_content_dedup_after_partial_probe_failure() {
+        let probe: crate::media::FileProbe = std::sync::Arc::new(|path| {
+            if path.ends_with("bad.jpg") {
+                return Err("synthetic read failure".into());
+            }
+            let hash = if path.ends_with("same-1.jpg") || path.ends_with("same-2.jpg") { "same" } else { path };
+            Ok(ProbeInfo { format: "JPEG".into(), file_size: 4, content_hash: Some(hash.into()), ..Default::default() })
+        });
+        let input = ScanInput {
+            probe: Some(probe),
+            skip: None,
+            by_path: HashMap::new(),
+            by_hash: HashMap::new(),
+            cache: HashMap::new(),
+            raw_jpeg_policy: Default::default(),
+            scan_options: Default::default(),
+        };
+        let out = scan_with(input, &["same-1.jpg".into(), "bad.jpg".into(), "same-2.jpg".into()], &ScanProgress::default());
+        assert_eq!(out.candidates.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(), ["same-1.jpg", "bad.jpg", "same-2.jpg"]);
+        assert_eq!(out.candidates[1].error.as_deref(), Some("synthetic read failure"));
+        assert_eq!(out.candidates[2].duplicate.as_deref(), Some("content"));
+    }
+
+    #[test]
+    fn cache_stamp_reprobes_same_size_replacement() {
+        let path = std::env::temp_dir().join(format!("lightcraft-import-stamp-{}.jpg", std::process::id()));
+        std::fs::write(&path, b"abc").unwrap();
+        let path_s = path.to_string_lossy().to_string();
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let calls_for_probe = calls.clone();
+        let probe: crate::media::FileProbe = std::sync::Arc::new(move |_| {
+            calls_for_probe.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(ProbeInfo { format: "JPEG".into(), file_size: 3, source_stamp: Some(1), ..Default::default() })
+        });
+        let mut cache = HashMap::new();
+        cache.insert(path_s.clone(), ProbeInfo { format: "JPEG".into(), file_size: 3, source_stamp: Some(0), ..Default::default() });
+        let input = ScanInput {
+            probe: Some(probe),
+            skip: None,
+            by_path: HashMap::new(),
+            by_hash: HashMap::new(),
+            cache,
+            raw_jpeg_policy: Default::default(),
+            scan_options: Default::default(),
+        };
+        let out = scan_with(input, &[path_s], &ScanProgress::default());
+        let _ = std::fs::remove_file(path);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(out.candidates.len(), 1);
     }
 }

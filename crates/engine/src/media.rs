@@ -992,6 +992,9 @@ pub struct ProbeInfo {
     pub format: String,
     pub kind: MediaKind,
     pub file_size: u64,
+    /// Native filesystem modification stamp captured with the probe. Import review caches use
+    /// this with [`file_size`](Self::file_size) to reject a stale probe when a file is replaced.
+    pub source_stamp: Option<u128>,
     pub captured: Option<String>,
     pub meta: lightcraft_catalog::Meta,
     pub as_shot_wb: Option<(f64, f64)>,
