@@ -443,7 +443,7 @@ fn assert_sustained_preview_gestures(control: &rightkit_qa::control::Control, ev
     let exposure = baseline["develop"]["light"]["exposure"].clone();
     let undo = baseline["undo"].as_u64().expect("gesture baseline undo count required");
     control.eval(r#"return (() => {
-        const t = {frames:0, blank:0, unready:0, errors:[], imageErrors:[], blankSamples:[], filmBlank:0, filmUnready:0, phase:"setup", stopped:false};
+        const t = {samples:0, rafFrames:0, blank:0, unready:0, errors:[], imageErrors:[], blankSamples:[], filmBlank:0, filmUnready:0, phase:"setup", stopped:false};
         const read = () => {
             const images = [...document.querySelectorAll('img.stage-preview')].filter(e => {
                 const css = getComputedStyle(e), r = e.getBoundingClientRect();
@@ -457,9 +457,9 @@ fn assert_sustained_preview_gestures(control: &rightkit_qa::control::Control, ev
         t.observer.observe(document.querySelector('.stage-workspace'), {childList:true, subtree:true, attributes:true, attributeFilter:['src','style']});
         t.onError = e => { if (e.target instanceof HTMLImageElement && t.imageErrors.length < 200) t.imageErrors.push({at:performance.now(),src:e.target.src}); };
         document.querySelector('.stage-workspace').addEventListener('error', t.onError, true);
-        const tick = () => {
+        const sample = () => {
             if (t.stopped) return;
-            const images = read(); t.frames++;
+            const images = read(); t.samples++;
             const filmBounds=document.querySelector('.lc-filmstrip-scroll')?.getBoundingClientRect();
             const filmImages=[...document.querySelectorAll('img.lc-filmstrip-preview')].filter(e=>{const r=e.getBoundingClientRect();return filmBounds&&r.right>filmBounds.left&&r.left<filmBounds.right&&r.width>0&&r.height>0&&getComputedStyle(e).opacity!=='0';});
             if (!filmImages.length) t.filmBlank++;
@@ -475,9 +475,16 @@ fn assert_sustained_preview_gestures(control: &rightkit_qa::control::Control, ev
                     }),states:[...document.querySelectorAll('.stage-workspace [data-preview-state]')].map(e=>({state:e.dataset.previewState,text:e.textContent.slice(0,80)}))});
             }
             else if (!images.some(e => e.complete && e.naturalWidth > 0 && e.naturalHeight > 0)) t.unready++;
-            t.raf = requestAnimationFrame(tick);
+            t.timer = setTimeout(sample, 50);
         };
-        t.raf = requestAnimationFrame(tick); window.__lcPreviewStress = t; return true;
+        const rafTick = () => {
+            if (t.stopped) return;
+            t.rafFrames++;
+            t.raf = requestAnimationFrame(rafTick);
+        };
+        t.timer = setTimeout(sample, 0);
+        t.raf = requestAnimationFrame(rafTick);
+        window.__lcPreviewStress = t; return true;
     })();"#).expect("preview stress observer must initialize");
     let mut rounds = Vec::new();
     let result = catch_unwind(AssertUnwindSafe(|| {
@@ -529,10 +536,10 @@ fn assert_sustained_preview_gestures(control: &rightkit_qa::control::Control, ev
         .eval(
             r#"return (() => {
         const t = window.__lcPreviewStress; if (!t) return null;
-        t.stopped = true; t.observer.disconnect(); cancelAnimationFrame(t.raf);
+        t.stopped = true; t.observer.disconnect(); clearTimeout(t.timer); cancelAnimationFrame(t.raf);
         document.querySelector('.stage-workspace').removeEventListener('error',t.onError,true);
         delete window.__lcPreviewStress;
-        return {frames:t.frames,blank:t.blank,unready:t.unready,errors:t.errors,imageErrors:t.imageErrors,blankSamples:t.blankSamples,filmBlank:t.filmBlank,filmUnready:t.filmUnready};
+        return {samples:t.samples,rafFrames:t.rafFrames,blank:t.blank,unready:t.unready,errors:t.errors,imageErrors:t.imageErrors,blankSamples:t.blankSamples,filmBlank:t.filmBlank,filmUnready:t.filmUnready};
     })();"#,
         )
         .expect("preview stress observer cleanup must execute");
@@ -542,7 +549,7 @@ fn assert_sustained_preview_gestures(control: &rightkit_qa::control::Control, ev
         resume_unwind(payload);
     }
     assert_eq!(rounds.len(), 8, "all fast & slow sustained gestures must execute");
-    assert!(trace["frames"].as_u64().is_some_and(|count| count >= 10), "frame observer must run: {trace}");
+    assert!(trace["samples"].as_u64().is_some_and(|count| count >= 10), "timer-driven preview samples must run: {trace}");
     assert_eq!(trace["blank"].as_u64(), Some(0), "mounted pixels must never disappear during same-photo editing: {trace}");
     assert_eq!(trace["unready"].as_u64(), Some(0), "presented pixels must stay decoded during handoff: {trace}");
     assert_eq!(trace["filmBlank"].as_u64(), Some(0), "filmstrip pixels must persist during same-photo editing: {trace}");
@@ -581,6 +588,21 @@ fn set_native_viewport(control: &rightkit_qa::control::Control, width: u64, heig
     eprintln!("[qa] viewport native={result}; DOM={dom_size}");
     let settled = wait_for_dom(control, &format!("return window.innerWidth === {width} && window.innerHeight === {height};"));
     assert_eq!(settled.as_bool(), Some(true), "WebView inner size must match requested QA viewport");
+    let layout = format!(
+        r#"return (() => {{
+            const viewport = {{ width: window.innerWidth, height: window.innerHeight }};
+            const rect = (selector) => {{ const node = document.querySelector(selector); if (!node) return null; const r = node.getBoundingClientRect(); return {{ x:r.x, y:r.y, width:r.width, height:r.height, bottom:r.bottom, display:getComputedStyle(node).display }}; }};
+            const outer = ['html', 'body', '#root', '.rk-shell'].map(rect);
+            const body = rect('.rk-body');
+            const plane = rect('.rk-plane');
+            const content = rect('.lc-content');
+            const exact = (r) => r && r.display !== 'none' && Math.abs(r.width - viewport.width) <= 1 && Math.abs(r.height - viewport.height) <= 1 && Math.abs(r.bottom - viewport.height) <= 1;
+            const child = (r) => r && r.display !== 'none' && r.width >= 1 && r.height >= 1 && Math.abs(r.bottom - viewport.height) <= 1;
+            return outer.every(exact) && child(body) && child(plane) && child(content);
+        }})();"#,
+    );
+    let layout_settled = wait_for_dom(control, &layout);
+    assert_eq!(layout_settled.as_bool(), Some(true), "native viewport layout must settle after resize");
     assert_native_window_hidden(control);
     result
 }
