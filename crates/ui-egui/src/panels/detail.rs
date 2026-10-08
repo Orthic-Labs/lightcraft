@@ -200,6 +200,15 @@ fn animated_rect(ctx: &egui::Context, anim: &mut bool, target: Rect) -> Rect {
     r
 }
 
+/// Return the loupe request dimensions for its final on-screen size.
+///
+/// Interactive requests switch the pipeline to Draft quality, but keep these dimensions so a
+/// drag does not replace a full-resolution loupe with a visibly smaller image.
+fn loupe_request_dimensions(target: Rect, ppp: f32, max_edge: f32, aspect: f32, _interactive: bool) -> (usize, usize) {
+    let want = (target.width().max(target.height()) * ppp).min(max_edge) as usize;
+    if aspect >= 1.0 { (want, (want as f32 / aspect) as usize) } else { ((want as f32 * aspect) as usize, want) }
+}
+
 pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let full = ui.max_rect();
@@ -281,10 +290,8 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     app.image_rect = Some(img_rect);
     // request renders: the loupe at display resolution (drafts during drags)
     let interacting = app.session.interaction.is_some();
-    let scale = if interacting { 0.6 } else { 1.0 };
     // render at the final size: a click-zoom animation only changes how the result is drawn
-    let want = (target_rect.width().max(target_rect.height()) * ppp * scale).min(max_edge) as usize;
-    let (rw, rh) = if aspect >= 1.0 { (want, (want as f32 / aspect) as usize) } else { ((want as f32 * aspect) as usize, want) };
+    let (rw, rh) = loupe_request_dimensions(target_rect, ppp, max_edge, aspect, interacting);
     if let Some(job) = app.session.loupe_job(id, rw.max(8), rh.max(8), !crop_tool) {
         let job = if interacting { job.draft() } else { job };
         let job = job.with_overlay(view_overlay(app, &d)).with_proof(app.ui.soft_proof.then_some(app.ui.proof));
@@ -1698,9 +1705,12 @@ fn film_badges(p: &egui::Painter, t: &Tokens, fr: Rect, ph: &lightcraft_catalog:
 
 #[cfg(test)]
 mod preview_geometry_tests {
-    use super::{fit_rect, fit_texture_rect};
+    use std::sync::Arc;
+
+    use super::{fit_rect, fit_texture_rect, loupe_request_dimensions};
     use crate::state::Zoom;
     use egui::{Rect, pos2, vec2};
+    use lightcraft_catalog::Op;
 
     #[test]
     fn portrait_preview_keeps_its_ratio_inside_a_landscape_frame() {
@@ -1720,6 +1730,40 @@ mod preview_geometry_tests {
         assert!((image.width() / image.height() - 0.5).abs() < 1e-6);
         assert_eq!(image.size(), vec2(100.0, 200.0));
         assert_eq!(image.center(), area.center());
+    }
+
+    #[test]
+    fn interactive_loupe_request_keeps_full_display_dimensions() {
+        let target = Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 675.0));
+        let full = loupe_request_dimensions(target, 2.0, 8192.0, 16.0 / 9.0, false);
+        // Draft quality is selected separately on RenderJob; request dimensions stay unchanged.
+        let draft = loupe_request_dimensions(target, 2.0, 8192.0, 16.0 / 9.0, true);
+        assert_eq!(full, (2400, 1350));
+        assert_eq!(draft, full);
+
+        let mut session = lightcraft_engine::Session::with_demo();
+        let id = session.active().expect("demo session has active photo");
+        let job = session.loupe_job(id, full.0, full.1, true).expect("loupe job");
+        let draft_job = job.clone().draft();
+        assert_eq!((draft_job.request.max_w, draft_job.request.max_h), full);
+        assert_ne!(draft_job.key, job.key, "draft quality keeps separate cache identity");
+    }
+
+    #[test]
+    fn latest_develop_revision_changes_loupe_key_without_changing_dimensions() {
+        let mut session = lightcraft_engine::Session::with_demo();
+        let id = session.active().expect("demo session has active photo");
+        let size = (960, 540);
+        let first = session.loupe_job(id, size.0, size.1, true).expect("first loupe job");
+        let mut settings = (*session.catalog.photo(id).expect("demo photo").develop).clone();
+        settings.light.exposure = 1.0;
+        session
+            .catalog
+            .apply(Op::SetDevelop { id, settings: Arc::new(settings), label: "preview drag".into(), edited: None })
+            .expect("develop revision applies");
+        let latest = session.loupe_job(id, size.0, size.1, true).expect("latest loupe job");
+        assert_eq!((first.request.max_w, first.request.max_h), (latest.request.max_w, latest.request.max_h));
+        assert_ne!(first.key, latest.key, "latest develop revision must replace prior loupe request");
     }
 }
 
