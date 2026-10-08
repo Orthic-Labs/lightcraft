@@ -2,11 +2,15 @@
 
 mod fixture_inputs;
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Cursor;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Mutex, OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -41,16 +45,26 @@ fn qa_harness(binary: &Path, evidence: &Path, revision: &str, platform: &str, ar
         .expect("QA binary identity must be hashable")
 }
 
-fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, _catalog: &Path) -> (rightkit_qa::control::Control, PathBuf) {
-    let cache = scenario.dir().join("control-workspace");
+fn scenario_workspace(scenario: &rightkit_qa::harness::Scenario) -> rightkit_qa::workspace::QaWorkspace {
+    static WORKSPACES: OnceLock<Mutex<HashMap<PathBuf, rightkit_qa::workspace::QaWorkspace>>> = OnceLock::new();
+    let workspaces = WORKSPACES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut workspaces = workspaces.lock().expect("scenario workspace cache must remain usable");
+    if let Some(workspace) = workspaces.get(scenario.dir()) {
+        return workspace.clone();
+    }
     static NEXT_RUN: AtomicU64 = AtomicU64::new(0);
     let sequence = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
     let run_id = format!("lightcraft-{}-{}-{}-{sequence}", scenario.name(), std::process::id(), timestamp);
-    let mut ws = workspace::create(&cache, Some(&run_id), "lightcraft").expect("isolated RightKit workspace must initialize");
-    let data = scenario.dir().join("app-data");
-    fs::create_dir_all(&data).expect("stable scenario app data directory must initialize");
-    ws.env.insert("RIGHTKIT_QA_DATA_DIR".into(), data.to_string_lossy().into_owned());
+    let workspace = workspace::create(&scenario.dir().join("control-workspace"), Some(&run_id), "lightcraft")
+        .expect("isolated RightKit workspace must initialize");
+    workspaces.insert(scenario.dir().to_path_buf(), workspace.clone());
+    workspace
+}
+
+fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, _catalog: &Path) -> (rightkit_qa::control::Control, PathBuf) {
+    let ws = scenario_workspace(scenario);
+    let data = ws.data_dir.clone();
     let env = ws
         .env
         .iter()
