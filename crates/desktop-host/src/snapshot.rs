@@ -282,6 +282,7 @@ pub fn snapshot(
         "viewGeneration": generation,
         "total": visible.len(),
         "active": active,
+        "activeIndex": active.and_then(|id| visible.iter().position(|photo| photo.0 == id)),
         "selection": selection,
         "source": serde_json::to_value(session.source).unwrap_or(Value::Null),
         "filter": serde_json::to_value(&session.filter).unwrap_or(Value::Null),

@@ -92,9 +92,10 @@
 .lc-library-error { position: absolute; right: 14px; bottom: 62px; z-index: 10; padding: 8px 10px; border: 1px solid #e47171; border-radius: 6px; background: #481f26; color: #ffd9d9; font-size: 12px; }
 .lc-library-empty { display: grid; height: 100%; place-items: center; color: var(--lc-muted); }
 .lc-filmstrip { min-height: 112px; position: relative; border-top: 1px solid var(--lc-border); background: var(--lc-chrome, #fff); color: inherit; }
-.lc-filmstrip-scroll { height: 112px; overflow-x: auto; overflow-y: hidden; }
+.lc-filmstrip-scroll { height: 112px; overflow-x: auto; overflow-y: hidden; scroll-behavior: smooth; scrollbar-color: color-mix(in srgb, currentColor 35%, transparent) transparent; }
 .lc-filmstrip-spacer { height: 100%; position: relative; }
 .lc-filmstrip-window { display: flex; gap: 8px; height: 100%; position: absolute; top: 0; padding: 8px 0; }
-.lc-filmstrip-item { width: 124px; height: 96px; flex: 0 0 124px; padding: 0; border: 2px solid transparent; border-radius: 5px; background: #22252a; color: inherit; cursor: pointer; position: relative; }
+.lc-filmstrip-item { width: 124px; height: 96px; flex: 0 0 124px; padding: 0; border: 2px solid transparent; border-radius: 5px; background: #22252a; color: inherit; cursor: pointer; position: relative; scroll-snap-align: center; }
 .lc-filmstrip-item:hover { border-color: #fff8; }.lc-filmstrip-item.is-active { border-color: var(--lc-accent, #0165dd); box-shadow: 0 0 0 1px var(--lc-accent, #0165dd); }.lc-filmstrip-image { display: block; width: 100%; height: 72px; overflow: hidden; }.lc-filmstrip-meta { display: flex; justify-content: space-between; padding: 3px 5px; color: #dce1e8; font-size: 10px; }.lc-filmstrip-meta span:first-child { color: #71c6fb; }.lc-filmstrip-error { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); color: #ffb0b0; font-size: 11px; }
+@media (prefers-reduced-motion: reduce) { .lc-filmstrip-scroll { scroll-behavior: auto; } }
 @media (max-width: 900px) { .lc-library-header { align-items: flex-start; flex-direction: column; padding-left: 52px; }.lc-library-actions { width: 100%; justify-content: flex-start; }.lc-filter-panel { position: static; width: 100%; margin-top: 2px; border-radius: 7px; }.lc-library-footer { align-items: flex-start; flex-direction: column; }.lc-footer-actions { width: 100%; }.lc-filter-save { margin-left: 0; } }

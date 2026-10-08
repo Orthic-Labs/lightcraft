@@ -7,7 +7,8 @@
 .multi-view-actions button { border: 1px solid var(--stage-border); border-radius: 4px; color: var(--stage-muted); background: transparent; padding: 4px 7px; cursor: pointer; font-size: 11px; }
 .multi-view-actions button:hover:not(:disabled) { color: var(--stage-text); background: #ffffff18; }
 .multi-view-actions button:disabled { cursor: not-allowed; opacity: .45; }
-.stage-route-tabs { flex-wrap: wrap; }
+.stage-route-tabs { flex-wrap: nowrap; min-width: 0; overflow-x: auto; }
+.stage-route-tabs button { flex-shrink: 0; white-space: nowrap; }
 .stage-route-tabs button, .stage-footer button, .mask-toolbar button { border: 0; border-radius: 4px; color: var(--stage-muted); background: transparent; padding: 6px 8px; cursor: pointer; }
 .stage-route-tabs button:hover, .stage-footer button:hover, .mask-toolbar button:hover { color: var(--stage-text); background: #ffffff18; }
 .stage-route-tabs button.selected, .mask-toolbar button.selected, .stage-footer button[aria-pressed=true] { color: var(--stage-text); background: #ffffff20; }
@@ -15,7 +16,8 @@
 .stage-photo-title { margin-left: auto; white-space: nowrap; overflow: hidden; }
 .stage-photo-title strong { overflow: hidden; text-overflow: ellipsis; }
 .stage-photo-title span { color: var(--stage-muted); }
-.stage-status { min-width: 0; color: var(--stage-muted); font-size: 11px; }
+.stage-status { min-width: 0; max-width: 180px; overflow: hidden; white-space: nowrap; color: var(--stage-muted); font-size: 11px; }
+.stage-status > span { overflow: hidden; text-overflow: ellipsis; }
 .stage-error { color: #ff8d8d; }
 .stage-loading { color: #ffd37a; }
 .stage-body { display: flex; flex: 1; min-height: 0; position: relative; }

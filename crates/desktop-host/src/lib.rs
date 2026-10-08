@@ -158,6 +158,14 @@ mod tests {
         };
         assert_eq!(slice.get("generation").and_then(Value::as_u64), Some(generation));
         assert_eq!(slice.get("photos").and_then(Value::as_array).map(Vec::len), Some(2));
+        let last = host.view_slice(Some(generation), 2, 1).expect("last photo slice must exist");
+        let id = last["photos"][0]["id"].as_u64().expect("last photo id must exist");
+        assert!(host.run("library.select".into(), json!({"ids": [id], "active": id})).is_ok());
+        let selected = host.snapshot().expect("selected snapshot must exist");
+        assert_eq!(selected["activeIndex"].as_u64(), Some(2), "filmstrip position follows filtered/sorted view, not photo id");
+        assert!(host.run("library.filter".into(), json!({"text": "__no_matching_demo_photo__"})).is_ok());
+        let filtered = host.snapshot().expect("filtered snapshot must exist");
+        assert!(filtered["activeIndex"].is_null(), "a photo outside current source/filter has no filmstrip position");
         assert!(host.persist().is_ok());
         assert!(host.run("library.save".into(), json!({})).is_ok());
         assert!(host.shutdown().is_ok());
