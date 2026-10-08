@@ -156,12 +156,17 @@ fn assert_library_header_contrast(control: &rightkit_qa::control::Control, mode:
 fn click_dom(control: &rightkit_qa::control::Control, selector: &str, message: &str) {
     let geometry = control
         .eval(&format!(
-            "return (() => {{ const node = document.querySelector({selector:?}); if (!node) return null; const rect = node.getBoundingClientRect(); return {{x: rect.x + rect.width / 2, y: rect.y + rect.height / 2}}; }})();"
+            "return (() => {{ const node = document.querySelector({selector:?}); if (!node) return null; const rect = node.getBoundingClientRect(); const x = rect.x + rect.width / 2; const y = rect.y + rect.height / 2; const hit = document.elementFromPoint(x, y); const describe = (value) => value ? {{ tag: value.tagName, aria: value.getAttribute('aria-label'), title: value.getAttribute('title'), className: value.className }} : null; window.__rkClickDiagnostic = []; const capture = (event) => {{ const target = event.target && event.target.closest ? event.target.closest('button,[role=button]') : event.target; if (window.__rkClickDiagnostic.length < 64) window.__rkClickDiagnostic.push({{ type: event.type, isTrusted: event.isTrusted, clientX: event.clientX, clientY: event.clientY, target: describe(target), selected: target?.classList?.contains('selected') === true }}); }}; window.__rkClickDiagnosticCleanup = () => {{ ['pointerdown', 'pointerup', 'click'].forEach((type) => document.removeEventListener(type, capture, true)); }}; ['pointerdown', 'pointerup', 'click'].forEach((type) => document.addEventListener(type, capture, true)); return {{ x, y, rect: {{ x: rect.x, y: rect.y, width: rect.width, height: rect.height }}, target: describe(node), hit: describe(hit), viewport: {{ width: window.innerWidth, height: window.innerHeight, scale: window.devicePixelRatio }} }}; }})();"
         ))
         .expect("DOM click geometry query must execute");
     let x = geometry["x"].as_f64().expect("DOM click x must be numeric");
     let y = geometry["y"].as_f64().expect("DOM click y must be numeric");
-    control.click(x, y, "left", 1).expect(message);
+    let result = control.click(x, y, "left", 1);
+    let events = control
+        .eval("return (() => { const events = window.__rkClickDiagnostic || []; if (window.__rkClickDiagnosticCleanup) window.__rkClickDiagnosticCleanup(); delete window.__rkClickDiagnostic; delete window.__rkClickDiagnosticCleanup; return events; })();")
+        .unwrap_or(Value::Null);
+    eprintln!("[qa] click selector={selector:?} geometry={geometry} events={events}");
+    result.expect(message);
 }
 
 fn set_native_viewport(control: &rightkit_qa::control::Control, width: u64, height: u64) -> Value {
