@@ -23,6 +23,7 @@ const MAX_PENDING: usize = 96;
 const MAX_SLOTS: usize = 256;
 const MAX_THUMBS_PER_PHOTO: usize = 4;
 const MAX_THUMBS: usize = 512;
+const MAX_THUMB_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SEQUENCE: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -89,7 +90,7 @@ struct EncodedPreview {
 
 struct CachedThumb {
     key: u64,
-    handle: String,
+    bytes: Arc<[u8]>,
     width: u32,
     height: u32,
     histogram: Value,
@@ -107,6 +108,7 @@ pub struct Renderer {
     stages: HashMap<SlotId, Arc<StageCache>>,
     thumbs: HashMap<u64, Vec<CachedThumb>>,
     thumb_count: usize,
+    thumb_bytes: usize,
 }
 
 impl Renderer {
@@ -123,6 +125,7 @@ impl Renderer {
             stages: HashMap::new(),
             thumbs: HashMap::new(),
             thumb_count: 0,
+            thumb_bytes: 0,
         }
     }
 
@@ -257,7 +260,8 @@ impl Renderer {
                     continue;
                 }
             };
-            let handle = match self.store.insert(Arc::<[u8]>::from(payload.bytes), "image/png") {
+            let bytes = Arc::<[u8]>::from(payload.bytes);
+            let handle = match self.store.insert(bytes.clone(), "image/png") {
                 Ok(handle) => handle,
                 Err(error) => {
                     self.failed.insert((slot, result.key), error.clone());
@@ -282,7 +286,7 @@ impl Renderer {
             };
             self.failed.retain(|(candidate, key), _| *candidate != slot || *key != result.key);
             if self.is_thumb_slot(&pending.request.slot) {
-                self.cache_thumb(pending.request.photo_id, CachedThumb { key: result.key, handle, width, height, histogram: payload.histogram });
+                self.cache_thumb(pending.request.photo_id, CachedThumb { key: result.key, bytes, width, height, histogram: payload.histogram });
             }
             let _ = pending.reply.send(Ok(descriptor));
         }
@@ -407,18 +411,14 @@ impl Renderer {
     }
 
     fn cached_thumb(&mut self, photo: u64, key: u64, request: &PreviewRequest) -> Option<PreviewDescriptor> {
-        let store = self.store.clone();
         let entries = self.thumbs.get_mut(&photo)?;
         let index = entries.iter().position(|entry| entry.key == key && entry.width == request.width && entry.height == request.height)?;
-        let (handle, width, height, histogram) = {
+        let (bytes, width, height, histogram) = {
             let entry = entries.get(index)?;
-            (entry.handle.clone(), entry.width, entry.height, entry.histogram.clone())
+            (entry.bytes.clone(), entry.width, entry.height, entry.histogram.clone())
         };
-        if store.get(&handle).is_none() {
-            entries.remove(index);
-            self.thumb_count = self.thumb_count.saturating_sub(1);
-            return None;
-        }
+        // Cache entries own shared bytes, while every response receives its own opaque lease.
+        let handle = self.store.insert(bytes, "image/png").ok()?;
         Some(PreviewDescriptor {
             handle,
             photo_id: request.photo_id,
@@ -435,26 +435,43 @@ impl Renderer {
     }
 
     fn cache_thumb(&mut self, photo: u64, entry: CachedThumb) {
+        let entry_bytes = entry.bytes.len();
+        if entry_bytes > MAX_THUMB_BYTES {
+            return;
+        }
+        let current_thumb_bytes = self.thumb_bytes;
         let entries = self.thumbs.entry(photo).or_default();
         if let Some(old) = entries.iter_mut().find(|old| old.key == entry.key) {
+            let old_bytes = old.bytes.len();
+            if current_thumb_bytes.saturating_sub(old_bytes).saturating_add(entry_bytes) > MAX_THUMB_BYTES {
+                return;
+            }
             *old = entry;
+            self.thumb_bytes = self.thumb_bytes.saturating_sub(old_bytes).saturating_add(entry_bytes);
             return;
         }
         entries.push(entry);
         self.thumb_count += 1;
+        self.thumb_bytes = self.thumb_bytes.saturating_add(entry_bytes);
         while entries.len() > MAX_THUMBS_PER_PHOTO {
-            entries.remove(0);
+            if let Some(removed) = entries.first().map(|item| item.bytes.len()) {
+                entries.remove(0);
+                self.thumb_bytes = self.thumb_bytes.saturating_sub(removed);
+            }
             self.thumb_count = self.thumb_count.saturating_sub(1);
         }
-        while self.thumb_count > MAX_THUMBS {
+        while self.thumb_count > MAX_THUMBS || self.thumb_bytes > MAX_THUMB_BYTES {
             let Some(photo_id) = self.thumbs.keys().next().copied() else { break };
             let remove_photo = if let Some(items) = self.thumbs.get_mut(&photo_id) {
-                let had = items.pop().is_some();
-                had && items.is_empty()
+                let removed = items.pop();
+                if let Some(removed) = removed {
+                    self.thumb_count = self.thumb_count.saturating_sub(1);
+                    self.thumb_bytes = self.thumb_bytes.saturating_sub(removed.bytes.len());
+                }
+                items.is_empty()
             } else {
                 false
             };
-            self.thumb_count = self.thumb_count.saturating_sub(1);
             if remove_photo {
                 self.thumbs.remove(&photo_id);
             }
@@ -562,6 +579,44 @@ mod tests {
     fn priorities_keep_interactive_work_ahead_of_prefetch() {
         assert!(priority("main") > priority("thumb:1"));
         assert!(priority("thumb:1") > priority("prefetch:1"));
+    }
+
+    #[test]
+    fn cached_thumb_mints_independent_handles_for_each_response() {
+        let store = PreviewStore::new(8, 1024, std::time::Duration::from_secs(30));
+        let mut renderer = Renderer::new(store.clone());
+        renderer.cache_thumb(7, CachedThumb { key: 11, bytes: Arc::<[u8]>::from(vec![1, 2, 3]), width: 16, height: 16, histogram: Value::Null });
+        let request = PreviewRequest {
+            photo_id: 7,
+            slot: "thumb:one".into(),
+            view_generation: 1,
+            width: 16,
+            height: 16,
+            quality: PreviewQuality::Draft,
+            before: false,
+            sequence: 1,
+        };
+        let first_result = renderer.cached_thumb(7, 11, &request);
+        assert!(first_result.is_some(), "cached thumb should mint first lease");
+        let first = match first_result {
+            Some(value) => value,
+            None => {
+                assert!(false, "cached thumb should mint first lease");
+                return;
+            }
+        };
+        let second_result = renderer.cached_thumb(7, 11, &PreviewRequest { sequence: 2, ..request });
+        assert!(second_result.is_some(), "cached thumb should mint second lease");
+        let second = match second_result {
+            Some(value) => value,
+            None => {
+                assert!(false, "cached thumb should mint second lease");
+                return;
+            }
+        };
+        assert_ne!(first.handle, second.handle);
+        assert!(store.acknowledge(&first.handle));
+        assert!(store.get(&second.handle).is_some());
     }
 
     #[test]

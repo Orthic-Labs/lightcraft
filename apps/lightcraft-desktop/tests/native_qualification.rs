@@ -322,10 +322,129 @@ fn assert_workspace_design(control: &rightkit_qa::control::Control) {
     assert_eq!(design["tools"], json!(["Edit", "Crop", "Heal", "Mask", "Presets", "Info"]));
     assert_eq!(design["duplicateTools"].as_u64(), Some(0));
     assert_eq!(design["overflow"].as_bool(), Some(false));
+    assert_workspace_surfaces_unclipped(control);
     if design["footerRows"].as_u64().unwrap_or(0) > 0 {
         assert_eq!(design["footerRows"].as_u64(), Some(1), "stage footer must stay in one row: {design}");
         assert_eq!(design["comparisonLabel"].as_bool(), Some(true));
     }
+}
+
+fn assert_workspace_surfaces_unclipped(control: &rightkit_qa::control::Control) {
+    let bounds = control.eval(r#"return (() => {
+        const side = document.querySelector('.rk-side')?.getBoundingClientRect();
+        const foot = document.querySelector('.rk-side__foot')?.getBoundingClientRect();
+        const scroll = document.querySelector('.lc-filmstrip-scroll');
+        if (!side || !foot || !scroll) return null;
+        const viewport = scroll.getBoundingClientRect();
+        const contentBottom = viewport.top + scroll.clientHeight;
+        const items = [...scroll.querySelectorAll('.lc-filmstrip-item')].map(e => e.getBoundingClientRect()).filter(r => r.right > viewport.left + 4 && r.left < viewport.right - 4);
+        return { footerGap: side.bottom - foot.bottom, visibleItems: items.length,
+            clippedItems: items.filter(r => r.top - 4 < viewport.top - 1 || r.bottom + 4 > contentBottom + 1).length,
+            viewport: { top: viewport.top, contentBottom, bottom: viewport.bottom },
+            itemBounds: items.map(r => ({ top: r.top, bottom: r.bottom })) };
+    })();"#).expect("sidebar footer & filmstrip clipping must be measurable");
+    eprintln!("[qa] unclipped workspace surfaces: {bounds}");
+    assert!(bounds["footerGap"].as_f64().is_some_and(|gap| gap.abs() <= 1.0), "brand footer must anchor to sidebar bottom: {bounds}");
+    assert!(bounds["visibleItems"].as_u64().is_some_and(|count| count > 0), "filmstrip must show actual thumbnails: {bounds}");
+    assert_eq!(bounds["clippedItems"].as_u64(), Some(0), "thumbnail & selection outline must fit above native scrollbar: {bounds}");
+}
+
+fn assert_sustained_preview_gestures(control: &rightkit_qa::control::Control, evidence: &Path) {
+    wait_for_rendered_preview(control, "img.stage-preview", None);
+    let baseline = snapshot(control);
+    let exposure = baseline["develop"]["light"]["exposure"].clone();
+    let undo = baseline["undo"].as_u64().expect("gesture baseline undo count required");
+    control.eval(r#"return (() => {
+        const t = {frames:0, blank:0, unready:0, errors:[], imageErrors:[], stopped:false};
+        const read = () => {
+            const images = [...document.querySelectorAll('img.stage-preview')].filter(e => {
+                const css = getComputedStyle(e), r = e.getBoundingClientRect();
+                return css.opacity !== '0' && css.visibility !== 'hidden' && css.display !== 'none' && r.width > 0 && r.height > 0;
+            });
+            const errors = [...document.querySelectorAll('.stage-workspace [data-preview-state="error"]')].map(e => e.textContent);
+            if (errors.length && t.errors.length < 200) t.errors.push({at:performance.now(), errors});
+            return images;
+        };
+        t.observer = new MutationObserver(read);
+        t.observer.observe(document.querySelector('.stage-workspace'), {childList:true, subtree:true, attributes:true, attributeFilter:['src','style']});
+        t.onError = e => { if (e.target instanceof HTMLImageElement && t.imageErrors.length < 200) t.imageErrors.push({at:performance.now(),src:e.target.src}); };
+        document.querySelector('.stage-workspace').addEventListener('error', t.onError, true);
+        const tick = () => {
+            if (t.stopped) return;
+            const images = read(); t.frames++;
+            if (!images.length) t.blank++;
+            else if (!images.some(e => e.complete && e.naturalWidth > 0 && e.naturalHeight > 0)) t.unready++;
+            t.raf = requestAnimationFrame(tick);
+        };
+        t.raf = requestAnimationFrame(tick); window.__lcPreviewStress = t; return true;
+    })();"#).expect("preview stress observer must initialize");
+    let mut rounds = Vec::new();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        for index in 0..8 {
+            let slider = control
+                .eval(
+                    r#"return (() => {
+                const e = document.querySelector('input[aria-label="Exposure"]');
+                e.scrollIntoView({block:'center'}); const r = e.getBoundingClientRect();
+                return {x:r.x,y:r.y+r.height/2,width:r.width,min:+e.min,max:+e.max,value:+e.value};
+            })();"#,
+                )
+                .expect("sustained slider geometry must execute");
+            let x = slider["x"].as_f64().expect("slider x required");
+            let y = slider["y"].as_f64().expect("slider y required");
+            let width = slider["width"].as_f64().expect("slider width required");
+            let min = slider["min"].as_f64().expect("slider min required");
+            let max = slider["max"].as_f64().expect("slider max required");
+            let value = slider["value"].as_f64().expect("slider value required");
+            assert!(max > min, "slider range must be nonempty");
+            let start = ((value - min) / (max - min)).clamp(0.0, 1.0);
+            let preferred = if index % 2 == 0 { 0.7_f64 } else { 0.3_f64 };
+            let target = if (preferred - start).abs() < 0.1 { 1.0 - preferred } else { preferred };
+            let steps = if index < 4 { 48 } else { 96 };
+            let prior = wait_for_rendered_preview(control, "img.stage-preview", None);
+            control.drag((x + width * start, y), (x + width * target, y), steps).expect("sustained pointer drag must execute");
+            let edited = wait_for_snapshot(
+                control,
+                |v| v["undo"].as_u64() == Some(undo + 1) && v["develop"]["light"]["exposure"] != exposure,
+                "sustained pointer drag must settle as one undo step",
+            );
+            let rendered = wait_for_rendered_preview(control, "img.stage-preview", prior["src"].as_str());
+            rounds.push(
+                json!({"index":index,"steps":steps,"undo":edited["undo"],"exposure":edited["develop"]["light"]["exposure"],"decoded":rendered}),
+            );
+            run(control, "edit.undo", json!({}));
+            wait_for_snapshot(
+                control,
+                |v| v["undo"].as_u64() == Some(undo) && v["develop"]["light"]["exposure"] == exposure,
+                "stress undo must restore baseline",
+            );
+            wait_for_rendered_preview(control, "img.stage-preview", rendered["src"].as_str());
+            sleep(Duration::from_millis(300));
+        }
+    }));
+    let trace = control
+        .eval(
+            r#"return (() => {
+        const t = window.__lcPreviewStress; if (!t) return null;
+        t.stopped = true; t.observer.disconnect(); cancelAnimationFrame(t.raf);
+        document.querySelector('.stage-workspace').removeEventListener('error',t.onError,true);
+        delete window.__lcPreviewStress;
+        return {frames:t.frames,blank:t.blank,unready:t.unready,errors:t.errors,imageErrors:t.imageErrors};
+    })();"#,
+        )
+        .expect("preview stress observer cleanup must execute");
+    let receipt = json!({"baseline":baseline,"rounds":rounds,"trace":trace,"restored":snapshot(control)["develop"]["light"]["exposure"] == exposure});
+    fs::write(evidence, serde_json::to_vec_pretty(&receipt).expect("stress receipt must serialize")).expect("stress receipt must be saved");
+    if let Err(payload) = result {
+        resume_unwind(payload);
+    }
+    assert_eq!(rounds.len(), 8, "all fast & slow sustained gestures must execute");
+    assert!(trace["frames"].as_u64().is_some_and(|count| count >= 10), "frame observer must run: {trace}");
+    assert_eq!(trace["blank"].as_u64(), Some(0), "mounted pixels must never disappear during same-photo editing: {trace}");
+    assert_eq!(trace["unready"].as_u64(), Some(0), "presented pixels must stay decoded during handoff: {trace}");
+    assert_eq!(trace["errors"].as_array().map(Vec::len), Some(0), "no transient Retry/error banners during valid drag: {trace}");
+    assert_eq!(trace["imageErrors"].as_array().map(Vec::len), Some(0), "no transport decode errors during valid drag: {trace}");
+    assert_eq!(receipt["restored"].as_bool(), Some(true), "stress must restore baseline edits");
 }
 
 fn assert_primary_editing_usable(control: &rightkit_qa::control::Control) {
@@ -1448,7 +1567,9 @@ fn native_hidden_control_journeys() {
                         assert_eq!(fresh["photos"].as_array().map(Vec::len), Some(512), "fresh tail page must remain capped at 512 photos");
                     }
                     "gesture" => {
-                        let imported = import_file(control, &inputs.png);
+                        let gesture_photo = scenario.dir().join("gesture-photo.png");
+                        fs::write(&gesture_photo, fixture_inputs::procedural_png(2048, 1365).expect("large gesture fixture must encode")).expect("large gesture fixture must be saved");
+                        let imported = import_file(control, &gesture_photo);
                         let before = imported["undo"].as_u64().expect("snapshot undo count required");
                         control.key("D").expect("develop route key must execute");
                         wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
@@ -1630,6 +1751,7 @@ fn native_hidden_control_journeys() {
                         if let Err(payload) = keyboard_result {
                             resume_unwind(payload);
                         }
+                        assert_sustained_preview_gestures(control, &scenario.dir().join("gesture-preview-stress.json"));
                         control.move_to(300.0, 300.0).expect("pointer move must execute");
                         control.drag((300.0, 300.0), (420.0, 320.0), 8).expect("pointer drag must execute");
                         control.wheel(420.0, 320.0, 0.0, -120.0).expect("wheel must execute");

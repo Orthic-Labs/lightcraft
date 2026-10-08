@@ -68,8 +68,13 @@ impl PreviewStore {
         }
         let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         self.prune_locked(&mut inner, Instant::now());
-        let handle = format!("lc-preview-{:016x}", inner.next);
-        inner.next = inner.next.wrapping_add(1).max(1);
+        let handle = loop {
+            let candidate = format!("lc-preview-{:016x}", inner.next);
+            inner.next = inner.next.wrapping_add(1).max(1);
+            if !inner.entries.iter().any(|entry| entry.handle == candidate) {
+                break candidate;
+            }
+        };
         let size = bytes.len();
         inner.entries.push(Entry { handle: handle.clone(), bytes, content_type, used: Instant::now() });
         inner.bytes = inner.bytes.saturating_add(size);
@@ -159,6 +164,22 @@ mod tests {
         assert!(store.get(&first).is_some());
         assert!(store.get(&second).is_none());
         assert!(store.len() <= 2);
+    }
+
+    #[test]
+    fn acknowledging_one_shared_payload_lease_keeps_other_lease_live() {
+        let store = PreviewStore::new(4, 1024, Duration::from_secs(30));
+        let bytes = Arc::<[u8]>::from(vec![1, 2, 3]);
+        let first_result = store.insert(bytes.clone(), "image/png");
+        assert!(first_result.is_ok(), "first preview lease should be inserted");
+        let first = first_result.unwrap_or_default();
+        let second_result = store.insert(bytes, "image/png");
+        assert!(second_result.is_ok(), "second preview lease should be inserted");
+        let second = second_result.unwrap_or_default();
+        assert_ne!(first, second);
+        assert!(store.acknowledge(&first));
+        assert!(store.get(&first).is_none());
+        assert_eq!(store.get(&second).map(|value| value.bytes.as_ref()), Some(&[1, 2, 3][..]));
     }
 
     #[test]

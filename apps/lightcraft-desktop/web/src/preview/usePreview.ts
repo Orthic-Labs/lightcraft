@@ -24,6 +24,7 @@ export interface UsePreviewResult {
   state: PreviewState;
   request: PreviewRequest;
   retry: () => void;
+  onImageReady: (descriptor: PreviewDescriptor) => boolean;
   onImageError: (descriptor: PreviewDescriptor) => void;
 }
 
@@ -63,11 +64,16 @@ function decodePreviewUrl(url: string): Promise<void> {
 export function usePreview(options: UsePreviewOptions): UsePreviewResult {
   const latestSequence = useRef(0);
   const activeDescriptor = useRef<PreviewDescriptor | null>(null);
-  const lastDecoded = useRef<{ descriptor: PreviewDescriptor; url: string } | null>(null);
+  const presentedPreview = useRef<{ descriptor: PreviewDescriptor; url: string } | null>(null);
+  const presentedHandle = useRef<string | null>(null);
   const pendingRequest = useRef<PreviewRequest | null>(null);
   const acknowledgedHandles = useRef<Set<string>>(new Set());
   const acknowledgedOrder = useRef<string[]>([]);
   const pendingRetirement = useRef<{ handle: string; replacementHandle: string } | null>(null);
+  const staleRetryKey = useRef("");
+  const staleRetryCount = useRef(0);
+  const staleRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const staleRecoveryScheduled = useRef(false);
   const lastPhoto = useRef(options.photoId);
   const [retryValue, setRetryValue] = useState(0);
   const [state, setState] = useState<PreviewState>({ status: "idle", descriptor: null, url: null, error: null });
@@ -105,6 +111,17 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
     if (pending) acknowledge(pending.handle);
   }, [acknowledge]);
 
+  const onImageReady = useCallback((descriptor: PreviewDescriptor) => {
+    if (activeDescriptor.current?.handle !== descriptor.handle || acknowledgedHandles.current.has(descriptor.handle)) return false;
+    presentedHandle.current = descriptor.handle;
+    presentedPreview.current = { descriptor, url: `lightcraft-preview://${descriptor.handle}` };
+    const pending = pendingRetirement.current;
+    if (!pending || pending.replacementHandle !== descriptor.handle) return true;
+    pendingRetirement.current = null;
+    acknowledge(pending.handle);
+    return true;
+  }, [acknowledge]);
+
   const onImageError = useCallback((descriptor: PreviewDescriptor) => {
     if (activeDescriptor.current?.handle !== descriptor.handle) {
       acknowledge(descriptor.handle);
@@ -112,30 +129,38 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
     }
     acknowledge(descriptor.handle);
     activeDescriptor.current = null;
-    lastDecoded.current = null;
-    retirePending();
+    const retained = presentedPreview.current?.descriptor.photoId === descriptor.photoId && presentedPreview.current.descriptor.handle !== descriptor.handle
+      ? presentedPreview.current
+      : null;
     // A newer request owns presentation, but released current pixels must not be retained
     // as its fallback while that request is pending or fails.
     if (pendingRequest.current && pendingRequest.current.sequence !== descriptor.sequence) {
-      setState({ status: "loading", descriptor: null, url: null, error: null });
+      setState({ status: "loading", descriptor: retained?.descriptor ?? null, url: retained?.url ?? null, error: null });
       return;
     }
-    setState({ status: "error", descriptor: null, url: null, error: "Preview could not be decoded" });
-  }, [acknowledge, retirePending]);
+    setState({ status: "error", descriptor: retained?.descriptor ?? null, url: retained?.url ?? null, error: "Preview could not be decoded" });
+  }, [acknowledge]);
 
   useEffect(() => {
     if (options.enabled === false || !Number.isSafeInteger(options.photoId) || options.photoId < 0) {
       retirePending();
       if (activeDescriptor.current) acknowledge(activeDescriptor.current.handle);
       activeDescriptor.current = null;
-      lastDecoded.current = null;
       pendingRequest.current = null;
+      presentedPreview.current = null;
+      presentedHandle.current = null;
       setState({ status: "idle", descriptor: null, url: null, error: null });
       return;
     }
     const currentSequence = nextSequence();
     latestSequence.current = currentSequence;
     const current: PreviewRequest = { ...request, sequence: currentSequence };
+    const requestKey = JSON.stringify([current.photoId, current.slot, current.viewGeneration, current.width, current.height, current.quality, current.before]);
+    if (staleRetryKey.current !== requestKey) {
+      staleRetryKey.current = requestKey;
+      staleRetryCount.current = 0;
+      staleRecoveryScheduled.current = false;
+    }
     let cancelled = false;
     const photoChanged = lastPhoto.current !== options.photoId;
     lastPhoto.current = options.photoId;
@@ -143,7 +168,8 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
       retirePending();
       if (activeDescriptor.current) acknowledge(activeDescriptor.current.handle);
       activeDescriptor.current = null;
-      lastDecoded.current = null;
+      presentedPreview.current = null;
+      presentedHandle.current = null;
     }
     pendingRequest.current = current;
     setState((previous) => photoChanged
@@ -166,15 +192,23 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
             return;
           }
           pendingRequest.current = null;
+          staleRetryCount.current = 0;
+          staleRecoveryScheduled.current = false;
           // Keep current handle live until replacement state commits, so mounted URL stays
           // valid while React swaps decoded pixels.
           const previous = activeDescriptor.current;
           if (previous && previous.handle !== descriptor.handle) {
-            retirePending();
-            pendingRetirement.current = { handle: previous.handle, replacementHandle: descriptor.handle };
+            if (presentedHandle.current === previous.handle) {
+              pendingRetirement.current = { handle: previous.handle, replacementHandle: descriptor.handle };
+            } else {
+              acknowledge(previous.handle);
+              if (pendingRetirement.current) pendingRetirement.current.replacementHandle = descriptor.handle;
+            }
+          } else if (pendingRetirement.current) {
+            // Keep retiring visible pixels only after newest candidate mounts.
+            pendingRetirement.current.replacementHandle = descriptor.handle;
           }
           activeDescriptor.current = descriptor;
-          lastDecoded.current = { descriptor, url: protocolUrl };
           options.onHistogram?.(descriptor.histogram);
           setState({ status: "ready", descriptor, url: protocolUrl, error: null });
         }).catch((error: unknown) => {
@@ -184,7 +218,7 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
           }
           pendingRequest.current = null;
           acknowledge(descriptor.handle);
-          const retained = lastDecoded.current?.descriptor.photoId === current.photoId ? lastDecoded.current : null;
+          const retained = presentedPreview.current?.descriptor.photoId === current.photoId ? presentedPreview.current : null;
           const message = error instanceof Error ? error.message : String(error);
           setState({ status: "error", descriptor: retained?.descriptor ?? null, url: retained?.url ?? null, error: message || "Preview could not be decoded" });
         });
@@ -193,30 +227,57 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
         if (cancelled || pendingRequest.current?.sequence !== current.sequence) return;
         pendingRequest.current = null;
         const message = error instanceof Error ? error.message : String(error);
-        const retained = lastDecoded.current?.descriptor.photoId === current.photoId ? lastDecoded.current : null;
+        const retained = presentedPreview.current?.descriptor.photoId === current.photoId ? presentedPreview.current : null;
+        if (/preview (?:superseded|view is stale|request is stale)/i.test(message)) {
+          if (staleRetryCount.current < 2) {
+            const retryNumber = staleRetryCount.current;
+            staleRetryCount.current += 1;
+            if (staleRetryTimer.current !== null) clearTimeout(staleRetryTimer.current);
+            setState({ status: "loading", descriptor: retained?.descriptor ?? null, url: retained?.url ?? null, error: null });
+            staleRetryTimer.current = setTimeout(() => {
+              staleRetryTimer.current = null;
+              if (staleRetryKey.current !== requestKey) return;
+              setRetryValue((value) => value + 1);
+            }, retryNumber === 0 ? 100 : 250);
+          } else if (retained) {
+            setState({ status: "ready", descriptor: retained.descriptor, url: retained.url, error: null });
+          } else {
+            // Native can briefly reject every request while its generation advances.
+            // Leave first-load UI in loading state until DesktopProvider's snapshot
+            // refresh supplies current generation, rather than exposing a false Retry.
+            setState({ status: "loading", descriptor: null, url: null, error: null });
+            if (!staleRecoveryScheduled.current) {
+              staleRecoveryScheduled.current = true;
+              staleRetryTimer.current = setTimeout(() => {
+                staleRetryTimer.current = null;
+                if (staleRetryKey.current !== requestKey) return;
+                setRetryValue((value) => value + 1);
+              }, 1200);
+            }
+          }
+          return;
+        }
         setState({ status: "error", descriptor: retained?.descriptor ?? null, url: retained?.url ?? null, error: message || "Preview unavailable" });
       });
     return () => {
       cancelled = true;
+      if (staleRetryTimer.current !== null) {
+        clearTimeout(staleRetryTimer.current);
+        staleRetryTimer.current = null;
+      }
     };
     // request values are represented by explicit dependencies below; callback identity is caller-owned.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [options.enabled, options.photoId, options.slot, options.viewGeneration, request.width, request.height, request.quality, request.before, retryValue, retirePending]);
 
-  useEffect(() => {
-    const pending = pendingRetirement.current;
-    if (!pending || !state.url || state.descriptor?.handle !== pending.replacementHandle) return;
-    pendingRetirement.current = null;
-    acknowledge(pending.handle);
-  }, [acknowledge, state.descriptor?.handle, state.url]);
-
   useEffect(() => () => {
     retirePending();
     if (activeDescriptor.current) acknowledge(activeDescriptor.current.handle);
     activeDescriptor.current = null;
-    lastDecoded.current = null;
+    presentedPreview.current = null;
+    presentedHandle.current = null;
     pendingRequest.current = null;
   }, [acknowledge, retirePending]);
 
-  return { state, request: { ...request, sequence: latestSequence.current }, retry, onImageError };
+  return { state, request: { ...request, sequence: latestSequence.current }, retry, onImageReady, onImageError };
 }
