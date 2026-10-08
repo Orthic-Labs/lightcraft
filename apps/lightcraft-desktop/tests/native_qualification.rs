@@ -403,12 +403,12 @@ fn run_catalog_recovery(
 ) {
     let (before_counts, active, expected_exposure, backup, backup_fingerprint) = with_control(binary, scenario, catalog, |control, _data| {
         let before = import_file(control, png);
-        let before_counts = before["counts"].clone();
         let active = before["active"].as_u64().expect("import must select active photo");
         run(control, "develop.beginInteraction", json!({"label": "Backup baseline edit"}));
         run(control, "develop.set", json!({"control": "light.exposure", "value": 1.25, "ids": [active]}));
         run(control, "develop.endInteraction", json!({}));
         let edited = snapshot(control);
+        let before_counts = edited["counts"].clone();
         let expected_exposure = edited["develop"]["light"]["exposure"].as_f64().expect("edited exposure must be numeric");
         let backup = scenario.dir().join("library-backup");
         let backup_result = run(control, "library.backup", json!({"path": backup}));
@@ -778,7 +778,7 @@ fn native_hidden_control_journeys() {
                             .eval(r#"return (() => { const node = document.querySelector("input[aria-label='Exposure']"); if (!node) return false; node.focus(); return document.activeElement === node; })();"#)
                             .expect("exposure slider focus query must execute");
                         assert_eq!(focused.as_bool(), Some(true), "exposure slider focus must execute");
-                        control.key("ArrowLeft").expect("exposure keyboard adjustment must execute");
+                        control.key("Left").expect("exposure keyboard adjustment must execute");
                         wait_for_snapshot(
                             control,
                             |value| value["develop"]["light"]["exposure"] != edited_exposure,
