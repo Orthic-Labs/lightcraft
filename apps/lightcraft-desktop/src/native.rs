@@ -15,6 +15,8 @@ use std::{fs, path::Path};
 
 use lightcraft_desktop_host::{DesktopHandle, HostOptions, PreviewRequest};
 use serde_json::{Value, json};
+#[cfg(feature = "qa-native")]
+use tauri::WebviewWindow;
 use tauri::http::{Request, Response};
 #[cfg(feature = "qa-native")]
 use tauri::plugin::TauriPlugin;
@@ -330,13 +332,44 @@ fn qa_viewport(app: &AppHandle<Wry>, args: &Value) -> Result<Value, String> {
         return Err("lc_qa_viewport allows only 1280x800 or 1600x1000".into());
     }
     let window = app.get_webview_window("main").ok_or_else(|| "main window is unavailable".to_string())?;
+    let geometry = |window: &WebviewWindow<Wry>| {
+        let size = |result: Result<tauri::PhysicalSize<u32>, _>| result.ok().map(|size| json!({"width": size.width, "height": size.height}));
+        let position = |result: Result<tauri::PhysicalPosition<i32>, _>| result.ok().map(|position| json!({"x": position.x, "y": position.y}));
+        json!({
+            "innerSize": size(window.inner_size()),
+            "outerSize": size(window.outer_size()),
+            "innerPosition": position(window.inner_position()),
+            "outerPosition": position(window.outer_position()),
+            "isDecorated": window.is_decorated().ok(),
+            "isResizable": window.is_resizable().ok(),
+            "isMaximized": window.is_maximized().ok(),
+            "isFullscreen": window.is_fullscreen().ok(),
+        })
+    };
+    let before = geometry(&window);
+    let config = app.config().app.windows.iter().find(|candidate| candidate.label == "main").map(|candidate| {
+        json!({
+            "label": candidate.label,
+            "width": candidate.width,
+            "height": candidate.height,
+            "minWidth": candidate.min_width,
+            "minHeight": candidate.min_height,
+            "decorations": candidate.decorations,
+            "shadow": candidate.shadow,
+            "resizable": candidate.resizable,
+        })
+    });
     window
         .set_size(tauri::Size::Logical(tauri::LogicalSize::new(width as f64, height as f64)))
         .map_err(|error| format!("setting QA viewport: {error}"))?;
     let observed = window.inner_size().map_err(|error| format!("reading QA viewport: {error}"))?;
+    let after = geometry(&window);
     Ok(json!({
         "requested": {"width": width, "height": height},
         "observedInnerSize": {"width": observed.width, "height": observed.height},
+        "config": config,
+        "before": before,
+        "after": after,
     }))
 }
 
