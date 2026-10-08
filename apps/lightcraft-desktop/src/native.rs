@@ -277,8 +277,8 @@ fn preference_patch_for_window(window: &WebviewWindow<Wry>, patch: Option<Value>
 
 fn about_info() -> Result<Value, String> {
     let credits: Value = serde_json::from_str(CONTRIBUTORS_JSON).map_err(|error| format!("invalid embedded contributor data: {error}"))?;
-    let contributors = credits.get("contributors").filter(Value::is_array).cloned().unwrap_or_else(|| json!([]));
-    let models = credits.get("models").filter(Value::is_array).cloned().unwrap_or_else(|| json!([]));
+    let contributors = credits.get("contributors").filter(|value| value.is_array()).cloned().unwrap_or_else(|| json!([]));
+    let models = credits.get("models").filter(|value| value.is_array()).cloned().unwrap_or_else(|| json!([]));
     Ok(json!({
         "name": "LightCraft",
         "version": env!("CARGO_PKG_VERSION"),

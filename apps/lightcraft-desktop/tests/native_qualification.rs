@@ -402,7 +402,7 @@ fn write_merge_fixture_copies(root: &Path, source: &Path) -> [PathBuf; 2] {
     let mut pixels = vec![0; reader.output_buffer_size().expect("procedural PNG buffer must exist")];
     let info = reader.next_frame(&mut pixels).expect("procedural PNG pixels must decode");
     assert_eq!(info.color_type, png::ColorType::Rgba, "procedural merge source must decode to RGBA");
-    for pixel in pixels[..info.buffer_size()].chunks_exact_mut(4) {
+    for pixel in pixels[..info.buffer_size()].as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     let mut encoded = Vec::new();
