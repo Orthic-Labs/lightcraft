@@ -2088,6 +2088,22 @@ fn native_hidden_control_journeys() {
                         wait_for_dom(control, "return document.querySelector('.lc-dialog') === null;");
                         let picker = control.command("lc_native", &json!({"action": "pickFiles", "params": {}}));
                         assert!(picker.is_err(), "background control must refuse interactive pickers");
+                        for action in [
+                            "openLibrary",
+                            "backupLibrary",
+                            "restoreLibrary",
+                            "selectFolder",
+                            "openFile",
+                            "saveFile",
+                            "pickPresetFiles",
+                            "pickCurvePresetFiles",
+                            "pickTracklog",
+                            "savePresetFile",
+                            "saveCurvePresetFile",
+                        ] {
+                            let result = control.command("lc_native", &json!({"action": action, "params": {}}));
+                            assert!(result.is_err(), "background control must reject {action} without explicit path input");
+                        }
                         let explicit = control.command("lc_native", &json!({"action": "pickFiles", "params": {"paths": [inputs.png.to_string_lossy()]}})).expect("background picker must accept explicit paths");
                         assert_eq!(explicit["paths"].as_array().map(Vec::len), Some(1));
                         let imported = import_file(control, &inputs.png);

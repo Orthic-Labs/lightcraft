@@ -105,7 +105,10 @@ pub fn run(action: &str, params: &Value) -> Result<Value, String> {
         )),
         "pickDevice" | "chooseDevice" | "importDevice" => Ok(provided_path(params)?
             .map_or_else(|| path_value(rfd::FileDialog::new().set_title("Import from Device").pick_folder()), |path| path_value(Some(path)))),
-        "pickPresetFiles" => pick_files("Import Presets & Profiles", PRESET_EXTENSIONS),
+        "pickPresetFiles" => match provided_paths(params)? {
+            Some(paths) => Ok(paths_value(paths)),
+            None => pick_files("Import Presets & Profiles", PRESET_EXTENSIONS),
+        },
         "openFile" => match provided_paths(params)? {
             Some(paths) => Ok(paths_value(paths)),
             None => pick_files_with_params(params),
@@ -117,10 +120,14 @@ pub fn run(action: &str, params: &Value) -> Result<Value, String> {
                 save_file_with_params(params)
             }
         }
-        "pickCurvePresetFiles" => pick_files("Import Point Curve Presets", &["lccurve", "json"]),
-        "pickTracklog" => {
-            Ok(path_value(rfd::FileDialog::new().set_title("Auto-Tag from Tracklog").add_filter("GPS Track Log", &["gpx"]).pick_file()))
-        }
+        "pickCurvePresetFiles" => match provided_paths(params)? {
+            Some(paths) => Ok(paths_value(paths)),
+            None => pick_files("Import Point Curve Presets", &["lccurve", "json"]),
+        },
+        "pickTracklog" => Ok(provided_path(params)?.map_or_else(
+            || path_value(rfd::FileDialog::new().set_title("Auto-Tag from Tracklog").add_filter("GPS Track Log", &["gpx"]).pick_file()),
+            |path| path_value(Some(path)),
+        )),
         "savePresetFile" => save_file(params, "Export Presets", "LightCraft Preset", "lcpreset"),
         "saveCurvePresetFile" => save_file(params, "Export Point Curve Presets", "Point Curve Preset", "lccurve"),
         "dropImport" => drop_import(params),
@@ -151,9 +158,38 @@ pub(crate) fn is_import_picker(action: &str) -> bool {
     )
 }
 
+/// Return every native action that may open a modal file or folder dialog.
+pub(crate) fn is_picker_action(action: &str) -> bool {
+    matches!(
+        action,
+        "pickPhotos"
+            | "pickFiles"
+            | "import"
+            | "chooseFiles"
+            | "pickFolder"
+            | "chooseFolder"
+            | "importFolder"
+            | "openLibrary"
+            | "pickLightroomCatalog"
+            | "importLightroom"
+            | "pickDevice"
+            | "chooseDevice"
+            | "importDevice"
+            | "pickPresetFiles"
+            | "openFile"
+            | "saveFile"
+            | "saveExport"
+            | "exportFile"
+            | "pickCurvePresetFiles"
+            | "pickTracklog"
+            | "savePresetFile"
+            | "saveCurvePresetFile"
+    )
+}
+
 /// Validate whether automation supplied all picker input needed to bypass a modal dialog.
 pub(crate) fn has_explicit_picker_input(action: &str, params: &Value) -> Result<bool, String> {
-    if matches!(action, "pickPhotos" | "pickFiles" | "import" | "chooseFiles") {
+    if matches!(action, "pickPhotos" | "pickFiles" | "import" | "chooseFiles" | "pickPresetFiles" | "openFile" | "pickCurvePresetFiles") {
         return provided_paths(params).map(|paths| paths.is_some_and(|paths| !paths.is_empty()));
     }
     provided_path(params).map(|path| path.is_some())
@@ -257,6 +293,9 @@ fn pick_files_with_params(params: &Value) -> Result<Value, String> {
 }
 
 fn save_file(params: &Value, title: &str, filter: &str, extension: &str) -> Result<Value, String> {
+    if params.get("path").is_some() {
+        return Ok(path_value(provided_path(params)?));
+    }
     let name = params.get("name").and_then(Value::as_str).unwrap_or("LightCraft Preset");
     if name.is_empty() || name.contains('\0') {
         return Err("invalid file name".into());
@@ -420,6 +459,42 @@ mod tests {
         assert_eq!(fs::read(&source)?, corrupt);
         assert!(!destination.exists());
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn picker_contract_requires_input_for_every_dialog_alias() -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join("lightcraft-picker-contract.txt");
+        let path_text = path.to_string_lossy().to_string();
+        for action in ["pickPhotos", "pickPresetFiles", "pickCurvePresetFiles", "openFile"] {
+            assert!(is_picker_action(action));
+            assert!(!has_explicit_picker_input(action, &json!({}))?);
+            assert!(has_explicit_picker_input(action, &json!({"paths": [path_text.clone()]}))?);
+        }
+        for action in ["pickFolder", "openLibrary", "pickTracklog", "saveFile", "savePresetFile", "saveCurvePresetFile"] {
+            assert!(is_picker_action(action));
+            assert!(!has_explicit_picker_input(action, &json!({}))?);
+            assert!(has_explicit_picker_input(action, &json!({"path": path_text.clone()}))?);
+        }
+        assert!(!is_picker_action("openExternal"));
+        assert!(!has_explicit_picker_input("openFile", &json!({"path": path_text.clone()}))?);
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_paths_bypass_new_picker_aliases() -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join("lightcraft-picker-contract.txt");
+        let path_text = path.to_string_lossy().to_string();
+        for (action, params, key) in [
+            ("pickPresetFiles", json!({"paths": [path_text.clone()]}), "paths"),
+            ("pickCurvePresetFiles", json!({"paths": [path_text.clone()]}), "paths"),
+            ("pickTracklog", json!({"path": path_text.clone()}), "path"),
+            ("savePresetFile", json!({"path": path_text.clone()}), "path"),
+            ("saveCurvePresetFile", json!({"path": path_text.clone()}), "path"),
+        ] {
+            let value = run(action, &params)?;
+            assert!(value.get(key).is_some(), "{action} must return supplied picker input");
+        }
         Ok(())
     }
 }

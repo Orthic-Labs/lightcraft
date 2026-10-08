@@ -198,6 +198,7 @@ mod tauri_commands {
         if action == "aboutInfo" {
             return about_info();
         }
+        reject_unattended_picker(&action, &params, unattended_qa_enabled())?;
         if action == "openLibrary" {
             let host = state.host.clone();
             let startup_error = state.startup_error.clone();
@@ -662,6 +663,7 @@ fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<Strin
             let object = args.as_object().ok_or_else(|| "lc_native expects an object".to_string())?;
             let action = object.get("action").and_then(Value::as_str).ok_or_else(|| "lc_native requires action".to_string())?;
             let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
+            reject_unattended_picker(action, &params, true)?;
             if action == "aboutInfo" {
                 about_info()?
             } else if action == "openLibrary" {
@@ -766,6 +768,18 @@ const MAX_PERSISTED_LIBRARY_PATH: usize = 8_192;
 
 fn qa_hidden_enabled(value: Option<&OsStr>) -> bool {
     value.and_then(|value| value.to_str().map(str::trim)).is_some_and(|value| value.eq_ignore_ascii_case("1") || value.eq_ignore_ascii_case("true"))
+}
+
+fn unattended_qa_enabled() -> bool {
+    qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_HIDDEN").as_deref()) || qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_BACKGROUND").as_deref())
+}
+
+fn reject_unattended_picker(action: &str, params: &Value, enforce: bool) -> Result<(), String> {
+    let library_picker = matches!(action, "backupLibrary" | "restoreLibrary" | "selectFolder");
+    if (services::is_picker_action(action) || library_picker) && enforce && !services::has_explicit_picker_input(action, params)? {
+        return Err(format!("interactive native picker unavailable for {action}; supply explicit path(s)"));
+    }
+    Ok(())
 }
 
 fn runtime_modes(args: &[String]) -> (bool, Option<PathBuf>) {
@@ -1216,6 +1230,14 @@ mod tests {
         assert!(qa_hidden_enabled(Some(OsStr::new("true"))));
         assert!(qa_hidden_enabled(Some(OsStr::new(" TRUE "))));
         assert!(!qa_hidden_enabled(None));
+    }
+
+    #[test]
+    fn unattended_picker_guard_only_rejects_missing_input_when_enabled() {
+        assert!(reject_unattended_picker("pickFiles", &json!({}), false).is_ok());
+        assert!(reject_unattended_picker("pickFiles", &json!({}), true).is_err());
+        assert!(reject_unattended_picker("pickFiles", &json!({"paths": ["photo.jpg"]}), true).is_ok());
+        assert!(reject_unattended_picker("openExternal", &json!({}), true).is_ok());
     }
 
     #[test]
