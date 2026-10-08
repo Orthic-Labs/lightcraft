@@ -328,8 +328,7 @@ function MaskingPanel({ desktop }: { desktop: InspectorDesktop }) {
   const { run, snapshot, ui, setUi } = desktop;
   const settings = object(snapshot?.develop);
   const masks = array(settings.masks);
-  const inferredActive = masks.length ? num(object(masks[masks.length - 1]).id, masks.length) : 0;
-  const snapshotActive = num((snapshot as (DesktopSnapshot & { activeMask?: unknown }) | null)?.activeMask, num(object(snapshot?.source).activeMask, inferredActive)) || null;
+  const snapshotActive = num((snapshot as (DesktopSnapshot & { activeMask?: unknown }) | null)?.activeMask, num(object(snapshot?.source).activeMask ?? object(snapshot?.source).active_mask, 0)) || null;
   const [active, setActive] = useState<number | null>(snapshotActive);
   useEffect(() => setActive(snapshotActive), [snapshotActive]);
   const addMask = (kind: string) => {
@@ -344,7 +343,7 @@ function MaskingPanel({ desktop }: { desktop: InspectorDesktop }) {
     <div className="lc-mask-modes">{[
       ['brush', 'Brush'], ['linear', 'Linear Gradient'], ['radial', 'Radial Gradient'],
       ['colorRange', 'Color Range'], ['luminanceRange', 'Luminance Range'], ['object', 'Object (SAM)'],
-      ['sky', 'Sky (SAM)'], ['subject', 'Subject (SAM)'], ['background', 'Background (SAM)'],
+      ['sky', 'Sky'], ['subject', 'Subject'], ['background', 'Background'],
     ].map(([kind, label]) => <button type="button" key={kind} aria-pressed={ui.tool === kind} onClick={() => addMask(kind)}>{label}</button>)}</div>
     <div className="lc-inspector__actions"><button className="lc-inspector__button" type="button" onClick={() => setUi({ maskOverlay: !ui.maskOverlay })}>{ui.maskOverlay ? 'Hide overlay' : 'Show overlay'}</button><button className="lc-inspector__button" type="button" onClick={() => void run('mask.deleteAll', {})}>Delete all</button></div>
     <div className="lc-inspector__actions" aria-label="Mask component mode"><button className="lc-inspector__button" type="button" onClick={() => addComponent('add')}>Add component</button><button className="lc-inspector__button" type="button" onClick={() => addComponent('subtract')}>Subtract</button><button className="lc-inspector__button" type="button" onClick={() => addComponent('intersect')}>Intersect</button></div>

@@ -82,11 +82,12 @@
 .crop-handle { position: absolute; display: block; width: 10px; height: 10px; border: 2px solid #fff; background: #000; }
 .crop-nw { top: -6px; left: -6px; }.crop-ne { top: -6px; right: -6px; }.crop-sw { bottom: -6px; left: -6px; }.crop-se { bottom: -6px; right: -6px; }
 .mask-overlay, .spots-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
-.mask-vector { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.mask-vector { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; transform-origin: center; }
 .mask-brush-path, .mask-linear-line { fill: none; stroke: #ef6b77; stroke-width: 1.5; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
 .mask-linear-line { stroke: #ffd66b; stroke-dasharray: 4 3; }
 .mask-radial-ellipse { fill: #e6495d2c; stroke: #ef6b77; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
-.mask-seg-outline { position: absolute; border: 2px dashed #ef6b77; border-radius: 5px; }
+.mask-seg-outline { fill: #ef6b7720; stroke: #ef6b77; stroke-width: 1; stroke-dasharray: 3 2; vector-effect: non-scaling-stroke; }
+.mask-pins { position: absolute; inset: 0; transform-origin: center; }
 .mask-pin { position: absolute; color: #ffcf5c; font-size: 22px; text-shadow: 0 1px 2px #000; }
 .mask-radial-handle { position: absolute; width: 9px; height: 9px; border: 1px solid #fff; border-radius: 50%; background: #1b1d22; transform: translate(-50%, -50%); box-shadow: 0 0 0 1px #000b; }
 .spot-shape, .red-eye-shape { position: absolute; transform: translate(-50%, -50%); border: 2px solid #ffb94a; border-radius: 50%; background: #ffb94a20; }

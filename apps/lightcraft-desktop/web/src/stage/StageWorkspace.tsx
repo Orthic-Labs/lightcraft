@@ -26,9 +26,9 @@ const maskTools = [
   ["colorRange", "Color Range"],
   ["luminanceRange", "Luminance Range"],
   ["object", "Object (SAM)"],
-  ["sky", "Sky (SAM)"],
-  ["subject", "Subject (SAM)"],
-  ["background", "Background (SAM)"],
+  ["sky", "Sky"],
+  ["subject", "Subject"],
+  ["background", "Background"],
 ] as const;
 
 function record(value: unknown): DevelopShape {
@@ -64,6 +64,53 @@ function cropOf(develop: DevelopShape): { rect: Box; angle: number } {
   return { rect, angle: number(geometry.angle ?? crop.angle) };
 }
 
+/** Oriented image aspect used by Rust mask geometry (width / height after EXIF orientation). */
+export function orientedAspectFor(develop: DevelopShape, sourceAspect: number): number {
+  const orientation = String(develop.orientation ?? "normal").toLowerCase();
+  const aspect = Math.max(0.001, Number.isFinite(sourceAspect) ? sourceAspect : 1);
+  return ["rotate90", "rotate270", "transpose", "transverse"].includes(orientation) ? 1 / aspect : aspect;
+}
+
+/** Convert normalized oriented coordinates into Rust's long-edge coordinate units. */
+export function normalizedToLong(value: Point, aspect: number): Point {
+  const safeAspect = Math.max(0.001, Number.isFinite(aspect) ? aspect : 1);
+  const longEdge = Math.max(1, safeAspect);
+  return { x: value.x * safeAspect / longEdge, y: value.y / longEdge };
+}
+
+/** Convert Rust long-edge coordinate units back into normalized oriented coordinates. */
+export function longToNormalized(value: Point, aspect: number): Point {
+  const safeAspect = Math.max(0.001, Number.isFinite(aspect) ? aspect : 1);
+  const longEdge = Math.max(1, safeAspect);
+  return { x: value.x * longEdge / safeAspect, y: value.y * longEdge };
+}
+
+function radialOffset(value: Point, aspect: number): Point {
+  return normalizedToLong(value, aspect);
+}
+
+function radialHandlePoint(center: Point, radius: Point, angle: number, aspect: number): Point {
+  const centerLong = radialOffset(center, aspect);
+  const radiusLong = radius;
+  const next = {
+    x: radiusLong.x * Math.cos(angle) - radiusLong.y * Math.sin(angle),
+    y: radiusLong.x * Math.sin(angle) + radiusLong.y * Math.cos(angle),
+  };
+  return longToNormalized({ x: centerLong.x + next.x, y: centerLong.y + next.y }, aspect);
+}
+
+function rotateNormalizedPoint(value: Point, degrees: number, aspect: number): Point {
+  const radians = (degrees * Math.PI) / 180;
+  const center = normalizedToLong({ x: 0.5, y: 0.5 }, aspect);
+  const source = normalizedToLong(value, aspect);
+  const dx = source.x - center.x;
+  const dy = source.y - center.y;
+  return longToNormalized({
+    x: center.x + dx * Math.cos(radians) - dy * Math.sin(radians),
+    y: center.y + dx * Math.sin(radians) + dy * Math.cos(radians),
+  }, aspect);
+}
+
 /** Convert a client point into uncropped, oriented image coordinates.
  *
  * Stage transforms are applied around the image centre. Undoing them here keeps
@@ -80,8 +127,7 @@ export function normalizedPhotoPoint(
   pan: Point = { x: 0, y: 0 },
 ): Point {
   const crop = cropOf(develop);
-  const orientation = String(develop.orientation ?? "normal").toLowerCase();
-  const orientedAspect = ["rotate90", "rotate270", "transpose", "transverse"].includes(orientation) ? 1 / Math.max(0.001, sourceAspect) : sourceAspect;
+  const orientedAspect = orientedAspectFor(develop, sourceAspect);
   const outputAspect = orientedAspect * Math.max(0.001, crop.rect.x1 - crop.rect.x0) / Math.max(0.001, crop.rect.y1 - crop.rect.y0);
   const boxAspect = bounds.height > 0 ? bounds.width / bounds.height : outputAspect;
   const drawWidth = boxAspect > outputAspect ? bounds.height * outputAspect : bounds.width;
@@ -89,7 +135,8 @@ export function normalizedPhotoPoint(
   const drawLeft = bounds.left + (bounds.width - drawWidth) / 2;
   const drawTop = bounds.top + (bounds.height - drawHeight) / 2;
 
-  // Undo stage transform in the same order CSS applies its functions.
+  // Undo stage transform in same order CSS applies functions. Rotation is in
+  // rendered box pixels; rotating normalized x/y directly skews non-square panes.
   const safeZoom = Math.max(0.001, Number.isFinite(zoom) ? zoom : 1);
   let tx = bounds.width > 0 ? (clientX - bounds.left) / bounds.width : 0.5;
   let ty = bounds.height > 0 ? (clientY - bounds.top) / bounds.height : 0.5;
@@ -98,12 +145,10 @@ export function normalizedPhotoPoint(
   tx = (tx - 0.5) / safeZoom + 0.5;
   ty = (ty - 0.5) / safeZoom + 0.5;
   const stageRadians = (-crop.angle * Math.PI) / 180;
-  const stageDx = tx - 0.5;
-  const stageDy = ty - 0.5;
-  const imageX = stageDx * Math.cos(stageRadians) - stageDy * Math.sin(stageRadians) + 0.5;
-  const imageY = stageDx * Math.sin(stageRadians) + stageDy * Math.cos(stageRadians) + 0.5;
-  const screenX = bounds.left + imageX * bounds.width;
-  const screenY = bounds.top + imageY * bounds.height;
+  const stageDx = tx * bounds.width - bounds.width / 2;
+  const stageDy = ty * bounds.height - bounds.height / 2;
+  const screenX = bounds.left + bounds.width / 2 + stageDx * Math.cos(stageRadians) - stageDy * Math.sin(stageRadians);
+  const screenY = bounds.top + bounds.height / 2 + stageDx * Math.sin(stageRadians) + stageDy * Math.cos(stageRadians);
   let px = drawWidth > 0 ? (screenX - drawLeft) / drawWidth : 0.5;
   let py = drawHeight > 0 ? (screenY - drawTop) / drawHeight : 0.5;
   px = Math.max(0, Math.min(1, px));
@@ -113,20 +158,17 @@ export function normalizedPhotoPoint(
   if (cropValue.flip_v === true || cropValue.flipV === true) py = 1 - py;
   const straightX = crop.rect.x0 + px * (crop.rect.x1 - crop.rect.x0);
   const straightY = crop.rect.y0 + py * (crop.rect.y1 - crop.rect.y0);
-  const radians = (-crop.angle * Math.PI) / 180;
-  const cx = 0.5;
-  const cy = 0.5;
-  const x = straightX - cx;
-  const y = straightY - cy;
-  return { x: Math.max(0, Math.min(1, x * Math.cos(radians) - y * Math.sin(radians) + cx)), y: Math.max(0, Math.min(1, x * Math.sin(radians) + y * Math.cos(radians) + cy)) };
+  const rotated = rotateNormalizedPoint({ x: straightX, y: straightY }, -crop.angle, orientedAspect);
+  return { x: Math.max(0, Math.min(1, rotated.x)), y: Math.max(0, Math.min(1, rotated.y)) };
 }
 
 function invertPhotoPoint(event: PointerEvent<HTMLElement>, element: HTMLElement, develop: DevelopShape, sourceAspect: number, zoom: number, pan: Point): Point {
   return normalizedPhotoPoint(event.clientX, event.clientY, element.getBoundingClientRect(), develop, sourceAspect, zoom, pan);
 }
 
-export function radialShapeFromDrag(start: Point, end: Point, sourceAspect: number): DevelopShape {
-  const aspect = Math.max(0.001, sourceAspect);
+export function radialShapeFromDrag(start: Point, end: Point, sourceAspect: number, orientation = "normal"): DevelopShape {
+  const rawAspect = Math.max(0.001, sourceAspect);
+  const aspect = ["rotate90", "rotate270", "transpose", "transverse"].includes(String(orientation).toLowerCase()) ? 1 / rawAspect : rawAspect;
   const longEdge = Math.max(aspect, 1);
   return {
     kind: "radial",
@@ -139,32 +181,29 @@ export function radialShapeFromDrag(start: Point, end: Point, sourceAspect: numb
   };
 }
 
-function radialHandleAt(value: Point, shape: DevelopShape): "move" | "rx" | "ry" | "rotate" | null {
+function radialHandleAt(value: Point, shape: DevelopShape, aspect: number): "move" | "rx" | "ry" | "rotate" | null {
   const center = shapePoint(shape.center);
   if (!center) return null;
   const rx = number(shape.rx);
   const ry = number(shape.ry);
   if (!(rx > 0 && ry > 0)) return null;
   const angle = number(shape.angle) * Math.PI / 180;
-  const rotate = (p: Point): Point => ({ x: p.x * Math.cos(angle) - p.y * Math.sin(angle), y: p.x * Math.sin(angle) + p.y * Math.cos(angle) });
   const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
-  const right = rotate({ x: rx, y: 0 });
-  const bottom = rotate({ x: 0, y: ry });
-  const top = rotate({ x: 0, y: -(ry + 0.06) });
-  if (distance(value, { x: center.x + right.x, y: center.y + right.y }) < 0.045) return "rx";
-  if (distance(value, { x: center.x + bottom.x, y: center.y + bottom.y }) < 0.045) return "ry";
-  if (distance(value, { x: center.x + top.x, y: center.y + top.y }) < 0.045) return "rotate";
+  const right = radialHandlePoint(center, { x: rx, y: 0 }, angle, aspect);
+  const bottom = radialHandlePoint(center, { x: 0, y: ry }, angle, aspect);
+  const top = radialHandlePoint(center, { x: 0, y: -(ry + 0.06 / Math.max(1, aspect)) }, angle, aspect);
+  if (distance(value, right) < 0.045) return "rx";
+  if (distance(value, bottom) < 0.045) return "ry";
+  if (distance(value, top) < 0.045) return "rotate";
   const localAngle = -angle;
-  const local = { x: (value.x - center.x) * Math.cos(localAngle) - (value.y - center.y) * Math.sin(localAngle), y: (value.x - center.x) * Math.sin(localAngle) + (value.y - center.y) * Math.cos(localAngle) };
+  const localLong = normalizedToLong({ x: value.x - center.x, y: value.y - center.y }, aspect);
+  const local = { x: localLong.x * Math.cos(localAngle) - localLong.y * Math.sin(localAngle), y: localLong.x * Math.sin(localAngle) + localLong.y * Math.cos(localAngle) };
   if ((local.x * local.x) / (rx * rx) + (local.y * local.y) / (ry * ry) <= 1) return "move";
   return null;
 }
 
-function rotatePoint(value: Point, degrees: number): Point {
-  const radians = (degrees * Math.PI) / 180;
-  const x = value.x - 0.5;
-  const y = value.y - 0.5;
-  return { x: x * Math.cos(radians) - y * Math.sin(radians) + 0.5, y: x * Math.sin(radians) + y * Math.cos(radians) + 0.5 };
+function rotatePoint(value: Point, degrees: number, aspect = 1): Point {
+  return rotateNormalizedPoint(value, degrees, aspect);
 }
 
 function cropHandleAt(value: Point, rect: Box): number | null {
@@ -310,6 +349,7 @@ function StageImage({
   onPointerDown,
   onPointerMove,
   onPointerUp,
+  onPointerCancel,
 }: {
   photoId: number | null;
   photo: PhotoSummary | null;
@@ -322,10 +362,11 @@ function StageImage({
   onPointerDown?: (event: PointerEvent<HTMLElement>) => void;
   onPointerMove?: (event: PointerEvent<HTMLElement>) => void;
   onPointerUp?: (event: PointerEvent<HTMLElement>) => void;
+  onPointerCancel?: (event: PointerEvent<HTMLElement>) => void;
 }) {
   const crop = cropOf(develop);
   return (
-    <div className="stage-image-wrap" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
+    <div className="stage-image-wrap" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel}>
       <div className="stage-image-transform" style={{ ["--stage-angle" as string]: `${crop.angle}deg` }}>
         <PreviewPane photoId={photoId} photo={photo} previewEdge={previewEdge} slot={slot} viewGeneration={viewGeneration} before={before} className="stage-preview" onHistogram={onHistogram} />
       </div>
@@ -380,14 +421,13 @@ function shapePins(shape: DevelopShape): Point[] {
   return [];
 }
 
-function radialHandles(shape: DevelopShape): Point[] {
+function radialHandles(shape: DevelopShape, aspect: number): Point[] {
   const center = shapePoint(shape.center);
   const rx = number(shape.rx);
   const ry = number(shape.ry);
   if (!center || !(rx > 0 && ry > 0)) return [];
   const angle = number(shape.angle) * Math.PI / 180;
-  const rotate = (p: Point): Point => ({ x: p.x * Math.cos(angle) - p.y * Math.sin(angle), y: p.x * Math.sin(angle) + p.y * Math.cos(angle) });
-  return [{ x: rx, y: 0 }, { x: 0, y: ry }, { x: 0, y: -(ry + 0.06) }].map((value) => { const next = rotate(value); return { x: center.x + next.x, y: center.y + next.y }; });
+  return [{ x: rx, y: 0 }, { x: 0, y: ry }, { x: 0, y: -(ry + 0.06 / Math.max(1, aspect)) }].map((value) => radialHandlePoint(center, value, angle, aspect));
 }
 
 function brushPath(shape: DevelopShape): string | null {
@@ -401,10 +441,11 @@ function brushPath(shape: DevelopShape): string | null {
   return path || null;
 }
 
-function MaskOverlay({ develop, activeMask, mode, pins }: { develop: DevelopShape; activeMask: number; mode: string; pins: boolean }) {
+function MaskOverlay({ develop, activeMask, mode, pins, sourceAspect, zoom, pan, brushPreview }: { develop: DevelopShape; activeMask: number; mode: string; pins: boolean; sourceAspect: number; zoom: number; pan: Point; brushPreview?: Point[] }) {
   const visible = maskShapes(develop, mode, activeMask);
+  const aspect = orientedAspectFor(develop, sourceAspect);
   return <div className="mask-overlay" aria-hidden="true">
-    <svg className="mask-vector" viewBox="0 0 100 100" preserveAspectRatio="none">
+    <svg className="mask-vector" viewBox="0 0 100 100" preserveAspectRatio="none" style={{ transform: `translate(${pan.x * 100}%, ${pan.y * 100}%) scale(${zoom}) rotate(${cropOf(develop).angle}deg)` }}>
       {visible.map(({ shape, id, component }) => {
         const kind = String(shape.kind ?? "");
         if (kind === "brush") {
@@ -420,17 +461,20 @@ function MaskOverlay({ develop, activeMask, mode, pins }: { develop: DevelopShap
           const center = shapePoint(shape.center);
           const rx = number(shape.rx);
           const ry = number(shape.ry);
-          return center && rx > 0 && ry > 0 ? <ellipse key={`${id}-${component}`} className="mask-radial-ellipse" cx={center.x * 100} cy={center.y * 100} rx={rx * 100} ry={ry * 100} transform={`rotate(${number(shape.angle)} ${center.x * 100} ${center.y * 100})`} /> : null;
+          const rxNorm = longToNormalized({ x: rx, y: 0 }, aspect).x;
+          const ryNorm = longToNormalized({ x: 0, y: ry }, aspect).y;
+          return center && rx > 0 && ry > 0 ? <ellipse key={`${id}-${component}`} className="mask-radial-ellipse" cx={center.x * 100} cy={center.y * 100} rx={rxNorm * 100} ry={ryNorm * 100} transform={`rotate(${number(shape.angle)} ${center.x * 100} ${center.y * 100})`} /> : null;
         }
         const seg = record(shape.seg);
         const rect = box(seg.rect ?? shape.rect ?? shape.bounds);
-        return rect ? <span key={`${id}-${component}`} className="mask-seg-outline" style={{ left: `${rect.x0 * 100}%`, top: `${rect.y0 * 100}%`, width: `${(rect.x1 - rect.x0) * 100}%`, height: `${(rect.y1 - rect.y0) * 100}%` }} /> : null;
+        return rect ? <rect key={`${id}-${component}`} className="mask-seg-outline" x={rect.x0 * 100} y={rect.y0 * 100} width={(rect.x1 - rect.x0) * 100} height={(rect.y1 - rect.y0) * 100} /> : null;
       })}
+      {brushPreview && brushPreview.length ? <path className="mask-brush-path mask-brush-preview" d={`M ${brushPreview.map((value) => `${value.x * 100} ${value.y * 100}`).join(" L ")}`} /> : null}
     </svg>
-    {pins && visible.flatMap(({ shape, id, component }) => [
+    {pins ? <div className="mask-pins" style={{ transform: `translate(${pan.x * 100}%, ${pan.y * 100}%) scale(${zoom}) rotate(${cropOf(develop).angle}deg)` }}>{visible.flatMap(({ shape, id, component }) => [
       ...shapePins(shape).map((value, pinIndex) => <b key={`${id}-${component}-pin-${pinIndex}`} className="mask-pin" style={{ left: `${value.x * 100}%`, top: `${value.y * 100}%` }}>{String(shape.kind ?? "").toLowerCase() === "object" && pinIndex % 2 ? "−" : "•"}</b>),
-      ...(String(shape.kind ?? "") === "radial" ? radialHandles(shape).map((value, handleIndex) => <i key={`${id}-${component}-handle-${handleIndex}`} className="mask-radial-handle" style={{ left: `${value.x * 100}%`, top: `${value.y * 100}%` }} />) : []),
-    ])}
+      ...(String(shape.kind ?? "") === "radial" ? radialHandles(shape, aspect).map((value, handleIndex) => <i key={`${id}-${component}-handle-${handleIndex}`} className="mask-radial-handle" style={{ left: `${value.x * 100}%`, top: `${value.y * 100}%` }} />) : []),
+    ])}</div> : null}
   </div>;
 }
 
@@ -535,9 +579,9 @@ function MultiViewActions({ view, candidate, reference, run, setUi }: { view: Vi
   return <div className="multi-view-actions"><button type="button" onClick={() => void run("compare.swap", {})}>Swap</button><button type="button" disabled={candidate == null} onClick={() => void run("compare.makeSelect", {})}>Make Select</button>{view === "reference" ? <button type="button" onClick={() => { setUi({ referenceId: reference }); void run("photo.setReference", { id: reference }); }}>Keep Reference</button> : null}</div>;
 }
 
-function BeforeAfterStage({ mode, photoId, photo, previewEdge, viewGeneration, develop, onHistogram, onPointerDown, onPointerMove, onPointerUp }: { mode: UiState["beforeAfter"]; photoId: number | null; photo: PhotoSummary | null; previewEdge: number; viewGeneration: number; develop: DevelopShape; onHistogram: (value: unknown) => void; onPointerDown: (event: PointerEvent<HTMLElement>) => void; onPointerMove: (event: PointerEvent<HTMLElement>) => void; onPointerUp: (event: PointerEvent<HTMLElement>) => void }) {
+function BeforeAfterStage({ mode, photoId, photo, previewEdge, viewGeneration, develop, onHistogram, onPointerDown, onPointerMove, onPointerUp, onPointerCancel }: { mode: UiState["beforeAfter"]; photoId: number | null; photo: PhotoSummary | null; previewEdge: number; viewGeneration: number; develop: DevelopShape; onHistogram: (value: unknown) => void; onPointerDown: (event: PointerEvent<HTMLElement>) => void; onPointerMove: (event: PointerEvent<HTMLElement>) => void; onPointerUp: (event: PointerEvent<HTMLElement>) => void; onPointerCancel: (event: PointerEvent<HTMLElement>) => void }) {
   const vertical = mode === "topBottom" || mode === "splitTopBottom";
-  return <div className={`before-after-panes ${vertical ? "vertical" : "horizontal"} ${mode === "split" || mode === "splitTopBottom" ? "split-mode" : ""}`}><div className="before-after-pane"><StageImage photoId={photoId} photo={photo} previewEdge={previewEdge} slot="before" before viewGeneration={viewGeneration} develop={develop} onHistogram={onHistogram} /><span className="pane-label">Before</span></div><div className="before-after-pane"><StageImage photoId={photoId} photo={photo} previewEdge={previewEdge} slot="after" viewGeneration={viewGeneration} develop={develop} onHistogram={onHistogram} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} /><span className="pane-label">After</span></div></div>;
+  return <div className={`before-after-panes ${vertical ? "vertical" : "horizontal"} ${mode === "split" || mode === "splitTopBottom" ? "split-mode" : ""}`}><div className="before-after-pane"><StageImage photoId={photoId} photo={photo} previewEdge={previewEdge} slot="before" before viewGeneration={viewGeneration} develop={develop} onHistogram={onHistogram} /><span className="pane-label">Before</span></div><div className="before-after-pane"><StageImage photoId={photoId} photo={photo} previewEdge={previewEdge} slot="after" viewGeneration={viewGeneration} develop={develop} onHistogram={onHistogram} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} /><span className="pane-label">After</span></div></div>;
 }
 
 export function StageWorkspace() {
@@ -552,6 +596,7 @@ export function StageWorkspace() {
   const burst = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pending = useRef<{ id: string; params: Record<string, unknown> } | null>(null);
   const commandQueue = useRef(Promise.resolve());
+  const interaction = useRef(false);
 
   const selection: number[] = useMemo(() => snapshot?.selection ?? [], [snapshot?.selection]);
   const candidateIds = selection.filter((id) => id !== active);
@@ -568,14 +613,17 @@ export function StageWorkspace() {
   const zoom = typeof ui.zoom === "number" ? ui.zoom : ui.zoom === "fill" ? 1.25 : 1;
   const sourceAspect = photo && photo.h > 0 ? photo.w / photo.h : 1.5;
   const previewEdge = Math.max(256, Math.min(8192, Math.round(Number.isFinite(ui.previewEdge) ? ui.previewEdge : 2560)));
-  const inferredMask = Array.isArray(develop.masks) ? number(record(develop.masks[develop.masks.length - 1]).id, -1) : -1;
-  const activeMask = number((snapshot as (DesktopSnapshot & { activeMask?: unknown }) | null)?.activeMask, number(record(snapshot?.source).activeMask ?? record(snapshot?.source).active_mask, number(develop.activeMask ?? develop.active_mask, inferredMask)));
+  const activeMask = number((snapshot as (DesktopSnapshot & { activeMask?: unknown }) | null)?.activeMask, number(record(snapshot?.source).activeMask ?? record(snapshot?.source).active_mask, -1));
 
   const send = useCallback((id: string, params: Record<string, unknown> = {}) => {
     const next = commandQueue.current.then(() => run(id, params));
     commandQueue.current = next.then(() => undefined, () => undefined);
     return next;
   }, [run]);
+
+  const safeSend = useCallback(async (id: string, params: Record<string, unknown> = {}) => {
+    try { await send(id, params); } catch { /* cleanup must complete after command failures */ }
+  }, [send]);
 
   const commitBurst = useCallback(async () => {
     if (burst.current) clearTimeout(burst.current);
@@ -590,18 +638,24 @@ export function StageWorkspace() {
     burst.current = setTimeout(commitBurst, 400);
   }, [commitBurst]);
 
-  useEffect(() => () => { if (burst.current) clearTimeout(burst.current); }, []);
+  useEffect(() => () => {
+    if (burst.current) clearTimeout(burst.current);
+    burst.current = null;
+    pending.current = null;
+    if (interaction.current) void safeSend("develop.cancelInteraction", {});
+  }, [safeSend]);
 
   const pointAt = useCallback((event: PointerEvent<HTMLElement>) => invertPhotoPoint(event, event.currentTarget, develop, sourceAspect, zoom, pan), [develop, pan, sourceAspect, zoom]);
 
   const beginPointer = useCallback((event: PointerEvent<HTMLElement>) => {
     if (active == null) return;
+    interaction.current = true;
     const p = pointAt(event);
     const crop = cropOf(develop).rect;
     if (ui.panel === "crop") {
       event.currentTarget.setPointerCapture(event.pointerId);
       const angle = cropOf(develop).angle;
-      const straight = rotatePoint(p, angle);
+      const straight = rotatePoint(p, angle, orientedAspectFor(develop, sourceAspect));
       const handle = cropHandleAt(straight, crop);
       const center = { x: (crop.x0 + crop.x1) / 2, y: (crop.y0 + crop.y1) / 2 };
       const pointerAngle = Math.atan2(straight.y - center.y, straight.x - center.x);
@@ -616,7 +670,7 @@ export function StageWorkspace() {
       event.currentTarget.setPointerCapture(event.pointerId);
       const tool = ui.tool === "selection" ? "object" : ui.tool || "brush";
       const radial = tool === "radial" ? maskShapes(develop, "selected", activeMask).find(({ shape }) => String(shape.kind ?? "") === "radial") : undefined;
-      const radialAction = radial ? radialHandleAt(p, radial.shape) : null;
+      const radialAction = radial ? radialHandleAt(p, radial.shape, orientedAspectFor(develop, sourceAspect)) : null;
       const kind = radialAction === "move" ? "radialMove" : radialAction === "rx" || radialAction === "ry" || radialAction === "rotate" ? "radialResize" : tool;
       setDrag({ kind, start: p, last: p, points: tool === "brush" ? [p] : undefined, radialHandle: radialAction === "rx" || radialAction === "ry" || radialAction === "rotate" ? radialAction : undefined, maskId: radial?.id, component: radial?.component, startShape: radial?.shape });
       void send("develop.beginInteraction", { label: "Mask" });
@@ -624,13 +678,13 @@ export function StageWorkspace() {
       if (tool === "object") void send("mask.objectPoint", { x: p.x, y: p.y, exclude: event.altKey, ...(activeMask > 0 ? { id: activeMask } : {}) });
     }
     if (ui.panel === "edit" && ui.tool === "wbPicker") { void send("develop.wbPick", { x: p.x, y: p.y }); setUi({ tool: "" }); }
-  }, [active, activeMask, develop, pointAt, send, setUi, ui.panel, ui.tool]);
+  }, [active, activeMask, develop, pointAt, send, setUi, sourceAspect, ui.panel, ui.tool]);
 
   const movePointer = useCallback((event: PointerEvent<HTMLElement>) => {
     if (!drag) return;
     const p = pointAt(event);
     if (drag.kind === "crop" && drag.startBox) {
-      const straight = rotatePoint(p, cropOf(develop).angle);
+      const straight = rotatePoint(p, cropOf(develop).angle, orientedAspectFor(develop, sourceAspect));
       const dx = straight.x - drag.start.x;
       const dy = straight.y - drag.start.y;
       const next = { x0: drag.startBox.x0, y0: drag.startBox.y0, x1: drag.startBox.x1, y1: drag.startBox.y1 };
@@ -645,7 +699,7 @@ export function StageWorkspace() {
       const y1 = Math.min(1, Math.max(0.02, Math.max(next.y1, next.y0 + 0.02)));
       gestureValue("crop.set", { rect: [x0, y0, x1, y1] });
     } else if (drag.kind === "cropAngle" && drag.startBox != null && drag.startAngle != null && drag.startPointerAngle != null) {
-      const straight = rotatePoint(p, cropOf(develop).angle);
+      const straight = rotatePoint(p, cropOf(develop).angle, orientedAspectFor(develop, sourceAspect));
       const center = { x: (drag.startBox.x0 + drag.startBox.x1) / 2, y: (drag.startBox.y0 + drag.startBox.y1) / 2 };
       const currentAngle = Math.atan2(straight.y - center.y, straight.x - center.x);
       const degrees = drag.startAngle + ((currentAngle - drag.startPointerAngle) * 180) / Math.PI;
@@ -656,7 +710,7 @@ export function StageWorkspace() {
     } else if (drag.kind === "linear") {
       gestureValue("mask.update", { ...(drag.maskId != null ? { id: drag.maskId } : {}), ...(drag.component != null ? { component: drag.component } : {}), shape: { kind: "linear", start: { x: drag.start.x, y: drag.start.y }, end: { x: p.x, y: p.y } } });
     } else if (drag.kind === "radial") {
-      gestureValue("mask.update", { ...(drag.maskId != null ? { id: drag.maskId } : {}), ...(drag.component != null ? { component: drag.component } : {}), shape: radialShapeFromDrag(drag.start, p, sourceAspect) });
+      gestureValue("mask.update", { ...(drag.maskId != null ? { id: drag.maskId } : {}), ...(drag.component != null ? { component: drag.component } : {}), shape: radialShapeFromDrag(drag.start, p, sourceAspect, String(develop.orientation ?? "normal")) });
     } else if ((drag.kind === "radialMove" || drag.kind === "radialResize") && drag.startShape) {
       const shape = { ...drag.startShape };
       const center = shapePoint(shape.center) ?? drag.start;
@@ -671,7 +725,8 @@ export function StageWorkspace() {
         shape.angle = startAngle + (after - before) * 180 / Math.PI;
       } else {
         const angle = -startAngle * Math.PI / 180;
-        const local = { x: (p.x - center.x) * Math.cos(angle) - (p.y - center.y) * Math.sin(angle), y: (p.x - center.x) * Math.sin(angle) + (p.y - center.y) * Math.cos(angle) };
+        const localLong = normalizedToLong({ x: p.x - center.x, y: p.y - center.y }, orientedAspectFor(develop, sourceAspect));
+        const local = { x: localLong.x * Math.cos(angle) - localLong.y * Math.sin(angle), y: localLong.x * Math.sin(angle) + localLong.y * Math.cos(angle) };
         if (drag.radialHandle === "rx") shape.rx = Math.max(0.005, Math.abs(local.x));
         if (drag.radialHandle === "ry") shape.ry = Math.max(0.005, Math.abs(local.y));
       }
@@ -681,24 +736,40 @@ export function StageWorkspace() {
     } else if (drag.kind === "eye") {
       setDrag((current) => current ? { ...current, last: p } : current);
     }
-  }, [drag, gestureValue, pointAt, sourceAspect]);
+  }, [develop, drag, gestureValue, pointAt, sourceAspect]);
 
   const endPointer = useCallback(async (event: PointerEvent<HTMLElement>) => {
     if (!drag) return;
     const p = pointAt(event);
-    if (drag.kind === "brush" && drag.points?.length) {
-      await send("mask.brushStroke", { ...(drag.maskId != null ? { id: drag.maskId } : {}), points: drag.points.map((value) => [value.x, value.y]), size: ui.brushSize / 1000, feather: ui.brushFeather / 100 });
-    } else if (drag.kind === "spot") {
-      const radius = Math.max(0.005, Math.abs(p.x - drag.start.x) || 0.025);
-      const mode = ui.tool === "clone" ? "clone" : ui.tool === "heal" ? "heal" : "remove";
-      await send("spot.add", { mode, points: [[drag.start.x, drag.start.y]], size: radius, source: [p.x - drag.start.x, p.y - drag.start.y] });
-    } else if (drag.kind === "eye") {
-      await send("redeye.add", { center: [drag.start.x, drag.start.y], rx: Math.max(0.01, Math.abs(p.x - drag.start.x)), ry: Math.max(0.01, Math.abs(p.y - drag.start.y)) });
+    try {
+      if (drag.kind === "brush" && drag.points?.length) {
+        await send("mask.brushStroke", { ...(drag.maskId != null ? { id: drag.maskId } : {}), points: drag.points.map((value) => [value.x, value.y]), size: ui.brushSize / 1000, feather: ui.brushFeather / 100 });
+      } else if (drag.kind === "spot") {
+        const radius = Math.max(0.005, Math.abs(p.x - drag.start.x) || 0.025);
+        const mode = ui.tool === "clone" ? "clone" : ui.tool === "heal" ? "heal" : "remove";
+        await send("spot.add", { mode, points: [[drag.start.x, drag.start.y]], size: radius, source: [p.x - drag.start.x, p.y - drag.start.y] });
+      } else if (drag.kind === "eye") {
+        await send("redeye.add", { center: [drag.start.x, drag.start.y], rx: Math.max(0.01, Math.abs(p.x - drag.start.x)), ry: Math.max(0.01, Math.abs(p.y - drag.start.y)) });
+      }
+      await commitBurst();
+    } catch {
+      // Queue continues; endInteraction still closes native gesture below.
+    } finally {
+      await safeSend("develop.endInteraction", {});
+      interaction.current = false;
+      setDrag(null);
     }
-    await commitBurst();
-    await send("develop.endInteraction", {});
+  }, [commitBurst, drag, pointAt, safeSend, send, ui.brushFeather, ui.brushSize, ui.tool]);
+
+  const cancelPointer = useCallback((event?: PointerEvent<HTMLElement>) => {
+    if (event && event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    if (burst.current) clearTimeout(burst.current);
+    burst.current = null;
+    pending.current = null;
+    interaction.current = false;
+    void safeSend("develop.cancelInteraction", {});
     setDrag(null);
-  }, [commitBurst, drag, pointAt, send, ui.brushFeather, ui.brushSize, ui.tool]);
+  }, [safeSend]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -706,8 +777,7 @@ export function StageWorkspace() {
         if (burst.current) clearTimeout(burst.current);
         burst.current = null;
         pending.current = null;
-        void send("develop.cancelInteraction", {});
-        setDrag(null);
+        cancelPointer();
         return;
       }
       if (event.defaultPrevented || event.isComposing || isEditableTarget(event.target)) return;
@@ -719,7 +789,7 @@ export function StageWorkspace() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [drag, send, setUi, ui.cropOverlay, ui.panel, ui.slideshow, ui.tool]);
+  }, [cancelPointer, drag, send, setUi, ui.cropOverlay, ui.panel, ui.slideshow, ui.tool]);
 
   const routeView = useCallback((view: ViewMode) => {
     setUi({ view, panel: view === "people" ? "info" : ui.panel });
@@ -738,7 +808,7 @@ export function StageWorkspace() {
     <div className="stage-topbar"><label className="stage-view-mode"><span>View</span><select aria-label="View mode" value={views.some((view) => view.id === ui.view) ? ui.view : "detail"} onChange={(event) => routeView(event.target.value as ViewMode)}>{views.map((view) => <option key={view.id} value={view.id}>{view.label}</option>)}</select></label><div className="stage-photo-title"><strong>{titleFor(photo)}</strong><span>{photo ? `${photo.w} × ${photo.h}` : ""}</span></div><MultiViewActions view={ui.view} candidate={candidate} reference={ui.referenceId} run={run} setUi={setUi} /><div className="stage-status" aria-live="polite">{snapshot?.status.previewBuild ? <span className="stage-loading">Rendering preview…</span> : snapshot?.status.unsaved ? <span className="stage-unsaved">Unsaved changes</span> : snapshot ? <span className="stage-saved">Saved</span> : null}{snapshot?.status.importing ? <span>Importing…</span> : null}{snapshot?.status.exporting ? <span>Exporting…</span> : null}{error ? <span className="stage-error">{error}</span> : null}{notice ? <span>{notice}</span> : null}</div></div>
     <div className="stage-body">
       <div className="stage-canvas" style={{ ["--stage-zoom" as string]: zoom, ["--stage-pan-x" as string]: `${pan.x * 100}%`, ["--stage-pan-y" as string]: `${pan.y * 100}%` }}>
-        {ui.view === "compare" ? <div className="compare-panes"><div className="compare-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} before={ui.beforeAfter === "original"} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /><span className="pane-label">Select</span></div><div className="compare-pane"><StageImage photoId={candidate} photo={photoFor(candidate)} previewEdge={previewEdge} slot={previewSlot(ui.view, 1)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span className="pane-label">Candidate {candidate ?? "—"}</span></div></div> : ui.view === "reference" ? <div className="compare-panes"><div className="compare-pane"><StageImage photoId={ui.referenceId} photo={photoFor(ui.referenceId)} previewEdge={previewEdge} slot="reference" viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span className="pane-label">Reference {ui.referenceId ?? "—"}</span></div><div className="compare-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot="reference-active" viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /><span className="pane-label">Active</span></div></div> : ui.view === "survey" ? <div className="survey-grid">{(selection.length ? selection : active == null ? [] : [active]).map((id, index) => <button type="button" className={id === active ? "survey-photo selected" : "survey-photo"} key={id} onClick={() => { setUi({ view: "detail" }); void send("library.select", { ids: [id], active: id, mode: "replace" }); }}><StageImage photoId={id} photo={photoFor(id)} previewEdge={previewEdge} slot={previewSlot(ui.view, index)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span>{index + 1}</span></button>)}</div> : ui.view === "people" ? <div className="people-stage"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><div className="face-boxes">{Array.isArray(record(snapshot?.source).faces) ? (record(snapshot?.source).faces as unknown[]).map((face, index) => { const f = record(face); const r = box(f.rect ?? f.bounds) ?? { x0: 0.3 + index * 0.05, y0: 0.25, x1: 0.44 + index * 0.05, y1: 0.42 }; return <span key={index} style={{ left: `${r.x0 * 100}%`, top: `${r.y0 * 100}%`, width: `${(r.x1 - r.x0) * 100}%`, height: `${(r.y1 - r.y0) * 100}%` }} />; }) : null}</div></div> : ui.beforeAfter !== "off" && ui.beforeAfter !== "original" ? <BeforeAfterStage mode={ui.beforeAfter} photoId={active} photo={photoFor(active)} previewEdge={previewEdge} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /> : <div className="single-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} before={ui.beforeAfter === "original"} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} />{ui.panel === "crop" ? <CropOverlay develop={develop} guide={ui.cropOverlay} /> : null}{ui.maskOverlay && ui.panel === "masking" ? <MaskOverlay develop={develop} activeMask={activeMask} mode={ui.maskOverlayMode} pins={ui.maskPins} /> : null}{ui.panel === "remove" ? <SpotsOverlay develop={develop} /> : null}{ui.panel === "redeye" ? <SpotsOverlay develop={develop} eyes /> : null}{ui.clipping ? <div className="clipping-overlay" aria-label="Clipping preview" /> : null}</div>}
+        {ui.view === "compare" ? <div className="compare-panes"><div className="compare-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} before={ui.beforeAfter === "original"} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} onPointerCancel={cancelPointer} /><span className="pane-label">Select</span></div><div className="compare-pane"><StageImage photoId={candidate} photo={photoFor(candidate)} previewEdge={previewEdge} slot={previewSlot(ui.view, 1)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span className="pane-label">Candidate {candidate ?? "—"}</span></div></div> : ui.view === "reference" ? <div className="compare-panes"><div className="compare-pane"><StageImage photoId={ui.referenceId} photo={photoFor(ui.referenceId)} previewEdge={previewEdge} slot="reference" viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span className="pane-label">Reference {ui.referenceId ?? "—"}</span></div><div className="compare-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot="reference-active" viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} onPointerCancel={cancelPointer} /><span className="pane-label">Active</span></div></div> : ui.view === "survey" ? <div className="survey-grid">{(selection.length ? selection : active == null ? [] : [active]).map((id, index) => <button type="button" className={id === active ? "survey-photo selected" : "survey-photo"} key={id} onClick={() => { setUi({ view: "detail" }); void send("library.select", { ids: [id], active: id, mode: "replace" }); }}><StageImage photoId={id} photo={photoFor(id)} previewEdge={previewEdge} slot={previewSlot(ui.view, index)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span>{index + 1}</span></button>)}</div> : ui.view === "people" ? <div className="people-stage"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><div className="face-boxes">{Array.isArray(record(snapshot?.source).faces) ? (record(snapshot?.source).faces as unknown[]).map((face, index) => { const f = record(face); const r = box(f.rect ?? f.bounds) ?? { x0: 0.3 + index * 0.05, y0: 0.25, x1: 0.44 + index * 0.05, y1: 0.42 }; return <span key={index} style={{ left: `${r.x0 * 100}%`, top: `${r.y0 * 100}%`, width: `${(r.x1 - r.x0) * 100}%`, height: `${(r.y1 - r.y0) * 100}%` }} />; }) : null}</div></div> : ui.beforeAfter !== "off" && ui.beforeAfter !== "original" ? <BeforeAfterStage mode={ui.beforeAfter} photoId={active} photo={photoFor(active)} previewEdge={previewEdge} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} onPointerCancel={cancelPointer} /> : <div className="single-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} before={ui.beforeAfter === "original"} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} onPointerCancel={cancelPointer} />{ui.panel === "crop" ? <CropOverlay develop={develop} guide={ui.cropOverlay} /> : null}{ui.maskOverlay && ui.panel === "masking" ? <MaskOverlay develop={develop} activeMask={activeMask} mode={ui.maskOverlayMode} pins={ui.maskPins} sourceAspect={sourceAspect} zoom={zoom} pan={pan} brushPreview={drag?.kind === "brush" ? drag.points : undefined} /> : null}{ui.panel === "remove" ? <SpotsOverlay develop={develop} /> : null}{ui.panel === "redeye" ? <SpotsOverlay develop={develop} eyes /> : null}{ui.clipping ? <div className="clipping-overlay" aria-label="Clipping preview" /> : null}</div>}
         {ui.infoOverlay ? <InfoOverlay photo={photo} mode={ui.infoOverlay} onClose={() => setUi({ infoOverlay: 0 })} /> : null}
         {ui.navigator ? <Navigator zoom={zoom} pan={pan} onChange={setPan} /> : null}
         {histogram ? <div className="histogram-badge" aria-label="Histogram available">Histogram</div> : null}
