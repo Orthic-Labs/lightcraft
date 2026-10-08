@@ -55,11 +55,6 @@ struct App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.startup_frame_pending {
-            self.startup_frame_pending = false;
-        } else {
-            lightcraft_engine::gpu::backend::startup_succeeded();
-        }
         #[cfg(target_os = "macos")]
         if let Some(m) = self.menu.as_mut() {
             m.update(&mut self.app, ctx);
@@ -72,9 +67,15 @@ impl eframe::App for App {
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.app.ui(ui);
+        if self.startup_frame_pending {
+            self.startup_frame_pending = false;
+            lightcraft_engine::gpu::backend::startup_succeeded();
+        }
     }
     fn on_exit(&mut self) {
-        lightcraft_engine::gpu::backend::startup_succeeded();
+        if !self.startup_frame_pending {
+            lightcraft_engine::gpu::backend::startup_succeeded();
+        }
         if let Err(e) = self.prefs.save(&self.app) {
             log::error!("{e}");
         }
@@ -242,6 +243,9 @@ struct PrefsWriter {
     failing: bool,
     /// `ui.json` couldn't be read at launch: never overwrite it this session.
     keep_file: bool,
+    /// Original GPU preference retained while this launch runs in recovery mode. It is cleared
+    /// when the user turns GPU rendering back on, so recovery never persists an automatic disable.
+    recovery_gpu_preference: Option<bool>,
 }
 
 impl PrefsWriter {
@@ -256,7 +260,15 @@ impl PrefsWriter {
             return Ok(());
         }
         let Some(path) = self.path.clone() else { return Ok(()) };
-        let bytes = serde_json::to_vec_pretty(ui).map_err(|e| e.to_string())?;
+        let mut persisted = ui.clone();
+        if let Some(original) = self.recovery_gpu_preference {
+            if ui.settings.gpu {
+                self.recovery_gpu_preference = None;
+            } else {
+                persisted.settings.gpu = original;
+            }
+        }
+        let bytes = serde_json::to_vec_pretty(&persisted).map_err(|e| e.to_string())?;
         if bytes == self.written {
             return Ok(());
         }
@@ -627,14 +639,15 @@ fn main() -> eframe::Result {
             app.integrated_titlebar = cfg!(target_os = "macos");
             app.notices.extend(prefs_warning);
             // what's on disk now: only changes are written
-            let writer = PrefsWriter {
+            let mut writer = PrefsWriter {
                 path: if in_memory { None } else { prefs_path() },
                 written: serde_json::to_vec_pretty(&app.ui).unwrap_or_default(),
                 library: app.ui.settings.library_path.clone(),
                 keep_file: keep_prefs_file,
+                recovery_gpu_preference: gpu_crash.as_ref().map(|_| app.ui.settings.gpu),
                 ..Default::default()
             };
-            // after the snapshot above, so the writer saves the switched-off preference
+            // Keep recovery GPU state in memory while preserving saved user preference.
             if let Some(notice) = gpu_crash {
                 app.ui.settings.gpu = false;
                 app.notices.push(notice);
@@ -695,6 +708,9 @@ fn startup_failed(error: &str, log_file: Option<&std::path::Path>) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static GPU_MARKER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn dir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("lc-app-prefs-{tag}-{}", std::process::id()));
@@ -774,6 +790,7 @@ mod tests {
     /// the next ordinary launch finds it, reports it and clears it.
     #[test]
     fn memory_session_leaves_the_gpu_marker_and_folder_alone() {
+        let _lock = GPU_MARKER_TEST_LOCK.lock().unwrap();
         let d = dir("gpu-marker-memory");
         let _ = std::fs::remove_dir_all(&d);
         let m = d.join("gpu-init.marker");
@@ -798,6 +815,7 @@ mod tests {
     /// Issue #136: a GPU init marker left by a crashed launch is reported once and removed.
     #[test]
     fn gpu_crash_marker_is_reported_once() {
+        let _lock = GPU_MARKER_TEST_LOCK.lock().unwrap();
         let d = dir("gpu-marker");
         let m = d.join("gpu-init.marker");
         assert_eq!(lightcraft_engine::gpu::backend::take_init_marker(&m), None);
@@ -811,6 +829,7 @@ mod tests {
 
     #[test]
     fn gpu_startup_marker_survives_first_frame_then_clears_on_second_launch() {
+        let _lock = GPU_MARKER_TEST_LOCK.lock().unwrap();
         let d = dir("gpu-startup");
         let m = d.join("gpu-init.marker");
         lightcraft_engine::gpu::backend::set_init_marker(Some(m.clone()));
@@ -823,6 +842,22 @@ mod tests {
         lightcraft_engine::gpu::backend::startup_succeeded();
         assert!(!m.exists(), "successful recovery launch clears marker");
         lightcraft_engine::gpu::backend::set_init_marker(None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn gpu_recovery_does_not_persist_automatic_disable() {
+        let d = dir("gpu-recovery-pref");
+        let _ = std::fs::remove_dir_all(&d);
+        let path = d.join("ui.json");
+        let ui = UiState::default();
+        let original = serde_json::to_vec_pretty(&ui).unwrap();
+        let mut writer =
+            PrefsWriter { path: Some(path.clone()), written: original.clone(), recovery_gpu_preference: Some(true), ..Default::default() };
+        let mut recovery_ui = ui;
+        recovery_ui.settings.gpu = false;
+        writer.save_ui(&recovery_ui, false).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
         let _ = std::fs::remove_dir_all(&d);
     }
 

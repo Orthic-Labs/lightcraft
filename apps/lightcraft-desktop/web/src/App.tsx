@@ -102,9 +102,16 @@ function Workspace() {
   const commands = useMemo(() => paletteCommands(snapshot, (id) => run(id), locale), [locale, run, snapshot]);
   useCommands(commands);
   useEffect(() => {
-    const timer = window.setTimeout(() => { void shell.ready(); }, 0);
-    return () => window.clearTimeout(timer);
-  }, []);
+    let frame = 0;
+    const timer = window.setTimeout(() => {
+      void shell.ready();
+      frame = window.requestAnimationFrame(() => { void native('startupReady', {}); });
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [native]);
   return <>
     <ShortcutBindings commands={commands} />
     <AppShell

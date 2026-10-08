@@ -220,6 +220,8 @@ pub fn read_init_marker(path: &std::path::Path) -> Option<String> {
 mod tests {
     use super::*;
 
+    static MARKER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn parses_backend_names() {
         assert_eq!(parse_backends("dx12"), Some(BackendChoice::Use(Backends::DX12)));
@@ -272,6 +274,7 @@ mod tests {
 
     #[test]
     fn init_marker_is_written_during_creation_and_removed_after() {
+        let _lock = MARKER_TEST_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("lc-gpu-marker-{}", std::process::id()));
         let m = dir.join("gpu-init.marker");
         let _ = std::fs::remove_dir_all(&dir);
