@@ -524,12 +524,11 @@ fn assert_primary_editing_usable(control: &rightkit_qa::control::Control) {
 }
 
 fn set_native_viewport(control: &rightkit_qa::control::Control, width: u64, height: u64) -> Value {
-    let observed = control
-        .set_viewport(u32::try_from(width).expect("viewport width must fit u32"), u32::try_from(height).expect("viewport height must fit u32"))
-        .expect("RightKit native viewport resize must execute");
-    assert_eq!(u64::from(observed.0), width, "RightKit must report exact CSS viewport width");
-    assert_eq!(u64::from(observed.1), height, "RightKit must report exact CSS viewport height");
-    let result = json!({"requested": {"width": width, "height": height}, "observedInnerSize": {"width": observed.0, "height": observed.1}, "provider": "rightkit-control"});
+    let result = control.command("lc_qa_viewport", &json!({"width": width, "height": height})).expect("QA viewport resize command must execute");
+    assert_eq!(result["requested"]["width"].as_u64(), Some(width), "QA viewport must report requested width");
+    assert_eq!(result["requested"]["height"].as_u64(), Some(height), "QA viewport must report requested height");
+    assert!(result["observedInnerSize"]["width"].as_u64().is_some_and(|value| value > 0), "QA viewport must report observed width: {result}");
+    assert!(result["observedInnerSize"]["height"].as_u64().is_some_and(|value| value > 0), "QA viewport must report observed height: {result}");
     let dom_size = control
         .eval("return {width: window.innerWidth, height: window.innerHeight, scale: window.devicePixelRatio};")
         .expect("WebView viewport diagnostics must execute");

@@ -39,8 +39,8 @@ function checkPins() {
     if (forbidden.test(cargo)) fail(`desktop Cargo.toml contains forbidden dependency form or sidecar reference: ${forbidden}`);
   }
   if (!/rightkit-shell\s*=\s*\{[^}]*default-features\s*=\s*false/.test(cargo)) fail("rightkit-shell must disable default features");
-  if (!/rightkit-control\s*=\s*\{[^}]*version\s*=\s*\"=0\.1\.9\"/.test(cargo)) fail("rightkit-control must stay pinned to =0.1.9");
-  if (!/rightkit-qa\s*=\s*\"=0\.2\.12\"/.test(cargo)) fail("rightkit-qa must stay pinned to =0.2.12");
+  if (!/rightkit-control\s*=\s*\{[^}]*version\s*=\s*\"=0\.1\.6\"/.test(cargo)) fail("rightkit-control must stay pinned to =0.1.6");
+  if (!/rightkit-qa\s*=\s*\"=0\.2\.6\"/.test(cargo)) fail("rightkit-qa must stay pinned to =0.2.6");
 }
 
 function checkNativeConfig() {

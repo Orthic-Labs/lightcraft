@@ -4035,7 +4035,7 @@ dependencies = [
  "lightcraft-sysmem",
  "lightcraft-ui-egui",
  "log",
- "muda 0.21.2",
+ "muda 0.21.1",
  "rfd",
  "serde_json",
  "winresource",
@@ -4610,9 +4610,9 @@ dependencies = [
 
 [[package]]
 name = "muda"
-version = "0.21.2"
+version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4340e89c178916e62879c5c36b7f699019369be413e496178a6983ce91b8bc03"
+checksum = "9a7b000cca0783af26837fe2ebd9ddf1c42279463c085b97622ee1d2f444b89e"
 dependencies = [
  "crossbeam-channel",
  "dpi",
@@ -5861,6 +5861,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "process-wrap"
+version = "8.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3ef4f2f0422f23a82ec9f628ea2acd12871c81a9362b02c43c1aa86acfc3ba1"
+dependencies = [
+ "indexmap 2.14.2",
+ "nix",
+ "tracing",
+ "windows 0.61.1",
+]
+
+[[package]]
 name = "profiling"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6369,15 +6381,15 @@ checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
 
 [[package]]
 name = "rightkit-control"
-version = "0.1.9"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7be1ae6a1bc67ae145bb3cdac56adf87f9e389d0a898642fcc313901970c5d3"
+checksum = "8f6e004b426b8ad1b6168c42db09d46883bb2ba252633a2f3fec57f5d92f82aa"
 dependencies = [
  "rightkit-service",
  "serde_json",
  "tauri",
- "webview2-com 0.38.2",
- "windows 0.61.3",
+ "webview2-com",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -6392,21 +6404,21 @@ dependencies = [
 
 [[package]]
 name = "rightkit-process"
-version = "0.3.1"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fda6e2668f79fb68407c3c3dcd55decab4bf57345a275e65be65b65683800f6d"
+checksum = "2d1af4eb0e6f425987976a7357eff2e52a3317ce6b0ddf2824e0d8240a816687"
 dependencies = [
  "nix",
- "windows 0.61.3",
+ "process-wrap",
+ "windows 0.61.1",
 ]
 
 [[package]]
 name = "rightkit-qa"
-version = "0.2.12"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e77732ba64e9e1dee2866c2b15eab4f9ea48ae34c3049f5d31124bd1e22f4f51"
+checksum = "7a114bee75750a88eb6892366c840dcac0bc2af8ee6964809a966172894e99cd"
 dependencies = [
- "libc",
  "png 0.18.1",
  "rightkit-control",
  "rightkit-framed-sidecar",
@@ -6418,7 +6430,7 @@ dependencies = [
  "time",
  "toml 0.8.2",
  "uuid",
- "windows 0.61.3",
+ "windows 0.61.1",
 ]
 
 [[package]]
@@ -6431,7 +6443,7 @@ dependencies = [
  "rightkit-framed-sidecar",
  "serde",
  "serde_json",
- "windows 0.61.3",
+ "windows 0.61.1",
 ]
 
 [[package]]
@@ -6449,7 +6461,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tauri",
- "webview2-com 0.39.1",
+ "webview2-com",
  "windows 0.62.2",
 ]
 
@@ -7453,7 +7465,7 @@ dependencies = [
  "tray-icon",
  "url",
  "webkit2gtk",
- "webview2-com 0.39.1",
+ "webview2-com",
  "window-vibrancy",
  "windows 0.62.2",
 ]
@@ -7541,7 +7553,7 @@ dependencies = [
  "thiserror 2.0.21",
  "url",
  "webkit2gtk",
- "webview2-com 0.39.1",
+ "webview2-com",
  "windows 0.62.2",
 ]
 
@@ -7566,7 +7578,7 @@ dependencies = [
  "tauri-utils",
  "url",
  "webkit2gtk",
- "webview2-com 0.39.1",
+ "webview2-com",
  "windows 0.62.2",
  "wry",
 ]
@@ -8557,26 +8569,12 @@ dependencies = [
 
 [[package]]
 name = "webview2-com"
-version = "0.38.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7130243a7a5b33c54a444e54842e6a9e133de08b5ad7b5861cd8ed9a6a5bc96a"
-dependencies = [
- "webview2-com-macros",
- "webview2-com-sys 0.38.2",
- "windows 0.61.3",
- "windows-core 0.61.2",
- "windows-implement",
- "windows-interface",
-]
-
-[[package]]
-name = "webview2-com"
 version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f89fca7a704cee10dcb3654c1dbb8941d1783132f1917358af75bec37a7d7e6"
 dependencies = [
  "webview2-com-macros",
- "webview2-com-sys 0.39.1",
+ "webview2-com-sys",
  "windows 0.62.2",
  "windows-core 0.62.2",
 ]
@@ -8590,17 +8588,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "webview2-com-sys"
-version = "0.38.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "381336cfffd772377d291702245447a5251a2ffa5bad679c99e61bc48bacbf9c"
-dependencies = [
- "thiserror 2.0.21",
- "windows 0.61.3",
- "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -8852,9 +8839,9 @@ dependencies = [
 
 [[package]]
 name = "windows"
-version = "0.61.3"
+version = "0.61.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9babd3a767a4c1aef6900409f85f5d53ce2544ccdfaa86dad48c91782c6d6893"
+checksum = "c5ee8f3d025738cb02bad7868bbb5f8a6327501e870bf51f1b455b0a2454a419"
 dependencies = [
  "windows-collections 0.2.0",
  "windows-core 0.61.2",
@@ -9427,7 +9414,7 @@ dependencies = [
  "url",
  "webkit2gtk",
  "webkit2gtk-sys",
- "webview2-com 0.39.1",
+ "webview2-com",
  "windows 0.62.2",
  "windows-core 0.62.2",
  "windows-version",
@@ -9688,18 +9675,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.62"
+version = "0.8.61"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86502bf56ac7c77571a32e2647bb2a15894565e981fb2a48d7bde2d91c965a9d"
+checksum = "879fb705ce98c32e41ebdb970fbe1204f8492423b314c6ab0354c3e7b5542866"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.62"
+version = "0.8.61"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5457206954b06561e2608c7e19cf58b1926586d999c246eebe4502f7e2039d1a"
+checksum = "708882a28301d604fa039cc7727607a98d04c4b86dc76ec9cc683f805d709759"
 dependencies = [
  "proc-macro2",
  "quote",

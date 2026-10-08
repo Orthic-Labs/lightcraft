@@ -28,12 +28,12 @@ log = { workspace = true }
 rfd = { workspace = true }
 tauri = { version = "=2.12.1" }
 rightkit-shell = { version = "=0.1.0", default-features = false }
-rightkit-control = { version = "=0.1.9", features = ["tauri-plugin"], optional = true }
+rightkit-control = { version = "=0.1.6", features = ["tauri-plugin"], optional = true }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.build-dependencies]
 tauri-build = "=2.7.1"
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dev-dependencies]
-rightkit-qa = "=0.2.12"
+rightkit-qa = "=0.2.6"
 lightcraft-tiff = { workspace = true }
 png = { workspace = true }
