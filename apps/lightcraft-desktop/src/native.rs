@@ -627,16 +627,17 @@ fn startup_options(app: &AppHandle<Wry>) -> (HostOptions, PathBuf, Option<String
 fn build_shell() -> rightkit_shell::Shell {
     // LightCraft owns fit/fill/100% & wheel zoom controls in its stage.
     let hardening = rightkit_shell::Hardening { block_zoom: false, ..Default::default() };
-    let qa = std::env::args().any(|arg| arg == "--qa")
+    let args: Vec<String> = std::env::args().collect();
+    let qa = args.iter().any(|arg| arg == "--qa")
         || std::env::var_os("LIGHTCRAFT_DESKTOP_QA").is_some()
         || qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_HIDDEN").as_deref());
-    rightkit_shell::Shell::builder("lightcraft-preview")
-        .app_name("LightCraft")
-        .main_label("main")
-        .hardening(hardening)
-        .show_on_ready(!qa)
-        .menu(menu::spec())
-        .build()
+    let (_, qa_data_dir) = runtime_modes(&args);
+    let mut builder =
+        rightkit_shell::Shell::builder("lightcraft-preview").app_name("LightCraft").main_label("main").hardening(hardening).show_on_ready(!qa);
+    if let Some(data_dir) = qa_data_dir {
+        builder = builder.state_dir(data_dir.join("shell"));
+    }
+    builder.menu(menu::spec()).build()
 }
 
 pub fn run() {

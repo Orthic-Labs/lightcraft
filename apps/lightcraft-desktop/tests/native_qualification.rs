@@ -79,6 +79,12 @@ fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, catal
         label: "lightcraft-desktop-native".into(),
     };
     let control = launch(&spec, &ws, scenario.tracker()).expect("hidden native app must expose rightkit-control");
+    // Control becomes available before React mounts its command subscriptions.
+    wait_for_dom(&control, "return document.querySelector('.lc-content') !== null;");
+    let focused = control
+        .eval("document.activeElement?.blur(); document.body.tabIndex = -1; document.body.focus(); return document.activeElement === document.body;")
+        .expect("native shortcut target must focus after renderer readiness");
+    assert_eq!(focused.as_bool(), Some(true), "native shortcuts must target app content");
     (control, data)
 }
 
@@ -169,6 +175,7 @@ fn is_scoped_preview_src(src: &str) -> bool {
 }
 
 fn wait_for_rendered_preview(control: &rightkit_qa::control::Control, selector: &str, expected_src: Option<&str>) -> Value {
+    let mut last = Value::Null;
     let expression = format!(
         "return (() => {{ const img = document.querySelector({selector:?}); if (!img) return {{ready:false, reason:'missing'}}; const cell = img.closest('.lc-photo-cell'); const src = img.getAttribute('src') || ''; return {{ready: img.complete && img.naturalWidth > 0 && img.naturalHeight > 0, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight, src, active: Boolean(cell?.classList.contains('is-active')), selected: Boolean(cell?.getAttribute('aria-selected') === 'true')}}; }})();"
     );
@@ -186,9 +193,10 @@ fn wait_for_rendered_preview(control: &rightkit_qa::control::Control, selector: 
             }
             return value;
         }
+        last = value;
         sleep(Duration::from_millis(50));
     }
-    panic!("rendered preview did not become ready for selector {selector}: {expression}");
+    panic!("rendered preview did not become ready for selector {selector}: {expression}; last result={last}");
 }
 
 fn assert_active_grid_is_bounded(control: &rightkit_qa::control::Control) {
@@ -349,6 +357,25 @@ fn with_control<T>(
 ) -> T {
     let (mut control, data) = launch_hidden(binary, scenario, catalog);
     let result = catch_unwind(AssertUnwindSafe(|| body(&control, &data)));
+    if result.is_err() {
+        let state = control.eval("return {url: location.href, title: document.title, width: window.innerWidth, height: window.innerHeight, rootChildren: document.getElementById('root')?.childElementCount, activeElement: document.activeElement?.outerHTML.slice(0, 500), preview: document.querySelector('.stage-preview')?.outerHTML, previewStates: Array.from(document.querySelectorAll('[data-preview-state]')).map(node => ({state: node.getAttribute('data-preview-state'), html: node.outerHTML.slice(0, 1000)})), body: document.body.innerText.slice(0, 4000)};");
+        eprintln!("[qa] failure DOM={state:?}");
+        if let Ok(state) = state {
+            let path = scenario.dir().join("failure-dom.json");
+            if let Ok(bytes) = serde_json::to_vec_pretty(&state)
+                && fs::write(&path, bytes).is_ok()
+            {
+                scenario.keep("failure-dom.json", &path);
+            }
+        }
+        let path = scenario.dir().join("failure-native.png");
+        match control.screenshot_to(&path) {
+            Ok(_) => {
+                scenario.keep("failure-native.png", &path);
+            }
+            Err(error) => eprintln!("[qa] failure screenshot unavailable: {error}"),
+        }
+    }
     let stopped = control.stop().expect("native app must stop cleanly");
     assert!(stopped.endpoint_closed, "rightkit-control endpoint must close");
     assert!(stopped.process_gone, "native app process must exit");

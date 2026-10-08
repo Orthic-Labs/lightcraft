@@ -4,7 +4,9 @@
   --lc-muted: color-mix(in srgb, currentColor 62%, transparent);
   display: grid;
   grid-template-columns: var(--lc-sidebar-width) minmax(0, 1fr);
+  min-width: 0;
   min-height: 0;
+  width: 100%;
   height: 100%;
   position: relative;
   background: var(--lc-canvas, #f5f6f8);
@@ -24,7 +26,7 @@
 .lc-source-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lc-source-count { margin-left: auto; color: var(--lc-muted); font-size: 11px; }
 .lc-sidebar-status { margin: auto 8px 0; padding-top: 14px; border-top: 1px solid var(--lc-border); color: var(--lc-muted); font-size: 11px; }
-.lc-library-main { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; position: relative; }
+.lc-library-main { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; width: 100%; min-width: 0; min-height: 0; position: relative; }
 .lc-library-sidebar-toggle { position: absolute; top: 8px; left: 8px; z-index: 3; }
 .lc-library-sidebar-toggle button { width: 30px; height: 30px; border: 1px solid var(--lc-border); border-radius: 6px; background: var(--lc-canvas, #f5f6f8); color: inherit; cursor: pointer; }
 .lc-library-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 58px; padding: 8px 18px 8px 52px; border-bottom: 1px solid var(--lc-border); background: var(--lc-chrome, #fff); }
