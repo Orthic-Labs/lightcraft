@@ -386,11 +386,12 @@ fn assert_workspace_surfaces_unclipped(control: &rightkit_qa::control::Control) 
 
 fn assert_sustained_preview_gestures(control: &rightkit_qa::control::Control, evidence: &Path) {
     wait_for_rendered_preview(control, "img.stage-preview", None);
+    wait_for_rendered_preview(control, "img.lc-filmstrip-preview", None);
     let baseline = snapshot(control);
     let exposure = baseline["develop"]["light"]["exposure"].clone();
     let undo = baseline["undo"].as_u64().expect("gesture baseline undo count required");
     control.eval(r#"return (() => {
-        const t = {frames:0, blank:0, unready:0, errors:[], imageErrors:[], blankSamples:[], phase:"setup", stopped:false};
+        const t = {frames:0, blank:0, unready:0, errors:[], imageErrors:[], blankSamples:[], filmBlank:0, filmUnready:0, phase:"setup", stopped:false};
         const read = () => {
             const images = [...document.querySelectorAll('img.stage-preview')].filter(e => {
                 const css = getComputedStyle(e), r = e.getBoundingClientRect();
@@ -407,6 +408,10 @@ fn assert_sustained_preview_gestures(control: &rightkit_qa::control::Control, ev
         const tick = () => {
             if (t.stopped) return;
             const images = read(); t.frames++;
+            const filmBounds=document.querySelector('.lc-filmstrip-scroll')?.getBoundingClientRect();
+            const filmImages=[...document.querySelectorAll('img.lc-filmstrip-preview')].filter(e=>{const r=e.getBoundingClientRect();return filmBounds&&r.right>filmBounds.left&&r.left<filmBounds.right&&r.width>0&&r.height>0&&getComputedStyle(e).opacity!=='0';});
+            if (!filmImages.length) t.filmBlank++;
+            else if (!filmImages.some(e=>e.complete&&e.naturalWidth>0)) t.filmUnready++;
             if (!images.length) {
                 t.blank++;
                 if (t.blankSamples.length < 160) t.blankSamples.push({at:performance.now(),phase:t.phase,
@@ -475,7 +480,7 @@ fn assert_sustained_preview_gestures(control: &rightkit_qa::control::Control, ev
         t.stopped = true; t.observer.disconnect(); cancelAnimationFrame(t.raf);
         document.querySelector('.stage-workspace').removeEventListener('error',t.onError,true);
         delete window.__lcPreviewStress;
-        return {frames:t.frames,blank:t.blank,unready:t.unready,errors:t.errors,imageErrors:t.imageErrors,blankSamples:t.blankSamples};
+        return {frames:t.frames,blank:t.blank,unready:t.unready,errors:t.errors,imageErrors:t.imageErrors,blankSamples:t.blankSamples,filmBlank:t.filmBlank,filmUnready:t.filmUnready};
     })();"#,
         )
         .expect("preview stress observer cleanup must execute");
@@ -488,6 +493,8 @@ fn assert_sustained_preview_gestures(control: &rightkit_qa::control::Control, ev
     assert!(trace["frames"].as_u64().is_some_and(|count| count >= 10), "frame observer must run: {trace}");
     assert_eq!(trace["blank"].as_u64(), Some(0), "mounted pixels must never disappear during same-photo editing: {trace}");
     assert_eq!(trace["unready"].as_u64(), Some(0), "presented pixels must stay decoded during handoff: {trace}");
+    assert_eq!(trace["filmBlank"].as_u64(), Some(0), "filmstrip pixels must persist during same-photo editing: {trace}");
+    assert_eq!(trace["filmUnready"].as_u64(), Some(0), "filmstrip pixels must remain decoded during editing: {trace}");
     assert_eq!(trace["errors"].as_array().map(Vec::len), Some(0), "no transient Retry/error banners during valid drag: {trace}");
     assert_eq!(trace["imageErrors"].as_array().map(Vec::len), Some(0), "no transport decode errors during valid drag: {trace}");
     assert_eq!(receipt["restored"].as_bool(), Some(true), "stress must restore baseline edits");

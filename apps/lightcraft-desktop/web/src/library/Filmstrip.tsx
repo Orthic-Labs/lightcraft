@@ -13,6 +13,7 @@ const ITEM_STRIDE = ITEM_WIDTH + ITEM_GAP;
 const ITEM_HEIGHT = 66;
 
 type ActiveSearch = { key: string; cancelled: boolean };
+type RetainedSlice = { photos: PhotoSummary[] };
 
 function badge(photo: PhotoSummary): string {
   const values: string[] = [];
@@ -71,6 +72,7 @@ export default function Filmstrip() {
   const [viewportWidth, setViewportWidth] = useState(900);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const activeSearch = useRef<ActiveSearch | null>(null);
+  const retainedSlices = useRef(new Map<string, RetainedSlice>());
   const active = snapshot?.active ?? null;
   const generation = snapshot?.viewGeneration;
   const total = snapshot?.total ?? 0;
@@ -80,9 +82,24 @@ export default function Filmstrip() {
   const nextSlice = usePhotoSlice(nextChunkOffset, PAGE);
   const sliceReady = slice.offset === chunkOffset && slice.generation === generation && !slice.loading;
   const nextSliceReady = nextChunkOffset > chunkOffset && nextSlice.offset === nextChunkOffset && nextSlice.generation === generation && !nextSlice.loading;
-  const filmPhotos = sliceReady ? slice.photos : [];
-  const nextFilmPhotos = nextSliceReady ? nextSlice.photos : [];
-  const loadedFilmPhotos = sliceReady ? [...filmPhotos, ...nextFilmPhotos] : [];
+  const contextKey = JSON.stringify([snapshot?.libraryPath ?? null, snapshot?.source ?? null, snapshot?.filter ?? null, snapshot?.sort ?? '', total]);
+  const sliceKey = (offset: number) => `${contextKey}:${offset}`;
+  const currentSliceKey = sliceKey(chunkOffset);
+  const nextSliceKey = sliceKey(nextChunkOffset);
+  useEffect(() => {
+    if (sliceReady) retainedSlices.current.set(currentSliceKey, { photos: slice.photos });
+    if (nextSliceReady) retainedSlices.current.set(nextSliceKey, { photos: nextSlice.photos });
+    while (retainedSlices.current.size > 8) {
+      const oldest = retainedSlices.current.keys().next().value;
+      if (oldest === undefined) break;
+      retainedSlices.current.delete(oldest);
+    }
+  }, [currentSliceKey, nextSliceKey, nextSlice.photos, nextSliceReady, slice.photos, sliceReady]);
+  const retainedCurrent = retainedSlices.current.get(currentSliceKey);
+  const retainedNext = retainedSlices.current.get(nextSliceKey);
+  const filmPhotos = sliceReady ? slice.photos : retainedCurrent?.photos ?? [];
+  const nextFilmPhotos = nextSliceReady ? nextSlice.photos : retainedNext?.photos ?? [];
+  const loadedFilmPhotos = (sliceReady || retainedCurrent) ? [...filmPhotos, ...nextFilmPhotos] : [];
   const activeIndexHint = snapshot && typeof (snapshot as DesktopSnapshot & { activeIndex?: unknown }).activeIndex === 'number'
     ? (snapshot as DesktopSnapshot & { activeIndex?: number }).activeIndex ?? null
     : null;

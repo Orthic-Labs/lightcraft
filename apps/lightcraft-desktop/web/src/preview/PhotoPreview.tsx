@@ -50,9 +50,10 @@ export function PhotoPreview({ photoId, slot, width, height, viewGeneration = 0,
 
   const renderImage = (image: PresentedImage, visible: boolean) => {
     const isCandidate = candidate?.descriptor.handle === image.descriptor.handle;
-    const layeredStyle: CSSProperties = visible
-      ? { ...frameStyle, position: "absolute", inset: 0, zIndex: 1 }
-      : { ...frameStyle, position: "absolute", inset: 0, zIndex: 2, opacity: 0 };
+    // Both layers may paint: the already-decoded candidate covers retained pixels
+    // when its mounted image is ready. Do not hide it with opacity while retiring
+    // the old handle; native webviews can paint that handoff before promotion commits.
+    const layeredStyle: CSSProperties = { ...frameStyle, position: "absolute", inset: 0, zIndex: visible ? 1 : 2 };
     const onLoad: ImgHTMLAttributes<HTMLImageElement>["onLoad"] = (event) => {
       imageProps.onLoad?.(event);
       if (isCandidate && event.currentTarget.getAttribute("src") === image.url) promote(image);

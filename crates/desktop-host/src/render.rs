@@ -596,24 +596,8 @@ mod tests {
             before: false,
             sequence: 1,
         };
-        let first_result = renderer.cached_thumb(7, 11, &request);
-        assert!(first_result.is_some(), "cached thumb should mint first lease");
-        let first = match first_result {
-            Some(value) => value,
-            None => {
-                assert!(false, "cached thumb should mint first lease");
-                return;
-            }
-        };
-        let second_result = renderer.cached_thumb(7, 11, &PreviewRequest { sequence: 2, ..request });
-        assert!(second_result.is_some(), "cached thumb should mint second lease");
-        let second = match second_result {
-            Some(value) => value,
-            None => {
-                assert!(false, "cached thumb should mint second lease");
-                return;
-            }
-        };
+        let first = renderer.cached_thumb(7, 11, &request).expect("cached thumb should mint first lease");
+        let second = renderer.cached_thumb(7, 11, &PreviewRequest { sequence: 2, ..request }).expect("cached thumb should mint second lease");
         assert_ne!(first.handle, second.handle);
         assert!(store.acknowledge(&first.handle));
         assert!(store.get(&second.handle).is_some());
