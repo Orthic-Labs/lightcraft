@@ -339,7 +339,11 @@ fn with_control<T>(
     assert!(stopped.endpoint_closed, "rightkit-control endpoint must close");
     assert!(stopped.process_gone, "native app process must exit");
     if cfg!(target_os = "macos") {
-        assert!(stopped.owned_never_frontmost, "hidden qualification must never activate app");
+        assert!(
+            stopped.owned_never_frontmost,
+            "hidden qualification must never activate app: states={:?}, owned_frontmost_pids={:?}, before={:?}, after={:?}",
+            stopped.frontmost_states, stopped.owned_frontmost_pids, stopped.frontmost_before, stopped.frontmost_after,
+        );
     }
     match result {
         Ok(value) => value,

@@ -295,7 +295,18 @@ fn active_close_reason(snapshot: &Value) -> Option<String> {
 
 #[cfg(feature = "qa-native")]
 fn control_args(args: &str) -> Result<Value, String> {
-    if args.trim().is_empty() { Ok(Value::Null) } else { serde_json::from_str(args).or_else(|_| Ok(Value::String(args.to_string()))) }
+    if args.trim().is_empty() {
+        return Ok(Value::Null);
+    }
+    let parsed = serde_json::from_str::<Value>(args).unwrap_or_else(|_| Value::String(args.to_string()));
+    let Some(serialized) = parsed.get("args").filter(|_| parsed.get("name").is_some()).and_then(Value::as_str) else {
+        return Ok(parsed);
+    };
+    if serialized.trim().is_empty() {
+        Ok(Value::Null)
+    } else {
+        serde_json::from_str(serialized).or_else(|_| Ok(Value::String(serialized.to_string())))
+    }
 }
 
 #[cfg(feature = "qa-native")]
@@ -310,8 +321,7 @@ fn control_json(value: Value) -> Result<String, String> {
 }
 
 #[cfg(feature = "qa-native")]
-fn qa_viewport(app: &AppHandle<Wry>, raw: &str) -> Result<Value, String> {
-    let args = control_args(raw)?;
+fn qa_viewport(app: &AppHandle<Wry>, args: &Value) -> Result<Value, String> {
     let object = args.as_object().ok_or_else(|| "lc_qa_viewport expects an object".to_string())?;
     let width = object.get("width").and_then(Value::as_u64).ok_or_else(|| "lc_qa_viewport requires width".to_string())?;
     let height = object.get("height").and_then(Value::as_u64).ok_or_else(|| "lc_qa_viewport requires height".to_string())?;
@@ -376,7 +386,7 @@ fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<Strin
             }
             value
         }
-        "lc_qa_viewport" => qa_viewport(app, raw)?,
+        "lc_qa_viewport" => qa_viewport(app, &args)?,
         "lc_native" => {
             let object = args.as_object().ok_or_else(|| "lc_native expects an object".to_string())?;
             let action = object.get("action").and_then(Value::as_str).ok_or_else(|| "lc_native requires action".to_string())?;
