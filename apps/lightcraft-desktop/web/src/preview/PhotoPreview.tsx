@@ -24,12 +24,9 @@ export function PhotoPreview({ photoId, slot, width, height, viewGeneration = 0,
   }, [photoId, preview.state.descriptor?.photoId, preview.state.url]);
   const frameStyle: CSSProperties = { width: "100%", height: "100%", minWidth: 1, minHeight: 1, ...style };
   const descriptor = preview.state.descriptor;
-  // Bind DOM events to descriptor which produced this URL. Hook-level refs reject late
-  // events from an old image after a request/photo swap.
-  const onLoad = descriptor ? () => preview.onImageLoad(descriptor) : undefined;
   const onError = descriptor ? () => preview.onImageError(descriptor) : undefined;
   const image = url
-    ? <img {...imageProps} {...(alt === "" ? { alt: "Photo preview" } : { alt })} className={className} style={frameStyle} src={url} width={width} height={height} decoding="async" draggable={false} onLoad={onLoad} onError={onError} />
+    ? <img {...imageProps} {...(alt === "" ? { alt: "Photo preview" } : { alt })} className={className} style={frameStyle} src={url} width={width} height={height} decoding="async" draggable={false} onError={onError} />
     : null;
 
   if (preview.state.status === "error") {
