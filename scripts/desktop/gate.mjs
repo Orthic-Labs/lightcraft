@@ -59,4 +59,7 @@ run("pnpm", ["run", "build"], "React build");
 const lockfile = path.join(repoRoot, "Cargo.lock");
 bootstrapLockfile(lockfile);
 run("cargo", ["run", "--locked", "-p", "xtask", "--", "ci"], "Rust fmt, clippy, test, parity, layers, assets & WASM");
+run("cargo", ["run", "--locked", "-p", "lightcraft-engine", "--example", "import_bench"], "1,300-file procedural import benchmark", {
+  ...process.env, COUNT: "1300", JPEG_EDGE: "512", RAW_EDGE: "512",
+});
 console.log("desktop CI gate: PASS");

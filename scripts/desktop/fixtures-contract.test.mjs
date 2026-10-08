@@ -14,7 +14,7 @@ test("native journey covers hidden WKWebView/WebView2 control contracts", () => 
   const fixture = readJson("fixtures/desktop/native-journey.json");
   assert.equal(fixture.hidden, true);
   assert.deepEqual(fixture.webviews, ["WKWebView", "WebView2"]);
-  for (const id of ["ipc", "stalePreview", "cache", "preferences", "gesture", "arwImport", "lightroomImport", "engineExport", "catalogRecovery"]) {
+  for (const id of ["ipc", "stalePreview", "cache", "preferences", "gesture", "arwImport", "lightroomImport", "engineExport", "catalogRecovery", "importFilters", "modelSetup"]) {
     assert.ok(fixture.scenarios.some((scenario) => scenario.id === id), id);
   }
 });
