@@ -40,7 +40,7 @@ fn qa_harness(binary: &Path, evidence: &Path, revision: &str, platform: &str, ar
         .expect("QA binary identity must be hashable")
 }
 
-fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, catalog: &Path) -> (rightkit_qa::control::Control, PathBuf) {
+fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, _catalog: &Path) -> (rightkit_qa::control::Control, PathBuf) {
     let cache = scenario.dir().join("control-workspace");
     let run_id = format!("lightcraft-{}", scenario.name());
     let ws = workspace::create(&cache, Some(&run_id), "lightcraft").expect("isolated RightKit workspace must initialize");
@@ -51,7 +51,7 @@ fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, catal
         .filter(|(key, _)| {
             #[cfg(target_os = "macos")]
             {
-                key.starts_with("RIGHTKIT_")
+                key.starts_with("RIGHTKIT_") && key != "RIGHTKIT_SUITE_ROOT"
             }
             #[cfg(not(target_os = "macos"))]
             {
@@ -73,9 +73,7 @@ fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, catal
         binary: launch_binary,
         mode: Mode::Hidden,
         env: {
-            let mut values = env;
-            values.push(("RIGHTKIT_QA_CATALOG".into(), catalog.display().to_string()));
-            values
+            env
         },
         startup_timeout: Duration::from_secs(90),
         label: "lightcraft-desktop-native".into(),
