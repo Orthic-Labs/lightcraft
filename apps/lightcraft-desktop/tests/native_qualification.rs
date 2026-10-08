@@ -147,7 +147,7 @@ fn wait_for_rendered_preview(control: &rightkit_qa::control::Control, selector: 
         let value = control.eval(&expression).expect("rendered preview DOM query must execute");
         let ready = value["ready"].as_bool() == Some(true);
         let scoped = value["src"].as_str().is_some_and(is_scoped_preview_src);
-        let changed = expected_src.map_or(true, |previous| value["src"].as_str() != Some(previous));
+        let changed = expected_src.is_none_or(|previous| value["src"].as_str() != Some(previous));
         if ready && scoped && changed {
             assert!(value["naturalWidth"].as_u64().is_some_and(|width| width > 0));
             assert!(value["naturalHeight"].as_u64().is_some_and(|height| height > 0));
@@ -189,7 +189,7 @@ fn wait_for_grid(control: &rightkit_qa::control::Control, scrolled: bool, previo
             && value["images"].as_u64().is_some_and(|count| count <= 512)
             && value["loaded"].as_u64().is_some_and(|count| count > 0)
             && value["busy"].as_bool() == Some(false)
-            && previous_first.map_or(true, |previous| value["first"].as_str() != Some(previous))
+            && previous_first.is_none_or(|previous| value["first"].as_str() != Some(previous))
             && (!scrolled || (value["scrollTop"].as_f64().unwrap_or(0.0) > 0.0 && value["top"].as_f64().unwrap_or(0.0) > 0.0));
         if visible {
             return value;
@@ -224,7 +224,7 @@ fn assert_active_grid_identity(control: &rightkit_qa::control::Control, file_nam
 fn wait_task(control: &rightkit_qa::control::Control, task_id: &str) -> Value {
     for _ in 0..900 {
         let value = snapshot(control);
-        let running = value["status"]["jobs"].as_array().map_or(false, |jobs| jobs.iter().any(|job| job["id"].as_str() == Some(task_id)));
+        let running = value["status"]["jobs"].as_array().is_some_and(|jobs| jobs.iter().any(|job| job["id"].as_str() == Some(task_id)));
         if !running {
             let notices = value["status"]["notices"].as_array().cloned().unwrap_or_default();
             assert!(
@@ -275,7 +275,7 @@ fn assert_png_pixels(path: &Path, expected_width: u32, expected_height: u32) {
     assert_eq!(info.width, expected_width, "exported PNG width must match requested long edge");
     assert_eq!(info.height, expected_height, "exported PNG height must match source aspect");
     assert!(info.buffer_size() > 0, "exported PNG must contain decoded pixels");
-    assert!(pixels[..info.buffer_size()].iter().any(|pixel| *pixel != 0), "exported PNG pixels must not be all zero");
+    assert!(pixels[..info.buffer_size()].iter().any(|&pixel| pixel != 0), "exported PNG pixels must not be all zero");
 }
 
 fn tree_fingerprint(path: &Path) -> String {
@@ -438,7 +438,8 @@ fn native_hidden_control_journeys() {
     let revision = required_env("RIGHTKIT_QA_SOURCE_REVISION");
     let architecture = required_env("RIGHTKIT_QA_ARCHITECTURE");
     let installed_hash = required_env("RIGHTKIT_QA_INSTALLED_ARTIFACT_SHA256");
-    assert!(installed_hash.len() == 64 && installed_hash.bytes().all(|byte| byte.is_ascii_hexdigit()), "installed artifact hash must be SHA-256");
+    assert_eq!(installed_hash.len(), 64, "installed artifact hash must be SHA-256");
+    assert!(installed_hash.bytes().all(|byte| byte.is_ascii_hexdigit()), "installed artifact hash must be hexadecimal");
     assert_eq!(source_hash(&binary), installed_hash, "installed binary must match admitted artifact hash");
     let platform = if cfg!(target_os = "macos") { "macos" } else { "windows" };
     let baseline: Value =
@@ -597,7 +598,7 @@ fn native_hidden_control_journeys() {
                         let slice = control
                             .command("lc_view_slice", &json!({"generation": imported["viewGeneration"], "offset": 0, "limit": 4096}))
                             .expect("bounded slice must reply");
-                        assert!(slice["photos"].as_array().map_or(false, |photos| photos.len() <= 512));
+                        assert!(slice["photos"].as_array().is_some_and(|photos| photos.len() <= 512));
                         assert_eq!(slice["generation"], imported["viewGeneration"]);
                         let dom = control.dom(".lc-grid-scroll").expect("grid DOM query must execute");
                         assert!(!dom.is_empty(), "library grid must exist in hidden WebView");

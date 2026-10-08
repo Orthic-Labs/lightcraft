@@ -624,32 +624,6 @@ fn build_shell() -> rightkit_shell::Shell {
         .build()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[test]
-    fn persisted_library_path_reads_legacy_nested_key() -> Result<(), Box<dyn std::error::Error>> {
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let path = std::env::temp_dir().join(format!("lightcraft-native-path-{}-{stamp}.json", std::process::id()));
-        fs::write(&path, br#"{"settings":{"libraryPath":"/legacy/catalog"}}"#)?;
-        assert_eq!(persisted_library_path(&path), Some(PathBuf::from("/legacy/catalog")));
-        fs::remove_file(path)?;
-        Ok(())
-    }
-
-    #[test]
-    fn persisted_library_path_rejects_malformed_value() -> Result<(), Box<dyn std::error::Error>> {
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let path = std::env::temp_dir().join(format!("lightcraft-native-path-invalid-{}-{stamp}.json", std::process::id()));
-        fs::write(&path, br#"{"libraryPath":""}"#)?;
-        assert!(persisted_library_path(&path).is_none());
-        fs::remove_file(path)?;
-        Ok(())
-    }
-}
-
 pub fn run() {
     let shell = build_shell();
     let builder = tauri::Builder::default()
@@ -765,5 +739,31 @@ pub fn run() {
     let builder = if let Some(control) = qa_control_plugin() { builder.plugin(control) } else { builder };
     if let Err(error) = builder.run(tauri::generate_context!()) {
         eprintln!("lightcraft desktop failed: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn persisted_library_path_reads_legacy_nested_key() -> Result<(), Box<dyn std::error::Error>> {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = std::env::temp_dir().join(format!("lightcraft-native-path-{}-{stamp}.json", std::process::id()));
+        fs::write(&path, br#"{"settings":{"libraryPath":"/legacy/catalog"}}"#)?;
+        assert_eq!(persisted_library_path(&path), Some(PathBuf::from("/legacy/catalog")));
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_library_path_rejects_malformed_value() -> Result<(), Box<dyn std::error::Error>> {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = std::env::temp_dir().join(format!("lightcraft-native-path-invalid-{}-{stamp}.json", std::process::id()));
+        fs::write(&path, br#"{"libraryPath":""}"#)?;
+        assert!(persisted_library_path(&path).is_none());
+        fs::remove_file(path)?;
+        Ok(())
     }
 }
