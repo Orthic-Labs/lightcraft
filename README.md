@@ -23,3 +23,5 @@ Current captures show native LightCraft. Fable & Astra mockups simulate presenta
 [Assets & licensing](assets/ATTRIBUTION.md)
 
 [Fable’s opinion after reviewing Astra](fable/followup-opinion.md)
+
+[Actual Mac/Windows app screenshots & verification](https://orthic-labs.github.io/lightcraft/runtime.html)

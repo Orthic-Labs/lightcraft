@@ -12,3 +12,5 @@ Published 2026-10-08. No Adobe assets are included.
 Embedded public-domain photographs: Ansel Adams, *The Tetons and the Snake River* (1942, U.S. National Archives); Dorothea Lange, *Migrant Mother* (1936, Library of Congress); NASA/Bill Anders, *Earthrise* (1968); NASA/Apollo 17 crew, *The Blue Marble* (1972). Original source links & repository provenance are preserved in [SOURCE-ATTRIBUTION.md](SOURCE-ATTRIBUTION.md).
 
 License texts: [MIT](../LICENSE-MIT), [Apache-2.0](../LICENSE-APACHE), [Inter OFL](fonts/OFL-Inter.txt).
+
+`../runtime/*.png`: actual native LightCraft screenshots captured locally on macOS & on Windows CI, using original procedural fixtures. LightCraft contributors; MIT OR Apache-2.0; unmodified captures.
