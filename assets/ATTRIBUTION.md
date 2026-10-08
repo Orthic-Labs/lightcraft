@@ -14,3 +14,5 @@ Embedded public-domain photographs: Ansel Adams, *The Tetons and the Snake River
 License texts: [MIT](../LICENSE-MIT), [Apache-2.0](../LICENSE-APACHE), [Inter OFL](fonts/OFL-Inter.txt).
 
 `../runtime/*.png`: actual native LightCraft screenshots captured locally on macOS & on Windows CI, using original procedural fixtures. LightCraft contributors; MIT OR Apache-2.0; unmodified captures.
+
+`../screens/implemented-*.png`: actual CI-compiled native Mac workspace, captured 8 October 2026 through app-owned RightKit control. Original procedural LightCraft scenes/fixtures; MIT OR Apache-2.0; unmodified captures.

@@ -1,92 +1,219 @@
 {
-  "sourceRevision": "b2d3ee5be6c9171adf9931bb63de3c32857180bf",
+  "sourceRevision": "cb7a30bbdc10d82180c8926114b3727904254d2d",
   "rightkitPins": {
     "control": "0.1.6",
-    "qa": "0.2.6"
+    "qa": "0.2.6",
+    "shell": "0.1.0",
+    "appShell": "0.2.1"
   },
   "previewOnly": true,
   "macos": {
-    "binarySha256": "83eed6c29e4032760a4c99c0474d463f375adb65cfa7b8f6dd301b8c36212bfe",
-    "nativeCICompile": "pass",
+    "binarySha256": "163e4ac90bfd6d90353e7dfbaa5d11f8077d3b8de71dec7de43f9b9a53135c8b",
     "localSmoke": "pass",
-    "beforeExposure": 0.0,
-    "editedExposure": 0.75,
-    "undoRestored": true,
-    "decodedPreview": {
-      "height": 1707,
-      "ready": true,
-      "src": "lightcraft-preview://localhost/lc-preview-000000000000001b",
-      "width": 2560
+    "checks": [
+      "default dual-sidebar geometry, single rail, zoom popup & collapsed More visible; keyboard reopens inspector",
+      "actual full-width slider gesture changes decoded preview with one undo step; undo restores exposure",
+      "background import review/import & decoded 96\u00d764 PNG export pass",
+      "actual saved light & dark themes render Library & Develop"
+    ],
+    "libraryGeometry": {
+      "filmstrip": 108,
+      "inspector": 292,
+      "overflow": false,
+      "rail": 44,
+      "sidebar": 246,
+      "tools": [
+        "Edit",
+        "Crop",
+        "Heal",
+        "Mask",
+        "Presets",
+        "Info"
+      ],
+      "viewport": [
+        1600,
+        789
+      ]
     },
-    "export": {
-      "width": 96,
-      "height": 64,
-      "bytes": 2328,
-      "sha256": "d8f824f09bd3033e3e17e8e7ff602b1d931d624f83da7cbd0d93e72cf21e5b99",
-      "decodedPixels": {
-        "width": 96,
-        "height": 64,
-        "channels": 4,
-        "uniqueColors": 6144,
-        "pixelSha256": "c0cf60e6906a7b0648d205af9922b1204c9be8beff5a7f1af0a9bfa3a664f6a9"
+    "developGeometry": {
+      "filmstrip": 108,
+      "inspector": 292,
+      "overflow": false,
+      "rail": 44,
+      "sidebar": 246,
+      "tools": [
+        "Edit",
+        "Crop",
+        "Heal",
+        "Mask",
+        "Presets",
+        "Info"
+      ],
+      "viewport": [
+        1600,
+        789
+      ]
+    },
+    "primaryEditing": {
+      "headings": [
+        "Light",
+        "Color",
+        "Tone Curve",
+        "Color Mixer",
+        "B&W Mixer",
+        "Color Grading",
+        "Effects",
+        "Vignette",
+        "Grain",
+        "Detail",
+        "Optics",
+        "Geometry",
+        "Profile",
+        "Calibration",
+        "Point Color"
+      ],
+      "visible": true
+    },
+    "filmstripAndAutoContrast": {
+      "light": {
+        "auto": {
+          "background": {
+            "a": 1,
+            "b": 221,
+            "g": 101,
+            "r": 1
+          },
+          "color": "rgb(255, 255, 255)",
+          "ratio": 5.37516836705521
+        },
+        "context": {
+          "background": {
+            "a": 1,
+            "b": 245,
+            "g": 252,
+            "r": 255
+          },
+          "color": "rgb(35, 31, 26)",
+          "ratio": 15.981801539313429
+        },
+        "position": {
+          "background": {
+            "a": 1,
+            "b": 245,
+            "g": 252,
+            "r": 255
+          },
+          "color": "rgb(107, 101, 92)",
+          "ratio": 5.628590922620627
+        },
+        "sourceChip": {
+          "background": {
+            "a": 1,
+            "b": 241.47058823529417,
+            "g": 230.4,
+            "r": 219.00000000000003
+          },
+          "color": "rgb(35, 31, 26)",
+          "ratio": 12.98459129201146
+        }
+      },
+      "dark": {
+        "auto": {
+          "background": {
+            "a": 1,
+            "b": 221,
+            "g": 101,
+            "r": 1
+          },
+          "color": "rgb(255, 255, 255)",
+          "ratio": 5.37516836705521
+        },
+        "context": {
+          "background": {
+            "a": 1,
+            "b": 26,
+            "g": 23,
+            "r": 23
+          },
+          "color": "rgb(242, 240, 236)",
+          "ratio": 15.717360506251778
+        },
+        "position": {
+          "background": {
+            "a": 1,
+            "b": 26,
+            "g": 23,
+            "r": 23
+          },
+          "color": "rgb(150, 147, 144)",
+          "ratio": 5.854825163940397
+        },
+        "sourceChip": {
+          "background": {
+            "a": 1,
+            "b": 67.30980392156863,
+            "g": 46.811764705882354,
+            "r": 32.92156862745098
+          },
+          "color": "rgb(242, 240, 236)",
+          "ratio": 11.905175394813432
+        }
       }
     },
-    "catalogRecovery": {
-      "verdict": "pass",
-      "baselineExposure": 1.25,
-      "mutationExposure": -1.25,
-      "restoredExposure": 1.25,
-      "backupUnchanged": true,
-      "freshCopyOpened": true,
-      "applicationRestartTested": true,
-      "processes": 3,
-      "reopenedExposure": 1.25,
-      "persistedMutationExposure": -1.25
-    },
-    "strictNativeCI": "failed:foreground identity guard & native1280x800 viewport clamp to1280x684",
-    "launchServices": "startup stalled in socket unlink/bind; direct bundled executable launch passed with isolated QA suite/data; no OS permissions changed",
-    "coexistence": {
-      "verdict": "pass",
-      "originalStoppedAfterCheck": true,
-      "previewStillRunning": true,
-      "productionSettingsUnchanged": true
-    }
+    "strictNativeCI": "blocked: frozen foreground identity tracking & exact viewport sizing",
+    "launchServices": "previous startup blocker; owned bundled executable launch used",
+    "originalAppPreserved": true,
+    "onePreviewBundleReused": true
   },
   "windows": {
     "nativeCI": "pass",
     "journeysPassed": 12,
     "journeysTotal": 12,
-    "undoRestored": true,
-    "beforeExposure": 0.0,
-    "editedExposure": 0.75,
-    "catalogRecovery": {
-      "method": "backup-mutated-catalog-restore",
-      "qualified": true
-    },
-    "installerRollback": {
-      "qualified": false,
-      "requiresSeparateEvidence": true
-    }
-  },
-  "workspaceCI": {
-    "run": 37762245731,
-    "conclusion": "success",
-    "coverage": "source contracts, frontend typecheck/build, Rust fmt/clippy/tests/parity/layers/assets/WASM"
-  },
-  "packagingLint": {
-    "run": 37762245749,
-    "conclusion": "success"
+    "journeys": [
+      "catalogRecovery",
+      "lightroomImport",
+      "mergeHdr",
+      "scalability",
+      "ipc",
+      "preferences",
+      "cache",
+      "stalePreview",
+      "arwImport",
+      "gesture",
+      "engineExport",
+      "editingTools"
+    ]
   },
   "nativeCI": {
-    "run": 37762343340,
-    "overallConclusion": "failure",
-    "windowsConclusion": "success",
-    "macosConclusion": "failure"
+    "run": 37791074950
   },
+  "workspaceCI": {
+    "run": 37791736444,
+    "status": "in_progress",
+    "conclusion": ""
+  },
+  "captures": [
+    {
+      "path": "screens/implemented-library-dark.png",
+      "sha256": "cd3416e3cbfff563d03621e9dbe77e2ae2eb74fe0b8520ec3ffa50c802a0767a"
+    },
+    {
+      "path": "screens/implemented-library-light.png",
+      "sha256": "7415b58a72a262339793a29fd5ff5e1da7da8874b9d8463f01a1a131d89e9b8a"
+    },
+    {
+      "path": "screens/implemented-develop-dark.png",
+      "sha256": "5f0a562027a343c95771b5377d9996d511728a8553a2806ccf3d21ce97e508fd"
+    },
+    {
+      "path": "screens/implemented-develop-light.png",
+      "sha256": "40d542504a1bfccecf0cb240fd0696d348ae02a1af3e0401191fdcab776c568a"
+    }
+  ],
   "notQualified": [
     "Mac strict hidden CI",
     "Mac LaunchServices normal user launch",
     "Installer rollback",
-    "Production visual refresh"
+    "Desktop default cutover"
   ]
 }
