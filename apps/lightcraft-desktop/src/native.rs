@@ -57,11 +57,12 @@ mod tauri_commands {
         let host = state.host.clone();
         let error = state.startup_error.clone();
         let preferences = state.preferences.clone();
-        let restore = id == "library.restore";
         blocking(move || {
-            let result =
-                host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into())).and_then(|host| host.run(id, params))?;
-            if restore { persist_library_path(&preferences, host.as_ref(), result, None) } else { Ok(result) }
+            let result = host
+                .as_ref()
+                .ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into()))
+                .and_then(|host| host.run(id.clone(), params))?;
+            persist_command_result(&preferences, host.as_ref(), &id, result)
         })
         .await
     }
@@ -386,6 +387,38 @@ fn persist_library_path(preferences: &Preferences, host: Option<&DesktopHandle>,
     Ok(result)
 }
 
+fn persist_command_result(preferences: &Preferences, host: Option<&DesktopHandle>, id: &str, result: Value) -> Result<Value, String> {
+    if id == "library.restore" {
+        return persist_library_path(preferences, host, result, None);
+    }
+    if id == "segment.model.status" {
+        let current = host.map(|host| host.preferences(None)).transpose()?;
+        persist_verified_model_path(preferences, &result, current.as_ref().and_then(|value| value.get("sam3Dir")).and_then(Value::as_str))?;
+    }
+    Ok(result)
+}
+
+/// Persist only a completed, successful folder validation still selected by the controller.
+/// Retained status from an earlier selection must not overwrite a newer preference.
+fn persist_verified_model_path(preferences: &Preferences, result: &Value, current_path: Option<&str>) -> Result<(), String> {
+    let Some(validation) = result.get("validation") else { return Ok(()) };
+    if validation.get("finished").and_then(Value::as_bool) != Some(true)
+        || validation.get("running").and_then(Value::as_bool) != Some(false)
+        || validation.get("error") != Some(&Value::Null)
+    {
+        return Ok(());
+    }
+    let path = validation.get("path").and_then(Value::as_str).ok_or_else(|| "model validation returned no folder path".to_string())?;
+    if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
+        return Err("model validation returned an invalid folder path".into());
+    }
+    if current_path != Some(path) || preferences.get()?.get("sam3Dir").and_then(Value::as_str) == Some(path) {
+        return Ok(());
+    }
+    preferences.patch(Some(json!({"sam3Dir": path})))?;
+    Ok(())
+}
+
 fn native_window_action(app: &AppHandle<Wry>, action: &str, params: &Value, caller_label: Option<&str>) -> Result<Value, String> {
     let label = match caller_label {
         Some(caller) if caller != "main" => caller,
@@ -561,12 +594,8 @@ fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<Strin
             let id = object.get("id").and_then(Value::as_str).ok_or_else(|| "lc_run requires id".to_string())?;
             let host = control_host(app)?;
             let result = host.run(id.to_string(), object.get("params").cloned().unwrap_or_else(|| json!({})))?;
-            if id == "library.restore" {
-                let state = app.try_state::<AppState>().ok_or_else(|| "desktop state is unavailable".to_string())?;
-                persist_library_path(&state.preferences, Some(&host), result, None)?
-            } else {
-                result
-            }
+            let state = app.try_state::<AppState>().ok_or_else(|| "desktop state is unavailable".to_string())?;
+            persist_command_result(&state.preferences, Some(&host), id, result)?
         }
         "lc_snapshot" => {
             let state = app.try_state::<AppState>().ok_or_else(|| "desktop state is unavailable".to_string())?;
@@ -1109,6 +1138,32 @@ mod tests {
     };
 
     static GPU_MARKER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn model_folder_persistence_requires_success_and_current_selection() -> Result<(), Box<dyn std::error::Error>> {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = std::env::temp_dir().join(format!("lightcraft-native-model-{}-{stamp}.json", std::process::id()));
+        fs::write(&path, br#"{"sam3Dir":"old-models","futureSetting":{"keep":true}}"#)?;
+        let preferences = Preferences::load(path.clone());
+        let before = fs::read(&path)?;
+        for (finished, running, error) in [(false, true, Value::Null), (true, false, json!("validation failed")), (true, false, json!("cancelled"))] {
+            persist_verified_model_path(
+                &preferences,
+                &json!({"validation":{"finished":finished,"running":running,"error":error,"path":"verified-models"}}),
+                Some("verified-models"),
+            )?;
+            assert_eq!(fs::read(&path)?, before);
+        }
+        let success = json!({"validation":{"finished":true,"running":false,"error":null,"path":"verified-models"}});
+        persist_verified_model_path(&preferences, &success, Some("newer-selection"))?;
+        assert_eq!(fs::read(&path)?, before, "stale validation must not replace a newer selection");
+        persist_verified_model_path(&preferences, &success, Some("verified-models"))?;
+        let saved = Preferences::load(path.clone()).get()?;
+        assert_eq!(saved.get("sam3Dir"), Some(&json!("verified-models")));
+        assert_eq!(saved.get("futureSetting"), Some(&json!({"keep":true})));
+        fs::remove_file(path)?;
+        Ok(())
+    }
 
     #[test]
     fn persisted_library_path_reads_legacy_nested_key() -> Result<(), Box<dyn std::error::Error>> {

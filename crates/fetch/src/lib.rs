@@ -329,7 +329,7 @@ where
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     let total = file.metadata().map_err(|e| format!("{}: {e}", path.display()))?.len();
-    let mut done = 0;
+    let mut done = 0_u64;
     loop {
         let n = file.read(&mut buf).map_err(|e| format!("{}: {e}", path.display()))?;
         if n == 0 {
