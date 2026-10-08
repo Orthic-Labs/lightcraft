@@ -43,7 +43,22 @@ fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, catal
     let run_id = format!("lightcraft-{}", scenario.name());
     let ws = workspace::create(&cache, Some(&run_id), "lightcraft").expect("isolated RightKit workspace must initialize");
     let data = ws.data_dir.clone();
-    let env = ws.env.clone().into_iter().collect::<Vec<_>>();
+    let env = ws
+        .env
+        .iter()
+        .filter(|(key, _)| {
+            #[cfg(target_os = "macos")]
+            {
+                key.starts_with("RIGHTKIT_")
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = key;
+                true
+            }
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<Vec<_>>();
     let spec = LaunchSpec {
         binary: binary.to_path_buf(),
         mode: Mode::Hidden,
