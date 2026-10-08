@@ -255,7 +255,7 @@ function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
   const initialRenameStart = typeof p.renameStart === 'number' ? String(p.renameStart) : text(p.renameStart, '1');
   const [source, setSource] = useState(text(p.source, initialPaths.join(', ')));
   const [sourceType, setSourceType] = useState(initialSource);
-  const [mode, setMode] = useState(text(p.mode, 'add'));
+  const [mode, setMode] = useState(text(p.mode, initialSource === 'device' ? 'copy' : 'add'));
   const [album, setAlbum] = useState(initialAlbum);
   const [newAlbum, setNewAlbum] = useState(text(p.newAlbum, text(p.albumName)));
   const [keywords, setKeywords] = useState(text(p.keywords));
@@ -292,12 +292,13 @@ function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
       if (!liveRef.current || sequence !== scanSequenceRef.current) return;
       const taskId = text(result?.taskId);
       if (taskId) {
+        const reviewMode = kind === 'device' ? 'copy' : mode;
         const params: AnyRecord = {
           ...p,
           paths,
           source: paths.join(', '),
           initialSource: kind,
-          mode,
+          mode: reviewMode,
           album,
           newAlbum,
           keywords,
