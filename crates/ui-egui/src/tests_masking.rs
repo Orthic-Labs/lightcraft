@@ -366,23 +366,17 @@ fn local_folder_tree_expands_and_browses() {
     std::fs::create_dir_all(base.join(".hidden")).unwrap();
     let mut h = detail("panel.edit");
     exec(&mut h, "view.leftPanel", json!({"show": true}));
+    h.hide_home_above(&base);
+    exec(&mut h, "local.addRoot", json!({"path": base.to_string_lossy()}));
     exec(&mut h, "library.browse", json!({"path": base.to_string_lossy()}));
     h.settle(SETTLE);
     let base_s = base.to_string_lossy().to_string();
     let r = h.request("ui.clickWidget", json!({"id": format!("folderToggle:{base_s}")}), T);
     assert_eq!(r["ok"], true, "{r}");
     let trip = base.join("Trip").to_string_lossy().to_string();
-    // Listing runs on a worker: three frames do not guarantee its reply has arrived.
-    let trip_widget = format!("source:local:{trip}");
-    let started = std::time::Instant::now();
-    loop {
-        let widgets = h.request("ui.widgets", json!({"filter": trip_widget}), T);
-        if widgets["result"].as_array().is_some_and(|ws| ws.iter().any(|w| w["id"] == trip_widget)) {
-            break;
-        }
-        assert!(started.elapsed() < T, "subfolder listing did not arrive: {widgets}");
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    // the folder listing can land a few frames later on a loaded machine (FreeBSD CI): wait for the row
+    let row = format!("source:local:{trip}");
+    h.step_until(SETTLE, |h| h.app.widgets.iter().any(|(w, _)| *w == row));
     let r = h.request("ui.clickWidget", json!({"id": format!("source:local:{trip}")}), T);
     assert_eq!(r["ok"], true, "the subfolder is listed: {r}");
     assert_eq!(h.app.session.browse.as_ref().map(|b| b.path.clone()), Some(trip.clone()), "clicking it browses it");
