@@ -4,6 +4,7 @@ use lightcraft_catalog::{Op, PhotoId, Version};
 use lightcraft_develop::{DevelopSettings, Preset, Section, SettingsGroup, Treatment, Upright, WbMode, controls};
 use lightcraft_geom::{CropGeometry, Point, Rect, crop_fit_angle};
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 use super::{CommandSpec, always, bad, bool_or, cmd, f64_or, f64_req, has_active, has_clipboard, has_selection, ok, str_param};
 use crate::{Result, Session, media::SourceLevel};
@@ -112,6 +113,32 @@ pub fn specs() -> Vec<CommandSpec> {
                 };
                 if let Some(ids) = p.get("ids").and_then(Value::as_array) {
                     let ids: Vec<PhotoId> = ids.iter().filter_map(Value::as_u64).map(PhotoId).collect();
+                    // Explicit target IDs are used by native slider gestures. When the active
+                    // interaction includes its active photo, stage every target silently so
+                    // `endInteraction` records exactly one batch undo step. Calls that target
+                    // other photos while an interaction is open retain their existing batch
+                    // commit semantics.
+                    let interaction_targets = s.interaction.as_ref().is_some_and(|interaction| ids.contains(&interaction.photo));
+                    if interaction_targets {
+                        let updates: Vec<(PhotoId, DevelopSettings)> =
+                            ids.iter().filter_map(|id| s.develop_of(*id).map(|d| (*id, (*d).clone()))).collect();
+                        let existing = s.interaction.as_ref().map(|interaction| interaction.originals.clone()).unwrap_or_default();
+                        for (id, _) in &updates {
+                            if !existing.iter().any(|(target, _)| target == id)
+                                && let Some(original) = s.develop_of(*id)
+                                && let Some(interaction) = s.interaction.as_mut()
+                            {
+                                interaction.originals.push((*id, original));
+                            }
+                        }
+                        for (id, mut settings) in updates {
+                            let info = s.source_info(id);
+                            apply(&mut settings, &info);
+                            let now = (s.clock)();
+                            s.apply_silent(Op::SetDevelop { id, settings: Arc::new(settings), label: label.clone(), edited: Some(now) })?;
+                        }
+                        return ok();
+                    }
                     let ops = ids
                         .iter()
                         .filter_map(|id| s.develop_of(*id).map(|d| (*id, d)))

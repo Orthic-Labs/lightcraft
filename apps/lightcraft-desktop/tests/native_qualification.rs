@@ -119,7 +119,7 @@ fn assert_sources_unchanged(paths: &[(&str, &Path)], expected: &[(&str, String)]
     assert_eq!(paths.len(), expected.len(), "fixture hash inventory must match source inventory");
     for ((label, path), (expected_label, before)) in paths.iter().zip(expected.iter()) {
         assert_eq!(label, expected_label, "fixture hash inventory labels must match");
-        assert_eq!(source_hash(path), before.as_str(), "native journey mutated source fixture {label}");
+        assert_eq!(source_fingerprint(path), before.as_str(), "native journey mutated source fixture {label}");
     }
 }
 

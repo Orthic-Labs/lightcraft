@@ -83,6 +83,31 @@ fn develop_set_and_interaction_coalesces() {
 }
 
 #[test]
+fn explicit_ids_during_interaction_coalesce_as_one_batch_undo() {
+    use lightcraft_catalog::PhotoId;
+
+    let mut s = demo();
+    let ids: Vec<PhotoId> = s.catalog.photos().take(2).map(|photo| photo.id).collect();
+    s.execute("library.select", &json!({"ids": [ids[0].0, ids[1].0], "active": ids[0].0})).unwrap();
+    let before = ids.iter().map(|id| s.develop_of(*id).unwrap().light.exposure).collect::<Vec<_>>();
+    let undo_before = s.undo.len();
+
+    s.execute("develop.beginInteraction", &json!({"label": "Exposure"})).unwrap();
+    s.execute("develop.set", &json!({"control": "light.exposure", "value": 0.75, "ids": [ids[0].0, ids[1].0]})).unwrap();
+    assert_eq!(s.undo.len(), undo_before, "explicit IDs remain a silent interaction preview");
+    s.execute("develop.endInteraction", &json!({})).unwrap();
+    assert_eq!(s.undo.len(), undo_before + 1, "selected targets share one undo step");
+    assert!(ids.iter().all(|id| (s.develop_of(*id).unwrap().light.exposure - 0.75).abs() < f64::EPSILON));
+
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.undo.len(), undo_before);
+    assert_eq!(ids.iter().map(|id| s.develop_of(*id).unwrap().light.exposure).collect::<Vec<_>>(), before);
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert_eq!(s.undo.len(), undo_before + 1);
+    assert!(ids.iter().all(|id| (s.develop_of(*id).unwrap().light.exposure - 0.75).abs() < f64::EPSILON));
+}
+
+#[test]
 fn copy_paste_sync_presets() {
     let mut s = demo();
     let vis = s.visible_cloned();

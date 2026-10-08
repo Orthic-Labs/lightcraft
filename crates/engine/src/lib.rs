@@ -102,6 +102,10 @@ pub struct Interaction {
     pub label: String,
     pub photo: PhotoId,
     pub original: Arc<DevelopSettings>,
+    /// Original settings for every explicit target staged during this interaction.
+    /// Active-photo edits keep `photo`/`original` for existing callers; this list lets
+    /// multi-photo slider gestures commit as one undo step too.
+    pub(crate) originals: Vec<(PhotoId, Arc<DevelopSettings>)>,
 }
 
 /// Source of [`Session::visible_shared`] generations (process-wide, so two sessions never share one).
@@ -564,25 +568,46 @@ impl Session {
         }
         let id = self.active().ok_or_else(|| EngineError::Other("no active photo".into()))?;
         let original = self.develop_of(id).unwrap_or_default();
-        self.interaction = Some(Interaction { label: label.into(), photo: id, original });
+        self.interaction = Some(Interaction { label: label.into(), photo: id, original: original.clone(), originals: vec![(id, original)] });
         Ok(())
     }
 
     /// Commit the interaction as one undo step (no-op if nothing changed).
     pub fn end_interaction(&mut self) -> Result<()> {
         let Some(i) = self.interaction.take() else { return Ok(()) };
-        let Some(cur) = self.develop_of(i.photo) else { return Ok(()) };
-        if *cur == *i.original {
+        if i.originals.len() == 1 {
+            let Some((id, original)) = i.originals.into_iter().next() else { return Ok(()) };
+            let Some(cur) = self.develop_of(id) else { return Ok(()) };
+            if *cur == *original {
+                return Ok(());
+            }
+            // Preserve normal active-photo semantics, including Auto Sync, for one-target drags.
+            self.apply_silent(Op::SetDevelop { id, settings: original, label: i.label.clone(), edited: None })?;
+            return self.set_develop(id, (*cur).clone(), &i.label);
+        }
+        let mut ops = Vec::new();
+        for (id, original) in i.originals {
+            let Some(cur) = self.develop_of(id) else { continue };
+            if *cur == *original {
+                continue;
+            }
+            // Restore originals silently, then commit every changed target as one step.
+            self.apply_silent(Op::SetDevelop { id, settings: original, label: i.label.clone(), edited: None })?;
+            if let Some(op) = self.develop_op(id, (*cur).clone(), &i.label) {
+                ops.push(op);
+            }
+        }
+        if ops.is_empty() {
             return Ok(());
         }
-        // Restore the original silently, then commit the final value as one step.
-        self.apply_silent(Op::SetDevelop { id: i.photo, settings: i.original.clone(), label: i.label.clone(), edited: None })?;
-        self.set_develop(i.photo, (*cur).clone(), &i.label)
+        self.commit(&i.label, Op::Batch { ops })
     }
 
     pub fn cancel_interaction(&mut self) -> Result<()> {
         if let Some(i) = self.interaction.take() {
-            self.apply_silent(Op::SetDevelop { id: i.photo, settings: i.original, label: i.label, edited: None })?;
+            for (id, original) in i.originals {
+                self.apply_silent(Op::SetDevelop { id, settings: original, label: i.label.clone(), edited: None })?;
+            }
         }
         Ok(())
     }
