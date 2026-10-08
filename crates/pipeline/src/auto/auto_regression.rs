@@ -1,7 +1,7 @@
-use super::{auto_tone, percentile, AutoTone};
+use super::{AutoTone, auto_tone, percentile};
 use lightcraft_color::perceptual::oklab_from_2020;
 use lightcraft_color::transfer::decode_srgb8;
-use lightcraft_color::{luminance_2020, REC2020, SRGB};
+use lightcraft_color::{REC2020, SRGB, luminance_2020};
 use lightcraft_develop::DevelopSettings;
 use lightcraft_raster::{Rgb32f, Rgba8};
 
