@@ -332,7 +332,7 @@ fn assert_primary_editing_usable(control: &rightkit_qa::control::Control) {
         const headings = [...document.querySelectorAll('.lc-inspector__section-head > span:nth-child(2)')].map(node => node.textContent.trim());
         const exposure = document.querySelector('input[id="ctl-light.exposure"]');
         const rect = exposure?.getBoundingClientRect();
-        const body = document.querySelector('.lc-inspector__body')?.getBoundingClientRect();
+        const body = document.querySelector('.lc-inspector__scroll')?.getBoundingClientRect();
         return { headings, visible: !!rect && !!body && rect.width > 200 && rect.top >= body.top && rect.bottom <= body.bottom && rect.bottom <= innerHeight };
     })();"#).expect("primary editing geometry must be queryable");
     let headings = editing["headings"].as_array().expect("editing headings must be present");
