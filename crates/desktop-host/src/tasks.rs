@@ -1055,26 +1055,29 @@ impl Tasks {
     }
 }
 
-fn import_review_result(mut candidates: Vec<ImportCandidate>, previews: Vec<CandidatePreview>) -> Result<Value, String> {
-    let values = serde_json::to_value(&mut candidates).map_err(|error| format!("could not serialize import candidates: {error}"))?;
-    let Some(items) = values.as_array_mut() else { return Err("import candidates did not serialize as an array".into()) };
-    for preview in previews {
-        let Some(candidate) = items.get_mut(preview.index).and_then(Value::as_object_mut) else { continue };
-        candidate.insert(
-            "preview".into(),
-            json!({
-                "handle": preview.handle,
-                "revision": preview.revision,
-                "state": "provisional",
-                "source": preview.source,
-                "width": preview.width,
-                "height": preview.height,
-                "encoding": "png",
-            }),
-        );
-    }
-    let duplicates = items.iter().filter(|candidate| candidate.get("duplicate").is_some_and(|value| !value.is_null())).count();
-    Ok(json!({"candidates": values, "duplicates": duplicates, "scanned": items.len()}))
+fn import_review_result(candidates: Vec<ImportCandidate>, previews: Vec<CandidatePreview>) -> Result<Value, String> {
+    let mut values = serde_json::to_value(candidates).map_err(|error| format!("could not serialize import candidates: {error}"))?;
+    let (duplicates, scanned) = {
+        let Some(items) = values.as_array_mut() else { return Err("import candidates did not serialize as an array".into()) };
+        for preview in previews {
+            let Some(candidate) = items.get_mut(preview.index).and_then(Value::as_object_mut) else { continue };
+            candidate.insert(
+                "preview".into(),
+                json!({
+                    "handle": preview.handle,
+                    "revision": preview.revision,
+                    "state": "provisional",
+                    "source": preview.source,
+                    "width": preview.width,
+                    "height": preview.height,
+                    "encoding": "png",
+                }),
+            );
+        }
+        let duplicates = items.iter().filter(|candidate| candidate.get("duplicate").is_some_and(|value| !value.is_null())).count();
+        (duplicates, items.len())
+    };
+    Ok(json!({"candidates": values, "duplicates": duplicates, "scanned": scanned}))
 }
 
 fn export_targets(session: &mut Session, params: &Value) -> Vec<PhotoId> {
