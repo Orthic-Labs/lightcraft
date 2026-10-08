@@ -7,7 +7,9 @@ import { PhotoPreview } from '../preview/PhotoPreview';
 import { libraryGroups, usePhotoSlice, type LibraryNavItem } from './libraryData';
 import './library.css';
 
-const PAGE = 128;
+// One bounded page spans a normal viewport, so a justified window stays contiguous at page edges.
+const PAGE = 512;
+const MAX_PAGE_GEOMETRY = 64;
 const MIN_THUMB = 96;
 const MAX_THUMB = 480;
 
@@ -21,6 +23,32 @@ function sourceKey(source: unknown): string {
 
 function photoAspect(photo: PhotoSummary): number {
   return photo.w > 0 && photo.h > 0 ? photo.w / photo.h : 1.5;
+}
+
+function boundedPageHeight(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+type JustifiedRow = { photos: PhotoSummary[]; height: number; aspectSum: number };
+
+function buildJustifiedRows(photos: PhotoSummary[], width: number, targetHeight: number, gap: number): JustifiedRow[] {
+  const result: JustifiedRow[] = [];
+  let row: PhotoSummary[] = [];
+  let aspectSum = 0;
+  photos.forEach((photo) => {
+    const aspect = photoAspect(photo);
+    row.push(photo);
+    aspectSum += aspect;
+    if (row.length > 1 && aspectSum * targetHeight + gap * (row.length - 1) >= width) {
+      result.push({ photos: row, height: Math.max(72, (width - gap * (row.length - 1)) / aspectSum), aspectSum });
+      row = [];
+      aspectSum = 0;
+    }
+  });
+  if (row.length) {
+    result.push({ photos: row, height: Math.min(targetHeight, Math.max(72, (width - gap * (row.length - 1)) / Math.max(aspectSum, 0.5))), aspectSum });
+  }
+  return result;
 }
 
 function PhotoBadges({ photo }: { photo: PhotoSummary }) {
@@ -170,7 +198,7 @@ function FilterBar({ snapshot, filterText, setFilterText }: { snapshot: DesktopS
         <input value={filterText} onChange={(event) => setFilterText(event.target.value)} placeholder="Search photos" aria-label="Search photos" />
         {filterText && <button type="button" aria-label="Clear search" onClick={() => setFilterText('')}>×</button>}
       </label>
-      <button className="lc-filter-pill" type="button" aria-pressed={Boolean(filter?.rating)} onClick={() => setFilter({ rating: filter?.rating ? 0 : 5, ratingOp: 'atLeast' })}>★ 5+</button>
+      <button className="lc-filter-pill" type="button" aria-pressed={Boolean(filter?.rating)} onClick={() => setFilter({ rating: filter?.rating ? 0 : 3, ratingOp: 'atLeast' })}>★ 3+</button>
       <button className="lc-filter-pill" type="button" aria-pressed={filter?.flag === 'pick'} onClick={() => setFilter({ flag: filter?.flag === 'pick' ? null : 'pick' })}>⚑ Picks</button>
       <button className="lc-filter-pill" type="button" aria-pressed={filter?.edited === true} onClick={() => setFilter({ edited: filter?.edited === true ? null : true })}>✎ Edited</button>
       <button className="lc-filter-more" type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>Filters <span aria-hidden="true">⌄</span></button>
@@ -218,16 +246,52 @@ function VirtualPhotoGrid({ snapshot, mode, thumbSize }: { snapshot: DesktopSnap
   const [viewportHeight, setViewportHeight] = useState(600);
   const [viewportWidth, setViewportWidth] = useState(900);
   const [menu, setMenu] = useState<MenuState>(null);
+  const pageHeights = useRef(new Map<number, number>());
+  const [geometryRevision, setGeometryRevision] = useState(0);
+  const previousPageAnchor = useRef<{ page: number; top: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const gap = 8;
+  const gap = 10;
   const columns = Math.max(1, Math.floor((viewportWidth + gap) / (thumbSize + gap)));
-  const rowHeight = thumbSize + 76;
+  const rowHeight = thumbSize + gap;
   const rows = Math.ceil(snapshot.total / columns);
-  const chunkRow = Math.max(0, Math.floor(scrollTop / rowHeight) - 2);
-  const chunkOffset = Math.floor((chunkRow * columns) / PAGE) * PAGE;
+  const isJustified = mode === 'photoGrid';
+  const gridWidth = Math.max(1, viewportWidth - 32);
+  const estimatedRowsPerPage = Math.max(1, Math.ceil(PAGE / columns));
+  const estimatedPageHeight = Math.max(rowHeight, estimatedRowsPerPage * rowHeight + gap);
+  const pageCount = Math.max(1, Math.ceil(snapshot.total / PAGE));
+  const pageStart = (pageIndex: number): number => {
+    const safeIndex = Math.max(0, Math.min(pageCount, pageIndex));
+    let top = safeIndex * estimatedPageHeight + safeIndex * gap;
+    for (const [knownPage, measuredHeight] of pageHeights.current) {
+      if (knownPage < safeIndex) top += measuredHeight - estimatedPageHeight;
+    }
+    return Math.max(0, top);
+  };
+  const pageHeight = (pageIndex: number): number => boundedPageHeight(pageHeights.current.get(pageIndex), estimatedPageHeight);
+  const resolvePage = (position: number): number => {
+    if (!isJustified) return Math.max(0, Math.min(pageCount - 1, Math.floor(Math.max(0, position) / Math.max(1, estimatedPageHeight))));
+    let low = 0;
+    let high = pageCount - 1;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (pageStart(middle) <= position) low = middle;
+      else high = middle - 1;
+    }
+    const index = low;
+    return position >= pageStart(index) + pageHeight(index) && index < pageCount - 1 ? index + 1 : index;
+  };
+  const pageIndex = resolvePage(scrollTop);
+  const chunkOffset = isJustified ? pageIndex * PAGE : Math.floor((Math.max(0, Math.floor(scrollTop / rowHeight) - 2) * columns) / PAGE) * PAGE;
   const chunkStartRow = Math.floor(chunkOffset / columns);
   const slice = usePhotoSlice(chunkOffset, PAGE);
-  const photos = slice.photos;
+  const sliceReady = slice.offset === chunkOffset && slice.generation === snapshot.viewGeneration && !slice.loading;
+  const photos = sliceReady ? slice.photos : [];
+  const nextPageIndex = Math.min(pageCount - 1, pageIndex + 1);
+  const nextChunkOffset = nextPageIndex * PAGE;
+  const nextSliceOffset = nextPageIndex === pageIndex ? Math.min(snapshot.total, chunkOffset + PAGE) : nextChunkOffset;
+  const nextSlice = usePhotoSlice(nextSliceOffset, PAGE);
+  const nextSliceReady = isJustified && nextPageIndex !== pageIndex && nextSlice.offset === nextChunkOffset && nextSlice.generation === snapshot.viewGeneration && !nextSlice.loading;
+  const nextPhotos = nextSliceReady ? nextSlice.photos : [];
   const selected = new Set(snapshot.selection);
   const active = snapshot.active;
   const onScroll = (event: UIEvent<HTMLDivElement>) => setScrollTop(event.currentTarget.scrollTop);
@@ -245,23 +309,119 @@ function VirtualPhotoGrid({ snapshot, mode, thumbSize }: { snapshot: DesktopSnap
     const modeName = event?.shiftKey ? 'range' : modifier ? 'toggle' : 'replace';
     void run('library.select', { ids: [photo.id], active: photo.id, mode: modeName });
   };
+  const aspectRows = useMemo(() => {
+    return mode === 'photoGrid' && photos.length ? buildJustifiedRows(photos, gridWidth, thumbSize, gap) : [];
+  }, [gap, gridWidth, mode, photos, thumbSize]);
+  const nextAspectRows = useMemo(() => (nextSliceReady ? buildJustifiedRows(nextPhotos, gridWidth, thumbSize, gap) : []), [gap, gridWidth, nextPhotos, nextSliceReady, thumbSize]);
   const moveSelection = (delta: number, event: KeyboardEvent) => {
-    const visibleIndex = active === null ? -1 : photos.findIndex((photo) => photo.id === active);
-    const index = Math.max(0, (visibleIndex >= 0 ? chunkOffset + visibleIndex : 0) + delta);
+    const visiblePhotos = nextSliceReady ? [...photos, ...nextPhotos] : photos;
+    const visibleRows = nextSliceReady ? [...aspectRows, ...nextAspectRows] : aspectRows;
+    const visibleIndex = active === null ? -1 : visiblePhotos.findIndex((photo) => photo.id === active);
+    const currentIndex = visibleIndex >= 0 ? visibleIndex : 0;
+    let targetLocalIndex = currentIndex + delta;
+    const vertical = isJustified && Math.abs(delta) === columns;
+    if (vertical && visibleIndex >= 0) {
+      const currentRowIndex = visibleRows.findIndex((row) => row.photos.some((photo) => photo.id === active));
+      if (currentRowIndex >= 0) {
+        const row = visibleRows[currentRowIndex];
+        const itemIndex = row.photos.findIndex((photo) => photo.id === active);
+        const targetRow = visibleRows[currentRowIndex + (delta > 0 ? 1 : -1)];
+        if (targetRow) {
+          const targetItem = targetRow.photos[Math.min(targetRow.photos.length - 1, Math.round((itemIndex / Math.max(1, row.photos.length - 1)) * Math.max(0, targetRow.photos.length - 1)))];
+          if (targetItem) targetLocalIndex = visiblePhotos.findIndex((photo) => photo.id === targetItem.id);
+        }
+      }
+    }
+    const index = Math.max(0, chunkOffset + targetLocalIndex);
     const targetIndex = Math.max(0, Math.min(snapshot.total - 1, index));
     const targetOffset = Math.floor(targetIndex / PAGE) * PAGE;
     if (targetOffset !== chunkOffset) {
-      scrollRef.current?.scrollTo({ top: Math.floor(targetIndex / columns) * rowHeight });
+      const targetPage = Math.floor(targetIndex / PAGE);
+      const prefetchedTarget = visiblePhotos[targetIndex - chunkOffset];
+      if (prefetchedTarget) select(prefetchedTarget, event);
+      else scrollRef.current?.scrollTo({ top: isJustified ? pageStart(targetPage) : Math.floor(targetIndex / columns) * rowHeight });
       return;
     }
-    const photo = photos[targetIndex - chunkOffset];
+    const photo = visiblePhotos[targetIndex - chunkOffset];
     if (photo) select(photo, event);
   };
-  const totalHeight = Math.max(viewportHeight, rows * rowHeight + 24);
+  const renderJustifiedRows = (rowSet: JustifiedRow[], keyPrefix: string) => rowSet.map((row, rowIndex) => (
+    <div className="lc-grid-row" key={`${keyPrefix}-${rowIndex}`}>
+      {row.photos.map((photo) => {
+        const isSelected = selected.has(photo.id);
+        const width = `${Math.max(0, ((gridWidth - gap * (row.photos.length - 1)) * photoAspect(photo)) / Math.max(row.aspectSum, 0.5))}px`;
+        return <button className={`lc-photo-cell${isSelected ? ' is-selected' : ''}${active === photo.id ? ' is-active' : ''}${ui.gridInfo ? ' is-grid-info' : ''}`} style={{ width, height: row.height }} type="button" role="gridcell" aria-selected={isSelected} key={photo.id} onClick={(event) => { event.stopPropagation(); select(photo, event); }} onDoubleClick={(event) => { event.stopPropagation(); select(photo, event); setUi({ view: 'detail', panel: 'info', filmstrip: true }); }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setMenu({ x: event.clientX, y: event.clientY, photo }); }}>
+          <span className="lc-photo-frame"><PhotoPreview photoId={photo.id} slot={`grid-${photo.id}`} viewGeneration={snapshot.viewGeneration} width={Math.max(96, Math.round(thumbSize * photoAspect(photo)))} height={Math.max(96, Math.round(thumbSize))} quality="draft" className="lc-photo-preview" /><PhotoBadges photo={photo} /><span className="lc-photo-caption"><span className="lc-photo-name">{photo.fileName}</span><span className="lc-photo-stars">{stars(photo.rating)}</span></span></span>
+        </button>;
+      })}
+    </div>
+  ));
+  const measuredPageHeight = useMemo(() => {
+    if (!isJustified || !aspectRows.length) return null;
+    return aspectRows.reduce((height, row) => height + row.height, 0) + Math.max(0, aspectRows.length - 1) * gap;
+  }, [aspectRows, gap, isJustified]);
+  const geometrySignature = `${mode}:${viewportWidth}:${thumbSize}:${columns}`;
+  useEffect(() => {
+    if (!isJustified) return;
+    pageHeights.current.clear();
+    previousPageAnchor.current = null;
+    if (scrollRef.current && scrollRef.current.scrollTop !== 0) {
+      scrollRef.current.scrollTop = 0;
+      setScrollTop(0);
+    }
+    setGeometryRevision((value) => value + 1);
+  }, [isJustified, snapshot.viewGeneration]);
+  useEffect(() => {
+    if (!isJustified) return;
+    pageHeights.current.clear();
+    setGeometryRevision((value) => value + 1);
+  }, [geometrySignature, isJustified, pageHeights]);
+  useEffect(() => {
+    if (!isJustified || !sliceReady || measuredPageHeight === null || !photos.length) return;
+    const nextHeight = boundedPageHeight(measuredPageHeight, estimatedPageHeight);
+    if (pageHeights.current.get(pageIndex) === nextHeight) return;
+    pageHeights.current.set(pageIndex, nextHeight);
+    while (pageHeights.current.size > MAX_PAGE_GEOMETRY) {
+      const oldest = pageHeights.current.keys().next().value;
+      if (oldest === undefined) break;
+      pageHeights.current.delete(oldest);
+    }
+    setGeometryRevision((value) => value + 1);
+  }, [estimatedPageHeight, isJustified, measuredPageHeight, pageIndex, pageHeights, photos.length, sliceReady]);
+  const nextMeasuredPageHeight = useMemo(() => {
+    if (!nextSliceReady || !nextAspectRows.length) return null;
+    return nextAspectRows.reduce((height, row) => height + row.height, 0) + Math.max(0, nextAspectRows.length - 1) * gap;
+  }, [gap, nextAspectRows, nextSliceReady]);
+  useEffect(() => {
+    if (!nextSliceReady || nextMeasuredPageHeight === null || !nextPhotos.length) return;
+    const nextHeight = boundedPageHeight(nextMeasuredPageHeight, estimatedPageHeight);
+    if (pageHeights.current.get(nextPageIndex) === nextHeight) return;
+    pageHeights.current.set(nextPageIndex, nextHeight);
+    while (pageHeights.current.size > MAX_PAGE_GEOMETRY) {
+      const oldest = pageHeights.current.keys().next().value;
+      if (oldest === undefined) break;
+      pageHeights.current.delete(oldest);
+    }
+    setGeometryRevision((value) => value + 1);
+  }, [estimatedPageHeight, nextMeasuredPageHeight, nextPageIndex, nextPhotos.length, nextSliceReady, pageHeights]);
+  const currentPageTop = useMemo(() => (isJustified ? pageStart(pageIndex) : chunkStartRow * rowHeight), [chunkStartRow, geometryRevision, isJustified, pageIndex, rowHeight]);
+  useEffect(() => {
+    const previous = previousPageAnchor.current;
+    if (isJustified && previous?.page === pageIndex && Math.abs(previous.top - currentPageTop) > 1 && scrollRef.current) {
+      const nextTop = Math.max(0, scrollRef.current.scrollTop + currentPageTop - previous.top);
+      scrollRef.current.scrollTop = nextTop;
+      setScrollTop(nextTop);
+    }
+    previousPageAnchor.current = { page: pageIndex, top: currentPageTop };
+  }, [currentPageTop, isJustified, pageIndex]);
+  const totalHeight = isJustified
+    ? Math.max(viewportHeight, pageCount * estimatedPageHeight + Math.max(0, pageCount - 1) * gap + Array.from(pageHeights.current.values()).reduce((delta, height) => delta + height - estimatedPageHeight, 0) + 24)
+    : Math.max(viewportHeight, rows * rowHeight + 24);
+  const showNextPage = isJustified && nextSliceReady && scrollTop + viewportHeight >= currentPageTop + pageHeight(pageIndex) - rowHeight * 2;
   return (
     <div className={`lc-grid-scroll ${mode === 'squareGrid' ? 'is-square' : 'is-aspect'}`} ref={scrollRef} onScroll={onScroll} onClick={() => setMenu(null)}>
       <div className="lc-grid-spacer" style={{ height: totalHeight }}>
-        <div className="lc-grid-window" style={{ top: chunkStartRow * rowHeight, gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, gap }} onKeyDown={(event) => {
+        <div className={`lc-grid-window${mode === 'photoGrid' ? ' is-justified' : ''}`} style={{ top: currentPageTop, gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, gap }} onKeyDown={(event) => {
           if (event.key === 'ArrowRight') { event.preventDefault(); moveSelection(1, event); }
           if (event.key === 'ArrowLeft') { event.preventDefault(); moveSelection(-1, event); }
           if (event.key === 'ArrowDown') { event.preventDefault(); moveSelection(columns, event); }
@@ -269,13 +429,11 @@ function VirtualPhotoGrid({ snapshot, mode, thumbSize }: { snapshot: DesktopSnap
           if (event.key === 'Home') { event.preventDefault(); moveSelection(-snapshot.total, event); }
           if (event.key === 'End') { event.preventDefault(); moveSelection(snapshot.total, event); }
         }} role="grid" aria-rowcount={rows} aria-busy={slice.loading} tabIndex={0}>
-          {photos.map((photo) => {
+          {mode === 'photoGrid' ? <>{renderJustifiedRows(aspectRows, `row-${chunkOffset}`)}{showNextPage && renderJustifiedRows(nextAspectRows, `row-${nextChunkOffset}`)}</> : photos.map((photo) => {
             const isSelected = selected.has(photo.id);
-            const style = { '--lc-aspect': mode === 'squareGrid' ? '1' : String(photoAspect(photo)) } as CSSProperties;
-            return <button className={`lc-photo-cell${isSelected ? ' is-selected' : ''}${active === photo.id ? ' is-active' : ''}`} style={style} type="button" role="gridcell" aria-selected={isSelected} key={photo.id} onClick={(event) => { event.stopPropagation(); select(photo, event); }} onDoubleClick={(event) => { event.stopPropagation(); select(photo, event); setUi({ view: 'detail', panel: 'info', filmstrip: true }); }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setMenu({ x: event.clientX, y: event.clientY, photo }); }}>
-              <span className="lc-photo-frame"><PhotoPreview photoId={photo.id} slot={`grid-${photo.id}`} viewGeneration={snapshot.viewGeneration} width={Math.max(96, thumbSize)} height={Math.max(96, Math.round(thumbSize / Math.max(0.5, photoAspect(photo))))} quality="draft" className="lc-photo-preview" /></span>
-              <PhotoBadges photo={photo} />
-              <span className="lc-photo-caption">{ui.gridInfo && <span>{photo.fileName}</span>}<span>{stars(photo.rating)}</span></span>
+            const style = { '--lc-aspect': '1' } as CSSProperties;
+            return <button className={`lc-photo-cell${isSelected ? ' is-selected' : ''}${active === photo.id ? ' is-active' : ''}${ui.gridInfo ? ' is-grid-info' : ''}`} style={style} type="button" role="gridcell" aria-selected={isSelected} key={photo.id} onClick={(event) => { event.stopPropagation(); select(photo, event); }} onDoubleClick={(event) => { event.stopPropagation(); select(photo, event); setUi({ view: 'detail', panel: 'info', filmstrip: true }); }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setMenu({ x: event.clientX, y: event.clientY, photo }); }}>
+              <span className="lc-photo-frame"><PhotoPreview photoId={photo.id} slot={`grid-${photo.id}`} viewGeneration={snapshot.viewGeneration} width={Math.max(96, thumbSize)} height={Math.max(96, thumbSize)} quality="draft" className="lc-photo-preview" /><PhotoBadges photo={photo} /><span className="lc-photo-caption"><span className="lc-photo-name">{photo.fileName}</span><span className="lc-photo-stars">{stars(photo.rating)}</span></span></span>
             </button>;
           })}
           {slice.loading && photos.length === 0 && <div className="lc-grid-loading" role="status">Loading photos…</div>}
@@ -291,10 +449,11 @@ function sortIsRandom(sort: string): boolean {
   return /(?:key:\s*Random|key:\s*random|"key"\s*:\s*"random")/.test(sort);
 }
 
-function Header({ snapshot, mode, setMode }: { snapshot: DesktopSnapshot; mode: 'photoGrid' | 'squareGrid'; setMode: (mode: 'photoGrid' | 'squareGrid') => void }) {
-  const { run, setDialog, setUi } = useDesktop();
+function Header({ snapshot, mode, setMode, thumbSize }: { snapshot: DesktopSnapshot; mode: 'photoGrid' | 'squareGrid'; setMode: (mode: 'photoGrid' | 'squareGrid') => void; thumbSize: number }) {
+  const { run, setDialog, setUi, ui } = useDesktop();
   const sourceLabel = typeof snapshot.source === 'object' && snapshot.source && 'label' in snapshot.source ? String((snapshot.source as { label?: unknown }).label) : sourceKey(snapshot.source) === 'all' ? 'All Photos' : sourceKey(snapshot.source);
   const [sortOpen, setSortOpen] = useState(false);
+  const [displayOpen, setDisplayOpen] = useState(false);
   const randomSort = sortIsRandom(snapshot.sort);
   const sort = (key: string) => { setSortOpen(false); void run('library.sort', { key }); };
   return <header className="lc-library-header">
@@ -302,19 +461,14 @@ function Header({ snapshot, mode, setMode }: { snapshot: DesktopSnapshot; mode: 
     <div className="lc-library-actions">
       <button type="button" className="lc-header-action" onClick={() => void run('file.addPhotos', {})}>Import</button>
       <button type="button" className="lc-header-action" onClick={() => setDialog({ kind: 'export' })}>Export</button>
-      <button type="button" className={`lc-view-toggle ${mode === 'photoGrid' ? 'is-active' : ''}`} aria-pressed={mode === 'photoGrid'} onClick={() => { setMode('photoGrid'); setUi({ view: 'photoGrid' }); }}>▦ Photo Grid</button>
-      <button type="button" className={`lc-view-toggle ${mode === 'squareGrid' ? 'is-active' : ''}`} aria-pressed={mode === 'squareGrid'} onClick={() => { setMode('squareGrid'); setUi({ view: 'squareGrid' }); }}>▦ Square</button>
+      <div className="lc-display-wrap"><button type="button" className="lc-header-action" aria-expanded={displayOpen} onClick={() => setDisplayOpen((value) => !value)}>Display <span aria-hidden="true">⌄</span></button>{displayOpen && <div className="lc-display-menu" role="menu">
+        <div className="lc-display-views" role="group" aria-label="Grid style"><button type="button" className={mode === 'photoGrid' ? 'is-active' : ''} aria-pressed={mode === 'photoGrid'} onClick={() => { setMode('photoGrid'); setUi({ view: 'photoGrid' }); }}>▦ Photo grid</button><button type="button" className={mode === 'squareGrid' ? 'is-active' : ''} aria-pressed={mode === 'squareGrid'} onClick={() => { setMode('squareGrid'); setUi({ view: 'squareGrid' }); }}>□ Square grid</button></div>
+        <label className="lc-display-size">Thumbnail size <input type="range" min={MIN_THUMB} max={MAX_THUMB} step={4} value={thumbSize} onChange={(event) => setUi({ thumbSize: Number(event.target.value) })} /></label>
+        <button type="button" role="menuitem" onClick={() => setUi({ gridInfo: !ui.gridInfo })}>Grid info: {ui.gridInfo ? 'On' : 'Off'}</button><button type="button" role="menuitem" onClick={() => { setDisplayOpen(false); setDialog({ kind: 'copySettings' }); }}>Copy settings</button><button type="button" role="menuitem" onClick={() => { setDisplayOpen(false); setDialog({ kind: 'pasteSettings' }); }}>Paste settings</button>
+      </div>}</div>
       <div className="lc-sort-wrap"><button type="button" className="lc-header-action" aria-expanded={sortOpen} onClick={() => setSortOpen((value) => !value)}>Sort ▾</button>{sortOpen && <div className="lc-sort-menu" role="menu">{[['captureDate', 'Capture date'], ['importDate', 'Import date'], ['editDate', 'Modified'], ['fileName', 'Filename'], ['rating', 'Rating'], ['fileSize', 'File size']].map(([key, label]) => <button type="button" role="menuitem" key={key} onClick={() => sort(key)}>{label}</button>)}<button type="button" role="menuitem" className="lc-sort-random" onClick={() => sort('random')}>Random</button><hr />{randomSort && <button type="button" role="menuitem" onClick={() => { setSortOpen(false); void run('library.shuffle', {}); }}>Reshuffle</button>}<button type="button" role="menuitem" disabled={randomSort} aria-disabled={randomSort} onClick={() => { if (!randomSort) { setSortOpen(false); void run('library.sort', { ascending: true }); } }}>Ascending</button><button type="button" role="menuitem" disabled={randomSort} aria-disabled={randomSort} onClick={() => { if (!randomSort) { setSortOpen(false); void run('library.sort', { ascending: false }); } }}>Descending</button></div>}</div>
     </div>
   </header>;
-}
-
-function Footer({ snapshot, mode, setMode, thumbSize }: { snapshot: DesktopSnapshot; mode: 'photoGrid' | 'squareGrid'; setMode: (mode: 'photoGrid' | 'squareGrid') => void; thumbSize: number }) {
-  const { ui, setDialog, setUi } = useDesktop();
-  return <footer className="lc-library-footer">
-    <div className="lc-footer-views"><button type="button" className={mode === 'photoGrid' ? 'is-active' : ''} onClick={() => { setMode('photoGrid'); setUi({ view: 'photoGrid' }); }}>▦</button><button type="button" className={mode === 'squareGrid' ? 'is-active' : ''} onClick={() => { setMode('squareGrid'); setUi({ view: 'squareGrid' }); }}>□</button><button type="button" onClick={() => setUi({ view: 'detail', panel: 'info' })}>▣</button></div>
-    <div className="lc-footer-actions"><label>Thumbnail size <input type="range" min={MIN_THUMB} max={MAX_THUMB} step={4} value={thumbSize} onChange={(event) => setUi({ thumbSize: Number(event.target.value) })} /></label><button type="button" onClick={() => setUi({ gridInfo: !ui.gridInfo })}>Grid info: {ui.gridInfo ? 'on' : 'off'}</button><button type="button" onClick={() => setDialog({ kind: 'copySettings' })}>Copy settings</button><button type="button" onClick={() => setDialog({ kind: 'pasteSettings' })}>Paste settings</button></div>
-  </footer>;
 }
 
 export default function LibraryWorkspace({ showSidebar = true }: { showSidebar?: boolean } = {}) {
@@ -346,10 +500,9 @@ export default function LibraryWorkspace({ showSidebar = true }: { showSidebar?:
     {showSidebar && <SourceSidebar snapshot={snapshot} collapsed={sidebarCollapsed} collapsedSections={collapsedSections} onToggleSection={toggleSection} onNavigate={navigate} />}
     <section className="lc-library-main" aria-label="Library">
       {showSidebar && <div className="lc-library-sidebar-toggle"><button type="button" aria-label={sidebarCollapsed ? 'Expand library sidebar' : 'Collapse library sidebar'} aria-pressed={sidebarCollapsed} onClick={() => setUi({ sidebarCollapsed: !sidebarCollapsed })}>☰</button></div>}
-      <Header snapshot={snapshot} mode={mode} setMode={(next) => setUi({ view: next })} />
+      <Header snapshot={snapshot} mode={mode} setMode={(next) => setUi({ view: next })} thumbSize={thumbSize} />
       <FilterBar snapshot={snapshot} filterText={filterText} setFilterText={setFilterText} />
       <VirtualPhotoGrid snapshot={snapshot} mode={mode} thumbSize={thumbSize} />
-      <Footer snapshot={snapshot} mode={mode} setMode={(next) => setUi({ view: next })} thumbSize={thumbSize} />
     </section>
     {snapshot.status.error && <div className="lc-library-error" role="alert">{snapshot.status.error}</div>}
   </div>;

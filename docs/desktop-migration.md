@@ -46,3 +46,7 @@ Settings exposes original library location/open, startup view, Auto Advance, ext
 ## Cutover
 
 Tauri remains preview until installed macOS & Windows qualification passes. Cutover must preserve original files, catalog format, CLI/MCP behavior, preferences & recovery; validate copied libraries before replacing default desktop packaging. Preserve baseline app & catalog/preferences backup for rollback. Record qualified revision, native artifacts, screenshots & outcome evidence before making Tauri default.
+
+## Approved workspace design
+
+Astra layout with Fable refinements uses existing RightKit AppShell & SegmentedControl. Library & Develop share source sidebar (246px default), inspector content (292px) & one 44px tool rail; manual collapse preserves rail access. Filmstrip defaults to108px with source/filter context. Six primary tools are Edit, Crop, Heal, Mask, Presets & Info; advanced panels stay available under More, with active indication & keyboard/focus handling. Library uses justified virtual rows & compact Display controls. Develop keeps labelled Before/After in one stage-footer row & puts Navigator in zoom menu. Engine previews, commands, preferences, import/export & gesture undo remain authoritative. Generated target-native qualification measures actual geometry & executes updated rail journeys before this design is qualified.

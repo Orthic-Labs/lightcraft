@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ControlSpec, DesktopSnapshot, JsonObject, Panel, UiState } from '../types';
 import { useDesktop } from '../desktop';
 import { Icon, type IconName } from '../icons';
+import { FuseCurves } from '@rightkit/app-shell/react';
 import './Inspector.css';
 
 type Run = (id: string, params?: JsonObject) => Promise<unknown>;
@@ -20,16 +21,19 @@ type DiagnosticWindow = Window & { __lcInteractionDiagnostics?: InteractionDiagn
 
 const PANEL_ITEMS: Array<{ id: Exclude<Panel, null>; label: string; icon: IconName }> = [
   { id: 'edit', label: 'Edit', icon: 'develop' },
-  { id: 'profiles', label: 'Profiles', icon: 'profiles' },
   { id: 'crop', label: 'Crop', icon: 'crop' },
-  { id: 'remove', label: 'Remove', icon: 'remove' },
-  { id: 'masking', label: 'Masking', icon: 'masking' },
-  { id: 'redeye', label: 'Red Eye', icon: 'redeye' },
+  { id: 'remove', label: 'Heal', icon: 'remove' },
+  { id: 'masking', label: 'Mask', icon: 'masking' },
   { id: 'presets', label: 'Presets', icon: 'presets' },
+  { id: 'info', label: 'Info', icon: 'info' },
+];
+
+const MORE_PANEL_ITEMS: Array<{ id: Exclude<Panel, null>; label: string; icon: IconName }> = [
+  { id: 'profiles', label: 'Profiles', icon: 'profiles' },
+  { id: 'redeye', label: 'Red eye', icon: 'redeye' },
   { id: 'versions', label: 'Versions', icon: 'versions' },
   { id: 'activity', label: 'History', icon: 'history' },
   { id: 'keywords', label: 'Keywords', icon: 'keywords' },
-  { id: 'info', label: 'Info', icon: 'info' },
 ];
 
 const SECTION_LABELS: Record<string, string> = {
@@ -64,14 +68,37 @@ function curvePresetResult(value: unknown): { presets: Json[]; current: string |
 export default function Inspector({ className = '' }: { className?: string }) {
   const desktop = useDesktop() as InspectorDesktop;
   const { snapshot, ui } = desktop;
-  const theme = ui.theme === 'light' ? 'light' : 'dark';
+  const theme = ui.theme === 'light' || ui.theme === 'dark' ? ui.theme : undefined;
   const panel = ui.panel ?? (ui.view === 'detail' ? 'edit' : 'info');
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreButtonRef = useRef<HTMLButtonElement>(null);
+  const moreMenuRef = useRef<HTMLDivElement>(null);
   const choose = (next: Exclude<Panel, null>) => {
-    desktop.setUi({ panel: next, ...(next === 'edit' || next === 'crop' || next === 'remove' || next === 'masking' || next === 'redeye' || next === 'profiles' || next === 'presets' ? { view: 'detail' } : {}) });
+    desktop.setUi({ inspectorCollapsed: false, panel: next, ...(next === 'edit' || next === 'crop' || next === 'remove' || next === 'masking' || next === 'redeye' || next === 'profiles' || next === 'presets' ? { view: 'detail' } : {}) });
   };
-  return <aside className={`lc-inspector ${className}`} data-theme={theme} aria-label="Inspector">
-    <ToolStrip active={panel} choose={choose} />
-    <div className="lc-inspector__scroll">
+  const hiddenPanelActive = MORE_PANEL_ITEMS.some(item => item.id === panel);
+  const closeMore = (restoreFocus = true) => {
+    setMoreOpen(false);
+    if (restoreFocus) requestAnimationFrame(() => moreButtonRef.current?.focus());
+  };
+  useEffect(() => {
+    if (!moreOpen) return undefined;
+    requestAnimationFrame(() => moreMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus());
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); closeMore(); }
+      else if (event.key === 'Tab') closeMore(false);
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!moreButtonRef.current?.contains(target) && !moreMenuRef.current?.contains(target)) closeMore(false);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => { document.removeEventListener('keydown', onKeyDown); document.removeEventListener('pointerdown', onPointerDown); };
+  }, [moreOpen]);
+  return <aside className={`lc-inspector ${ui.inspectorCollapsed ? 'is-collapsed' : ''} ${className}`} data-theme={theme} aria-label="Inspector">
+    <div className="lc-inspector__content">
+      <div className="lc-inspector__scroll">
       {panel === 'edit' && <EditPanel desktop={desktop} />}
       {panel === 'profiles' && <ProfilesPanel desktop={desktop} />}
       {panel === 'crop' && <CropPanel desktop={desktop} />}
@@ -84,13 +111,29 @@ export default function Inspector({ className = '' }: { className?: string }) {
       {panel === 'keywords' && <KeywordsPanel desktop={desktop} />}
       {panel === 'info' && <InfoPanel desktop={desktop} />}
       {!snapshot && <div className="lc-inspector__empty">Waiting for desktop session…</div>}
+      </div>
     </div>
+    <ToolRail active={panel} choose={choose} chooseFromMore={(next) => { choose(next); closeMore(); }} open={moreOpen} setOpen={setMoreOpen} hiddenActive={hiddenPanelActive} buttonRef={moreButtonRef} menuRef={moreMenuRef} />
   </aside>;
 }
 
-function ToolStrip({ active, choose }: { active: Panel; choose: (panel: Exclude<Panel, null>) => void }) {
-  return <nav className="lc-inspector__tools" aria-label="Inspector tools">
-    {PANEL_ITEMS.map(item => <button key={item.id} type="button" className="lc-inspector__tool" aria-label={item.label} aria-pressed={active === item.id} title={item.label} onClick={() => choose(item.id)}><span className="lc-inspector__tool-icon" aria-hidden="true"><Icon name={item.icon} size={16} /></span><span>{item.label}</span></button>)}
+function ToolRail({ active, choose, chooseFromMore, open, setOpen, hiddenActive, buttonRef, menuRef }: { active: Panel; choose: (panel: Exclude<Panel, null>) => void; chooseFromMore: (panel: Exclude<Panel, null>) => void; open: boolean; setOpen: (open: boolean) => void; hiddenActive: boolean; buttonRef: React.RefObject<HTMLButtonElement | null>; menuRef: React.RefObject<HTMLDivElement | null> }) {
+  return <nav className="lc-inspector__rail" aria-label="Inspector tools">
+    <div className="lc-inspector__rail-tools">
+      {PANEL_ITEMS.map(item => <button key={item.id} type="button" className="lc-inspector__tool" data-panel={item.id} aria-label={item.label} aria-pressed={active === item.id} title={item.label} onClick={() => choose(item.id)}><span className="lc-inspector__tool-icon" aria-hidden="true"><Icon name={item.icon} size={17} /></span>{active === item.id && <FuseCurves fill="var(--rk-plane)" />}</button>)}
+    </div>
+    <div className="lc-inspector__rail-more">
+      <button ref={buttonRef} type="button" className="lc-inspector__tool" data-more-tools="true" aria-label="More tools" aria-haspopup="menu" aria-expanded={open} aria-pressed={hiddenActive} title="More tools" onClick={() => setOpen(!open)}><span className="lc-inspector__tool-icon" aria-hidden="true"><span className="lc-inspector__more-glyph">•••</span></span>{hiddenActive && <FuseCurves fill="var(--rk-plane)" />}</button>
+      {open && <div ref={menuRef} className="lc-inspector__more-menu" role="menu" aria-label="More tools" onKeyDown={event => {
+        const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'));
+        const current = items.indexOf(document.activeElement as HTMLButtonElement);
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); items[(current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus(); }
+        else if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); items[event.key === 'Home' ? 0 : items.length - 1]?.focus(); }
+      }}>
+        <div className="lc-inspector__more-title">More tools</div>
+        {MORE_PANEL_ITEMS.map(item => <button key={item.id} type="button" role="menuitem" className="lc-inspector__more-item" data-panel={item.id} aria-current={active === item.id ? 'true' : undefined} onClick={() => chooseFromMore(item.id)}><Icon name={item.icon} size={16} /><span>{item.label}</span></button>)}
+      </div>}
+    </div>
   </nav>;
 }
 
@@ -217,8 +260,14 @@ function ControlRow({ spec, value, run }: { spec: ControlSpec; value: number; ru
   const [draft, setDraft] = useState(value);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const started = useRef(false);
+  const gestureValue = useRef(value);
+  const gestureToken = useRef(0);
+  const activeToken = useRef<number | null>(null);
+  const releasePendingToken = useRef<number | null>(null);
+  const latestValue = useRef(value);
+  latestValue.current = value;
   const commandQueue = useRef(Promise.resolve());
-  useEffect(() => setDraft(value), [value]);
+  useEffect(() => { if (!started.current && releasePendingToken.current === null) setDraft(value); }, [value]);
   const trace = (phase: string, details: InteractionDiagnostic = {}) => {
     if (typeof window === 'undefined') return;
     const records = (window as DiagnosticWindow).__lcInteractionDiagnostics;
@@ -235,13 +284,18 @@ function ControlRow({ spec, value, run }: { spec: ControlSpec; value: number; ru
     commandQueue.current = observed.then(() => undefined, () => undefined);
     return observed;
   };
-  const begin = () => { if (started.current) { trace('begin.skipped'); return; } trace('begin.before'); started.current = true; trace('begin.started'); void enqueue('develop.beginInteraction', { label: spec.label }); };
-  const end = () => { if (!started.current) { trace('end.skipped'); return; } trace('end.before'); started.current = false; trace('end.started'); void enqueue('develop.endInteraction', {}); };
-  const cancel = () => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } if (!started.current) { trace('cancel.skipped'); return; } trace('cancel.before'); started.current = false; trace('cancel.started'); void enqueue('develop.cancelInteraction', {}); };
+  const release = (token: number, fallback?: number) => {
+    if (releasePendingToken.current !== token) return;
+    releasePendingToken.current = null;
+    if (activeToken.current === null) setDraft(fallback ?? latestValue.current);
+  };
+  const begin = () => { if (started.current) { trace('begin.skipped'); return; } const token = ++gestureToken.current; activeToken.current = token; gestureValue.current = draft; trace('begin.before'); started.current = true; trace('begin.started'); void enqueue('develop.beginInteraction', { label: spec.label }); };
+  const end = () => { if (!started.current) { trace('end.skipped'); return; } const token = activeToken.current; if (token === null) return; trace('end.before'); started.current = false; activeToken.current = null; releasePendingToken.current = token; trace('end.started'); void enqueue('develop.endInteraction', {}).then(() => release(token), () => release(token)); };
+  const cancel = () => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } if (!started.current) { trace('cancel.skipped'); return; } const token = activeToken.current; if (token === null) return; trace('cancel.before'); started.current = false; activeToken.current = null; releasePendingToken.current = token; setDraft(gestureValue.current); trace('cancel.started'); void enqueue('develop.cancelInteraction', {}).then(() => release(token, gestureValue.current), () => release(token, gestureValue.current)); };
   const set = (next: number) => { if (!Number.isFinite(next)) return Promise.resolve(); const clamped = Math.max(spec.min, Math.min(spec.max, next)); setDraft(clamped); return enqueue('develop.set', { control: spec.id, value: clamped }); };
   const onKey = (next: number) => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } begin(); void set(next).then(() => { if (!started.current) return; if (timer.current) clearTimeout(timer.current); timer.current = setTimeout(end, 400); }, () => undefined); };
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); if (started.current) cancel(); }, [run]);
-  return <div className="lc-inspector__row"><label htmlFor={`ctl-${spec.id}`}>{spec.label}</label><input id={`ctl-${spec.id}`} type="range" min={spec.min} max={spec.max} step={spec.step} value={draft} aria-label={spec.label} onPointerDown={begin} onPointerUp={end} onPointerCancel={cancel} onChange={e => { begin(); void set(Number(e.target.value)); }} onKeyDown={e => { trace('keydown', { target: 'range', key: e.key, code: e.code, trusted: e.nativeEvent.isTrusted }); if (e.key === 'Escape') { cancel(); setDraft(value); } else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End') { e.preventDefault(); const current = Number(e.currentTarget.value); const base = Number.isFinite(current) ? current : draft; const next = e.key === 'Home' ? spec.min : e.key === 'End' ? spec.max : (e.key === 'ArrowLeft' || e.key === 'ArrowDown') ? base - spec.step : base + spec.step; onKey(next); } }} /><input type="number" min={spec.min} max={spec.max} step={spec.step} value={Number(draft.toFixed(spec.decimals))} aria-label={`${spec.label} value`} onFocus={begin} onChange={e => setDraft(Number(e.target.value))} onKeyDown={e => { trace('keydown', { target: 'number', key: e.key, code: e.code, trusted: e.nativeEvent.isTrusted }); if (e.key === 'Escape') { cancel(); setDraft(value); } }} onBlur={() => { void set(draft); end(); }} /><button className="lc-inspector__reset" type="button" aria-label={`Reset ${spec.label}`} title={`Reset ${spec.label}`} onClick={() => { end(); void enqueue('develop.resetControl', { control: spec.id }); setDraft(spec.default); }}>↺</button></div>;
+  return <div className="lc-inspector__row"><label htmlFor={`ctl-${spec.id}`}>{spec.label}</label><input id={`ctl-${spec.id}`} type="range" min={spec.min} max={spec.max} step={spec.step} value={draft} aria-label={spec.label} onPointerDown={begin} onPointerUp={end} onPointerCancel={cancel} onChange={e => { begin(); void set(Number(e.target.value)); }} onKeyDown={e => { trace('keydown', { target: 'range', key: e.key, code: e.code, trusted: e.nativeEvent.isTrusted }); if (e.key === 'Escape') cancel(); else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End') { e.preventDefault(); const current = Number(e.currentTarget.value); const base = Number.isFinite(current) ? current : draft; const next = e.key === 'Home' ? spec.min : e.key === 'End' ? spec.max : (e.key === 'ArrowLeft' || e.key === 'ArrowDown') ? base - spec.step : base + spec.step; onKey(next); } }} /><input type="number" min={spec.min} max={spec.max} step={spec.step} value={Number(draft.toFixed(spec.decimals))} aria-label={`${spec.label} value`} onFocus={begin} onChange={e => setDraft(Number(e.target.value))} onKeyDown={e => { trace('keydown', { target: 'number', key: e.key, code: e.code, trusted: e.nativeEvent.isTrusted }); if (e.key === 'Escape') cancel(); }} onBlur={() => { void set(draft); end(); }} /><button className="lc-inspector__reset" type="button" aria-label={`Reset ${spec.label}`} title={`Reset ${spec.label}`} onClick={() => { end(); void enqueue('develop.resetControl', { control: spec.id }); setDraft(spec.default); }}>↺</button></div>;
 }
 
 function MixerLegend({ settings }: { settings: Json }) { const mixer = object(settings.mixer); return <div className="lc-inspector__empty">{Object.keys(mixer).length ? 'Adjust hue, saturation & luminance for each colour.' : 'Select photo to adjust its colours.'}</div>; }

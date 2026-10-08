@@ -194,6 +194,40 @@ fn click_dom(control: &rightkit_qa::control::Control, selector: &str, message: &
     result.expect(message);
 }
 
+fn choose_inspector_panel(control: &rightkit_qa::control::Control, panel: &str) {
+    let selector = format!(".lc-inspector button[data-panel='{panel}']");
+    let visible = control.eval(&format!("return document.querySelector({selector:?}) !== null;")).expect("tool visibility must be queryable");
+    if visible.as_bool() != Some(true) {
+        click_dom(control, ".lc-inspector button[data-more-tools]", "More tools menu must open");
+        wait_for_dom(control, &format!("return document.querySelector({selector:?}) !== null;"));
+    }
+    click_dom(control, &selector, "inspector tool must select its actual panel");
+}
+
+fn assert_workspace_design(control: &rightkit_qa::control::Control) {
+    let design = control.eval(r#"return (() => {
+        const rect = (selector) => document.querySelector(selector)?.getBoundingClientRect();
+        const side = rect('.rk-side'), body = rect('.lc-inspector__content'), rail = rect('.lc-inspector__rail'), film = rect('.lc-filmstrip');
+        const tools = [...document.querySelectorAll('.lc-inspector__rail-tools button')].map(node => node.getAttribute('aria-label'));
+        return { sidebar: side?.width, inspector: body?.width, rail: rail?.width, filmstrip: film?.height, tools,
+            duplicateTools: document.querySelectorAll('.stage-toolstrip,.lc-inspector__tools').length,
+            overflow: document.documentElement.scrollWidth > innerWidth,
+            footerRows: (() => { const buttons = [...document.querySelectorAll('.stage-footer button')].filter(node => node.getBoundingClientRect().width > 0 && !node.closest('.zoom-menu-popover')); const bounds = buttons.map(node => node.getBoundingClientRect()); return bounds.length ? (Math.max(...bounds.map(r => r.top)) < Math.min(...bounds.map(r => r.bottom)) ? 1 : 2) : 0; })(),
+            comparisonLabel: [...document.querySelectorAll('.stage-footer button')].some(node => node.textContent.includes('Before / After')) };
+    })();"#).expect("approved workspace geometry must be measurable");
+    assert!(design["sidebar"].as_f64().is_some_and(|value| (value - 246.0).abs() < 2.0), "left source sidebar must remain open at246px: {design}");
+    assert!(design["inspector"].as_f64().is_some_and(|value| (value - 292.0).abs() < 2.0), "inspector content must measure292px: {design}");
+    assert!(design["rail"].as_f64().is_some_and(|value| (value - 44.0).abs() < 2.0), "single tool rail must measure44px: {design}");
+    assert!(design["filmstrip"].as_f64().is_some_and(|value| (value - 108.0).abs() < 2.0), "bottom filmstrip must measure108px: {design}");
+    assert_eq!(design["tools"], json!(["Edit", "Crop", "Heal", "Mask", "Presets", "Info"]));
+    assert_eq!(design["duplicateTools"].as_u64(), Some(0));
+    assert_eq!(design["overflow"].as_bool(), Some(false));
+    if design["footerRows"].as_u64().unwrap_or(0) > 0 {
+        assert_eq!(design["footerRows"].as_u64(), Some(1), "stage footer must stay in one row: {design}");
+        assert_eq!(design["comparisonLabel"].as_bool(), Some(true));
+    }
+}
+
 fn set_native_viewport(control: &rightkit_qa::control::Control, width: u64, height: u64) -> Value {
     let result = control.command("lc_qa_viewport", &json!({"width": width, "height": height})).expect("QA viewport resize command must execute");
     assert_eq!(result["requested"]["width"].as_u64(), Some(width), "QA viewport must report requested width");
@@ -1104,6 +1138,7 @@ fn native_hidden_control_journeys() {
                             set_native_viewport(control, width, height);
                             wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
                             assert_layout_settled(control, ".lc-library-workspace");
+                            assert_workspace_design(control);
                             let viewport = control
                                 .eval("return {width: window.innerWidth, height: window.innerHeight};")
                                 .expect("viewport query must execute");
@@ -1115,10 +1150,11 @@ fn native_hidden_control_journeys() {
                             control.key("D").expect("develop route key must execute");
                             wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
                             assert_layout_settled(control, ".stage-workspace.stage-detail");
+                            assert_workspace_design(control);
                             let route = control
-                                .eval("return document.querySelector('.stage-route-tabs button.selected span')?.textContent?.trim() || '';")
+                                .eval("return document.querySelector('.stage-view-mode select')?.value || '';")
                                 .expect("develop route readback must execute");
-                            assert_eq!(route.as_str(), Some("Detail"), "D must select Detail route");
+                            assert_eq!(route.as_str(), Some("detail"), "D must select Detail route");
                             let develop = scenario.dir().join(format!("route-develop-{width}x{height}.png"));
                             control.screenshot_to(&develop).expect("develop route screenshot must be captured");
                             assert!(develop.is_file());
@@ -1268,7 +1304,7 @@ fn native_hidden_control_journeys() {
                         let before = imported["undo"].as_u64().expect("snapshot undo count required");
                         control.key("D").expect("develop route key must execute");
                         wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
-                        click_dom(control, ".stage-toolstrip button[aria-label='Edit']", "edit tool click must execute");
+                        choose_inspector_panel(control, "edit");
                         wait_for_dom(control, r#"return document.querySelector("input[aria-label='Exposure']") !== null;"#);
                         let prepared = control
                             .eval(r#"return (() => {
@@ -1467,16 +1503,16 @@ fn native_hidden_control_journeys() {
                         run(control, "crop.set", json!({"rect": [0.1, 0.1, 0.9, 0.9], "angle": 3.0}));
                         let crop = snapshot(control);
                         assert_ne!(crop["develop"]["crop"], before["develop"]["crop"], "crop command must change crop geometry");
-                        click_dom(control, ".stage-toolstrip button[aria-label='Crop']", "crop tool click must execute");
-                        wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Crop']")?.classList.contains('selected') === true;"#);
+                        choose_inspector_panel(control, "crop");
+                        wait_for_dom(control, r#"return document.querySelector(".lc-inspector button[data-panel='crop']")?.getAttribute('aria-pressed') === 'true';"#);
                         wait_for_rendered_preview(control, "img.stage-preview", None);
                         capture_visible_tool_preview(control, &scenario.dir().join("tool-crop.png"));
 
                         run(control, "mask.add", json!({"kind": "radial", "center": [0.5, 0.5], "rx": 0.2, "ry": 0.2}));
                         let masked = snapshot(control);
                         assert_eq!(masked["develop"]["masks"].as_array().map(Vec::len), Some(1), "mask command must create mask state");
-                        click_dom(control, ".stage-toolstrip button[aria-label='Masking']", "masking tool click must execute");
-                        wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Masking']")?.classList.contains('selected') === true;"#);
+                        choose_inspector_panel(control, "masking");
+                        wait_for_dom(control, r#"return document.querySelector(".lc-inspector button[data-panel='masking']")?.getAttribute('aria-pressed') === 'true';"#);
                         wait_for_rendered_preview(control, "img.stage-preview", None);
                         wait_for_dom(control, "return document.querySelector('.lc-inspector__header small')?.textContent === '1 mask';");
                         capture_visible_tool_preview(control, &scenario.dir().join("tool-masking.png"));
@@ -1484,16 +1520,16 @@ fn native_hidden_control_journeys() {
                         run(control, "spot.add", json!({"mode": "remove", "points": [[0.5, 0.5]], "size": 0.05, "source": [0.1, 0.0]}));
                         let spotted = snapshot(control);
                         assert_eq!(spotted["develop"]["spots"].as_array().map(Vec::len), Some(1), "remove tool command must create spot state");
-                        click_dom(control, ".stage-toolstrip button[aria-label='Remove']", "remove tool click must execute");
-                        wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Remove']")?.classList.contains('selected') === true;"#);
+                        choose_inspector_panel(control, "remove");
+                        wait_for_dom(control, r#"return document.querySelector(".lc-inspector button[data-panel='remove']")?.getAttribute('aria-pressed') === 'true';"#);
                         wait_for_rendered_preview(control, "img.stage-preview", None);
                         capture_visible_tool_preview(control, &scenario.dir().join("tool-remove.png"));
 
                         run(control, "redeye.add", json!({"center": [0.5, 0.5], "rx": 0.1, "ry": 0.1}));
                         let red_eye = snapshot(control);
                         assert_eq!(red_eye["develop"]["red_eye"].as_array().map(Vec::len), Some(1), "red-eye command must create correction state");
-                        click_dom(control, ".stage-toolstrip button[aria-label='Red Eye']", "red-eye tool click must execute");
-                        wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Red Eye']")?.classList.contains('selected') === true;"#);
+                        choose_inspector_panel(control, "redeye");
+                        wait_for_dom(control, r#"return document.querySelector(".lc-inspector button[data-more-tools]")?.getAttribute('aria-pressed') === 'true';"#);
                         wait_for_rendered_preview(control, "img.stage-preview", None);
                         capture_visible_tool_preview(control, &scenario.dir().join("tool-red-eye.png"));
                         assert_eq!(red_eye["active"].as_u64(), Some(active));
@@ -1545,7 +1581,7 @@ fn native_hidden_control_journeys() {
                         let id = imported["active"].as_u64().expect("PNG import must select photo");
                         control.key("D").expect("develop route key must execute for engine export journey");
                         wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
-                        click_dom(control, ".stage-toolstrip button[aria-label='Edit']", "Edit panel must open before histogram & curve checks");
+                        choose_inspector_panel(control, "edit");
                         wait_for_dom(control, "return document.querySelector('.lc-histogram svg path[stroke=\"#df6464\"]')?.getAttribute('d')?.includes('L') === true && document.querySelector('.lc-histogram__footer')?.textContent.includes('samples') === true;");
                         let curve_before = snapshot(control)["develop"]["curve"].clone();
                         let scrolled = control.eval("return (() => { const button = document.querySelector('.lc-curve-picker > button'); if (!button) return false; button.scrollIntoView({block: 'center', inline: 'nearest'}); return true; })();").expect("curve preset control must scroll into view");

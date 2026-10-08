@@ -8,8 +8,8 @@ import type { DesktopContextValue, DesktopSnapshot, DialogState, JsonObject, Sta
 const MIN_STAGE = 360;
 const DEFAULT_UI: UiState = {
   view: 'photoGrid', panel: 'info', tool: '', zoom: 'fit', clickZoom: 1, beforeAfter: 'off',
-  sidebarCollapsed: false, inspectorCollapsed: false, sidebarWidth: 268, inspectorWidth: 300,
-  thumbSize: 180, filmstrip: false, filterBar: true, referenceId: null, compareIds: [], navigator: false,
+  sidebarCollapsed: false, inspectorCollapsed: false, sidebarWidth: 246, inspectorWidth: 292,
+  thumbSize: 180, filmstrip: true, filterBar: true, referenceId: null, compareIds: [], navigator: false,
   slideshow: false, infoOverlay: 0, maskOverlay: false, maskOverlayMode: 'selected', maskPins: true,
   clipping: false, theme: 'system', locale: 'en', sections: { light: true, color: true, effects: true, detail: false, optics: false },
   autoAdvance: false, gridInfo: true, softProof: false, brushSize: 100, brushFeather: 50, cropOverlay: 'thirds', filterText: '',

@@ -4,8 +4,6 @@ import { PhotoPreview } from "../preview/PhotoPreview";
 import Filmstrip from "../library/Filmstrip";
 import { useDesktop } from "../desktop";
 import type { DesktopSnapshot, PhotoSummary, UiState, ViewMode } from "../types";
-import { Icon } from "../icons";
-import type { IconName } from "../icons";
 import "./StageWorkspace.css";
 
 type Point = { x: number; y: number };
@@ -18,19 +16,6 @@ const views: Array<{ id: ViewMode; label: string; key: string }> = [
   { id: "survey", label: "Survey", key: "N" },
   { id: "reference", label: "Reference", key: "R" },
   { id: "people", label: "People", key: "P" },
-];
-
-const tools: Array<{ id: UiState["panel"]; label: string; icon: IconName }> = [
-  { id: "edit", label: "Edit", icon: "develop" },
-  { id: "crop", label: "Crop", icon: "crop" },
-  { id: "remove", label: "Remove", icon: "remove" },
-  { id: "masking", label: "Masking", icon: "masking" },
-  { id: "redeye", label: "Red Eye", icon: "redeye" },
-  { id: "presets", label: "Presets", icon: "presets" },
-  { id: "versions", label: "Versions", icon: "versions" },
-  { id: "activity", label: "History", icon: "history" },
-  { id: "keywords", label: "Keywords", icon: "keywords" },
-  { id: "info", label: "Info", icon: "info" },
 ];
 
 const maskTools = [
@@ -313,11 +298,6 @@ function Navigator({ zoom, pan, onChange }: { zoom: number; pan: Point; onChange
   </aside>;
 }
 
-function ToolStrip({ ui, setUi }: { ui: UiState; setUi: (patch: Partial<UiState>) => void }) {
-  const choose = (id: UiState["panel"]) => setUi({ panel: id, view: id && ["edit", "crop", "remove", "masking", "redeye", "presets", "versions", "activity", "keywords", "info"].includes(id) && id !== "info" ? "detail" : ui.view });
-  return <nav className="stage-toolstrip" aria-label="Develop tools">{tools.map((tool) => <button key={tool.id ?? "none"} type="button" className={ui.panel === tool.id ? "selected" : ""} onPointerDown={() => choose(tool.id)} onClick={() => choose(tool.id)} title={tool.label} aria-label={tool.label}><span className="stage-tool-icon" aria-hidden="true"><Icon name={tool.icon} size={19} /></span><small>{tool.label}</small></button>)}</nav>;
-}
-
 function MaskToolbar({ ui, setUi, run }: { ui: UiState; setUi: (patch: Partial<UiState>) => void; run: (id: string, params?: Record<string, unknown>) => Promise<unknown> }) {
   return <div className="mask-toolbar" role="toolbar" aria-label="Mask tools">{maskTools.map(([id, label]) => <button key={id} type="button" className={ui.tool === id ? "selected" : ""} onClick={() => { setUi({ tool: id, maskOverlay: true }); if (id === "linear" || id === "radial" || id === "brush") void run("mask.add", { kind: id }); if (id === "composition") void run("mask.addComponent", { kind: "brush", op: "add" }).catch(() => run("mask.add", { kind: "brush" })); }} title={label}>{label}</button>)}<button type="button" className={ui.maskOverlay ? "selected" : ""} onClick={() => setUi({ maskOverlay: !ui.maskOverlay })}>Overlay</button><button type="button" className={ui.maskPins ? "selected" : ""} onClick={() => setUi({ maskPins: !ui.maskPins })}>Pins</button></div>;
 }
@@ -330,13 +310,43 @@ function RemoveToolbar({ ui, setUi, run }: { ui: UiState; setUi: (patch: Partial
   return <div className="mask-toolbar crop-toolbar" role="toolbar" aria-label="Remove options"><button type="button" className={ui.tool === "remove" ? "selected" : ""} onClick={() => setUi({ tool: "remove" })}>Remove</button><button type="button" className={ui.tool === "heal" ? "selected" : ""} onClick={() => setUi({ tool: "heal" })}>Heal</button><button type="button" className={ui.tool === "clone" ? "selected" : ""} onClick={() => setUi({ tool: "clone" })}>Clone</button><button type="button" onClick={() => void run("spot.findDust", { add: true })}>Find Dust</button><button type="button" onClick={() => void run("spot.delete", {})}>Delete Spot</button></div>;
 }
 
-function Footer({ ui, setUi, run, onNative }: { ui: UiState; setUi: (patch: Partial<UiState>) => void; run: (id: string, params?: Record<string, unknown>) => Promise<unknown>; onNative: (action: string, params?: Record<string, unknown>) => Promise<unknown> }) {
+function ZoomMenu({ ui, setUi }: { ui: UiState; setUi: (patch: Partial<UiState>) => void }) {
   const zoomValue = typeof ui.zoom === "number" ? ui.zoom : ui.zoom === "fill" ? 1.25 : 1;
+  const zoomLabel = ui.zoom === "fit" ? "Fit" : ui.zoom === "fill" ? "Fill" : `${Math.round(zoomValue * 100)}%`;
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const close = useCallback((restoreFocus: boolean) => {
+    setOpen(false);
+    if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
+  }, []);
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      close(true);
+    };
+    const onPointerDown = (event: globalThis.PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node) || (!triggerRef.current?.contains(target) && !menuRef.current?.contains(target))) close(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [close, open]);
+  return <div className="zoom-menu"><button ref={triggerRef} type="button" className="zoom-menu-trigger" aria-expanded={open} aria-haspopup="dialog" aria-label={`Zoom ${zoomLabel}`} onClick={() => setOpen((current) => !current)}>Zoom <strong>{zoomLabel}</strong><span aria-hidden="true">⌄</span></button>{open ? <div ref={menuRef} className="zoom-menu-popover" role="dialog" aria-label="Zoom controls"><div className="zoom-menu-presets"><button type="button" onClick={() => { setUi({ zoom: "fit" }); close(true); }} aria-pressed={ui.zoom === "fit"}>Fit</button><button type="button" onClick={() => { setUi({ zoom: "fill" }); close(true); }} aria-pressed={ui.zoom === "fill"}>Fill</button><button type="button" onClick={() => { setUi({ zoom: 1 }); close(true); }} aria-pressed={ui.zoom === 1}>100%</button></div><label className="zoom-slider"><span>Zoom</span><input aria-label="Zoom" type="range" min="0.25" max="4" step="0.05" value={zoomValue} onChange={(event) => setUi({ zoom: Number(event.target.value) })} /><output>{Math.round(zoomValue * 100)}%</output></label><button className="zoom-navigator" type="button" onClick={() => { setUi({ navigator: !ui.navigator }); close(true); }} aria-pressed={ui.navigator}>Navigator</button></div> : null}</div>;
+}
+
+function Footer({ ui, setUi, run, onNative }: { ui: UiState; setUi: (patch: Partial<UiState>) => void; run: (id: string, params?: Record<string, unknown>) => Promise<unknown>; onNative: (action: string, params?: Record<string, unknown>) => Promise<unknown> }) {
   const nextInfoOverlay = () => {
     const mode = Number.isFinite(ui.infoOverlay) ? Math.trunc(ui.infoOverlay) : 0;
     setUi({ infoOverlay: (Math.max(0, Math.min(2, mode)) + 1) % 3 });
   };
-  return <footer className="stage-footer"><div className="footer-left"><button type="button" onClick={() => setUi({ filmstrip: !ui.filmstrip })} aria-pressed={ui.filmstrip}>Filmstrip</button><button type="button" onClick={() => setUi({ navigator: !ui.navigator })} aria-pressed={ui.navigator}>Navigator</button><button type="button" onClick={() => setUi({ beforeAfter: ui.beforeAfter === "off" ? "sideBySide" : "off" })} aria-pressed={ui.beforeAfter !== "off"}>Before / After</button><button type="button" onClick={() => setUi({ clipping: !ui.clipping })} aria-pressed={ui.clipping}>Clipping</button><button type="button" onClick={() => setUi({ softProof: !ui.softProof })} aria-pressed={ui.softProof}>Proof</button></div><div className="footer-center"><button type="button" onClick={() => setUi({ zoom: "fit" })}>Fit</button><button type="button" onClick={() => setUi({ zoom: "fill" })}>Fill</button><button type="button" onClick={() => setUi({ zoom: 1 })}>100%</button><input aria-label="Zoom" type="range" min="0.25" max="4" step="0.05" value={zoomValue} onChange={(event) => setUi({ zoom: Number(event.target.value) })} /><output>{Math.round(zoomValue * 100)}%</output></div><div className="footer-right"><button type="button" onClick={nextInfoOverlay} aria-pressed={ui.infoOverlay !== 0}>Info</button><button type="button" onClick={() => setUi({ slideshow: !ui.slideshow })}>{ui.slideshow ? "Pause" : "Slideshow"}</button><button type="button" onClick={() => void onNative("fullscreen", { enabled: true })}>Fullscreen</button><button type="button" onClick={() => void onNative("secondWindow", { view: "detail" })}>Second window</button><button type="button" onClick={() => void run("view.beforeAfter", {})}>Compare</button></div></footer>;
+  return <footer className="stage-footer"><div className="footer-left"><button type="button" onClick={() => setUi({ filmstrip: !ui.filmstrip })} aria-pressed={ui.filmstrip}>Filmstrip</button><button type="button" onClick={() => setUi({ beforeAfter: ui.beforeAfter === "off" ? "sideBySide" : "off" })} aria-pressed={ui.beforeAfter !== "off"}>Before / After</button><button type="button" onClick={() => setUi({ clipping: !ui.clipping })} aria-pressed={ui.clipping}>Clipping</button><button type="button" onClick={() => setUi({ softProof: !ui.softProof })} aria-pressed={ui.softProof}>Proof</button></div><div className="footer-center"><ZoomMenu ui={ui} setUi={setUi} /></div><div className="footer-right"><button type="button" onClick={nextInfoOverlay} aria-pressed={ui.infoOverlay !== 0}>Info</button><button type="button" onClick={() => setUi({ slideshow: !ui.slideshow })}>{ui.slideshow ? "Pause" : "Slideshow"}</button><button type="button" onClick={() => void onNative("fullscreen", { enabled: true })}>Fullscreen</button><button type="button" onClick={() => void onNative("secondWindow", { view: "detail" })}>Second window</button><button type="button" onClick={() => void run("view.beforeAfter", {})}>Compare</button></div></footer>;
 }
 
 function prettyDate(value: string): string {
@@ -531,10 +541,11 @@ export function StageWorkspace() {
       }
     })();
   }, [active, candidate, send, setUi, ui.panel]);
-  const stageClass = `stage-workspace stage-${ui.view} ${ui.theme === "dark" ? "stage-dark" : "stage-light"} ${ui.beforeAfter !== "off" ? "has-before-after" : ""}`;
+  const themeClass = ui.theme === "dark" ? "stage-dark" : ui.theme === "light" ? "stage-light" : "stage-system";
+  const stageClass = `stage-workspace stage-${ui.view} ${themeClass} ${ui.beforeAfter !== "off" ? "has-before-after" : ""}`;
 
   return <section ref={stageRef} className={stageClass} aria-label="Photo stage">
-    <div className="stage-topbar"><div className="stage-route-tabs">{views.map((view) => <button key={view.id} type="button" className={ui.view === view.id ? "selected" : ""} onClick={() => routeView(view.id)}><span>{view.label}</span><kbd>{view.key}</kbd></button>)}</div><div className="stage-photo-title"><strong>{titleFor(photo)}</strong><span>{photo ? `${photo.w} × ${photo.h}` : ""}</span></div><MultiViewActions view={ui.view} candidate={candidate} reference={ui.referenceId} run={run} setUi={setUi} /><div className="stage-status">{snapshot?.status.previewBuild ? <span className="stage-loading">Rendering preview…</span> : null}{error ? <span className="stage-error">{error}</span> : null}{notice ? <span>{notice}</span> : null}</div></div>
+    <div className="stage-topbar"><label className="stage-view-mode"><span>View</span><select aria-label="View mode" value={views.some((view) => view.id === ui.view) ? ui.view : "detail"} onChange={(event) => routeView(event.target.value as ViewMode)}>{views.map((view) => <option key={view.id} value={view.id}>{view.label}</option>)}</select></label><div className="stage-photo-title"><strong>{titleFor(photo)}</strong><span>{photo ? `${photo.w} × ${photo.h}` : ""}</span></div><MultiViewActions view={ui.view} candidate={candidate} reference={ui.referenceId} run={run} setUi={setUi} /><div className="stage-status" aria-live="polite">{snapshot?.status.previewBuild ? <span className="stage-loading">Rendering preview…</span> : snapshot?.status.unsaved ? <span className="stage-unsaved">Unsaved changes</span> : snapshot ? <span className="stage-saved">Saved</span> : null}{snapshot?.status.importing ? <span>Importing…</span> : null}{snapshot?.status.exporting ? <span>Exporting…</span> : null}{error ? <span className="stage-error">{error}</span> : null}{notice ? <span>{notice}</span> : null}</div></div>
     <div className="stage-body">
       <div className="stage-canvas" style={{ ["--stage-zoom" as string]: zoom, ["--stage-pan-x" as string]: `${pan.x * 100}%`, ["--stage-pan-y" as string]: `${pan.y * 100}%` }}>
         {ui.view === "compare" ? <div className="compare-panes"><div className="compare-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} before={ui.beforeAfter === "original"} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /><span className="pane-label">Select</span></div><div className="compare-pane"><StageImage photoId={candidate} photo={photoFor(candidate)} previewEdge={previewEdge} slot={previewSlot(ui.view, 1)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span className="pane-label">Candidate {candidate ?? "—"}</span></div></div> : ui.view === "reference" ? <div className="compare-panes"><div className="compare-pane"><StageImage photoId={ui.referenceId} photo={photoFor(ui.referenceId)} previewEdge={previewEdge} slot="reference" viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span className="pane-label">Reference {ui.referenceId ?? "—"}</span></div><div className="compare-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot="reference-active" viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /><span className="pane-label">Active</span></div></div> : ui.view === "survey" ? <div className="survey-grid">{(selection.length ? selection : active == null ? [] : [active]).map((id, index) => <button type="button" className={id === active ? "survey-photo selected" : "survey-photo"} key={id} onClick={() => { setUi({ view: "detail" }); void send("library.select", { ids: [id], active: id, mode: "replace" }); }}><StageImage photoId={id} photo={photoFor(id)} previewEdge={previewEdge} slot={previewSlot(ui.view, index)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span>{index + 1}</span></button>)}</div> : ui.view === "people" ? <div className="people-stage"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><div className="face-boxes">{Array.isArray(record(snapshot?.source).faces) ? (record(snapshot?.source).faces as unknown[]).map((face, index) => { const f = record(face); const r = box(f.rect ?? f.bounds) ?? { x0: 0.3 + index * 0.05, y0: 0.25, x1: 0.44 + index * 0.05, y1: 0.42 }; return <span key={index} style={{ left: `${r.x0 * 100}%`, top: `${r.y0 * 100}%`, width: `${(r.x1 - r.x0) * 100}%`, height: `${(r.y1 - r.y0) * 100}%` }} />; }) : null}</div></div> : ui.beforeAfter !== "off" && ui.beforeAfter !== "original" ? <BeforeAfterStage mode={ui.beforeAfter} photoId={active} photo={photoFor(active)} previewEdge={previewEdge} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /> : <div className="single-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} before={ui.beforeAfter === "original"} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} />{ui.panel === "crop" ? <CropOverlay develop={develop} guide={ui.cropOverlay} /> : null}{ui.maskOverlay && ui.panel === "masking" ? <MaskOverlay develop={develop} pins={ui.maskPins} /> : null}{ui.panel === "remove" ? <SpotsOverlay develop={develop} /> : null}{ui.panel === "redeye" ? <SpotsOverlay develop={develop} eyes /> : null}{ui.clipping ? <div className="clipping-overlay" aria-label="Clipping preview" /> : null}</div>}
@@ -542,7 +553,6 @@ export function StageWorkspace() {
         {ui.navigator ? <Navigator zoom={zoom} pan={pan} onChange={setPan} /> : null}
         {histogram ? <div className="histogram-badge" aria-label="Histogram available">Histogram</div> : null}
       </div>
-      <ToolStrip ui={ui} setUi={setUi} />
       {ui.panel === "crop" ? <CropToolbar ui={ui} setUi={setUi} run={run} /> : null}
       {ui.panel === "remove" ? <RemoveToolbar ui={ui} setUi={setUi} run={run} /> : null}
       {ui.panel === "masking" ? <MaskToolbar ui={ui} setUi={setUi} run={run} /> : null}

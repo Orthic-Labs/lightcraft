@@ -10,6 +10,7 @@ const PAGE = 128;
 const ITEM_WIDTH = 124;
 const ITEM_GAP = 8;
 const ITEM_STRIDE = ITEM_WIDTH + ITEM_GAP;
+const ITEM_HEIGHT = 66;
 
 type ActiveSearch = { key: string; cancelled: boolean };
 
@@ -17,7 +18,6 @@ function badge(photo: PhotoSummary): string {
   const values: string[] = [];
   if (photo.flag === 'pick') values.push('●');
   if (photo.flag === 'reject') values.push('×');
-  if (photo.edited) values.push('✎');
   return values.join(' ');
 }
 
@@ -26,12 +26,46 @@ function badgeLabel(photo: PhotoSummary): string {
   if (photo.rating > 0) values.push(`${photo.rating} star${photo.rating === 1 ? '' : 's'}`);
   if (photo.flag === 'pick') values.push('picked');
   if (photo.flag === 'reject') values.push('rejected');
-  if (photo.edited) values.push('edited');
   return values.join(', ');
 }
 
+function sourceKey(source: unknown): string {
+  if (typeof source === 'string') return source;
+  if (source && typeof source === 'object' && 'kind' in source) return String((source as { kind?: unknown }).kind ?? 'all');
+  return 'all';
+}
+
+function sourceLabel(source: unknown, albums: DesktopSnapshot['albums']): string {
+  if (source && typeof source === 'object' && 'label' in source) return String((source as { label?: unknown }).label ?? 'All Photos');
+  if (source && typeof source === 'object' && 'kind' in source && (source as { kind?: unknown }).kind === 'album') {
+    const id = (source as { id?: unknown }).id;
+    const album = albums.find((candidate) => String(candidate.id) === String(id));
+    if (album) return album.name;
+  }
+  const key = sourceKey(source);
+  return ({ all: 'All Photos', recentlyAdded: 'Recently Added', picks: 'Picks', recentlyDeleted: 'Recently Deleted', album: 'Album', folder: 'Local', missing: 'Missing Photos' } as Record<string, string>)[key] ?? key;
+}
+
+function filterLabel(filter: unknown): string {
+  if (!filter || typeof filter !== 'object') return '';
+  const values = filter as Record<string, unknown>;
+  const labels: string[] = [];
+  if (typeof values.text === 'string' && values.text.trim()) labels.push(`“${values.text.trim()}”`);
+  if (typeof values.rating === 'number' && values.rating > 0) labels.push(`${values.rating}${values.ratingOp === 'atMost' ? '−' : '+'} stars`);
+  if (values.flag === 'pick') labels.push('Picks');
+  if (values.flag === 'reject') labels.push('Rejected');
+  if (values.flag === 'none') labels.push('Unflagged');
+  if (values.edited === true) labels.push('Edited');
+  if (typeof values.label === 'string' && values.label) labels.push(`Label: ${values.label}`);
+  if (typeof values.kind === 'string' && values.kind) labels.push(`Kind: ${values.kind}`);
+  if (typeof values.date === 'string' && values.date.trim()) labels.push(`Date: ${values.date.trim()}`);
+  if (typeof values.keyword === 'string' && values.keyword.trim()) labels.push(`Keyword: ${values.keyword.trim()}`);
+  if (typeof values.camera === 'string' && values.camera.trim()) labels.push(`Camera: ${values.camera.trim()}`);
+  return labels.join(' · ');
+}
+
 export default function Filmstrip() {
-  const { snapshot, run, ui } = useDesktop();
+  const { snapshot, run, ui, setUi } = useDesktop();
   const viewport = useRef<HTMLDivElement>(null);
   const [scrollLeft, setScrollLeft] = useState(0);
   const [viewportWidth, setViewportWidth] = useState(900);
@@ -141,8 +175,16 @@ export default function Filmstrip() {
       choose(photo);
     }).catch(() => undefined);
   };
-  const totalWidth = Math.max(viewportWidth, snapshot.total * (ITEM_WIDTH + ITEM_GAP) + ITEM_GAP);
+  const totalWidth = Math.max(viewportWidth, snapshot.total * ITEM_STRIDE + ITEM_GAP);
+  const contextFilter = filterLabel(snapshot.filter);
+  const position = activeIndex === null ? `${snapshot.total} photos` : `${activeIndex + 1} of ${snapshot.total}`;
+  const contextLabel = sourceLabel(snapshot.source, snapshot.albums);
   return <div className="lc-filmstrip" aria-label="Filmstrip">
+    <div className="lc-filmstrip-context">
+      <button type="button" className="lc-filmstrip-context-chip" title="Back to this source in Library" onClick={() => setUi({ view: 'photoGrid' })}><span aria-hidden="true">▦</span><span>{contextLabel}</span>{contextFilter && <span className="lc-filmstrip-context-filter">· {contextFilter}</span>}</button>
+      <span className="lc-filmstrip-position">{position}{snapshot.selection.length > 1 ? ` · ${snapshot.selection.length} selected` : ''}</span>
+      <span className="lc-filmstrip-spacer-flex" />
+    </div>
     <div className="lc-filmstrip-scroll" ref={viewport} onScroll={(event) => setScrollLeft(event.currentTarget.scrollLeft)}>
       <div className="lc-filmstrip-spacer" style={{ width: totalWidth }}>
         <div className="lc-filmstrip-window" style={{ left: chunkOffset * ITEM_STRIDE }} onKeyDown={(event) => {
@@ -155,10 +197,10 @@ export default function Filmstrip() {
             const details = ui.filmBadges ? badgeLabel(photo) : '';
             const visibleBadge = ui.filmBadges ? badge(photo) : '';
             const label = [ui.filmNames ? photo.fileName : `Photo ${photo.id}`, details].filter(Boolean).join(', ');
-            return <button className={`lc-filmstrip-item${active === photo.id ? ' is-active' : ''}`} type="button" role="option" aria-selected={active === photo.id} aria-label={label} key={photo.id} onClick={() => choose(photo)} title={photo.fileName}>
-            <span className="lc-filmstrip-image"><PhotoPreview photoId={photo.id} slot={`filmstrip-${photo.id}`} viewGeneration={snapshot.viewGeneration} width={ITEM_WIDTH} height={72} quality="draft" className="lc-filmstrip-preview" /></span>
+            return <button className={`lc-filmstrip-item${snapshot.selection.includes(photo.id) ? ' is-selected' : ''}${active === photo.id ? ' is-active' : ''}`} type="button" role="option" aria-selected={active === photo.id} aria-label={label} key={photo.id} onClick={() => choose(photo)} title={photo.fileName}>
+            <span className="lc-filmstrip-image"><PhotoPreview photoId={photo.id} slot={`filmstrip-${photo.id}`} viewGeneration={snapshot.viewGeneration} width={ITEM_WIDTH} height={ITEM_HEIGHT} quality="draft" className="lc-filmstrip-preview" /></span>
             {(ui.filmNames || ui.filmBadges) && <span className="lc-filmstrip-meta">
-              {ui.filmNames && <span className="lc-filmstrip-name" title={photo.fileName} style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{photo.fileName}</span>}
+              {ui.filmNames && <span className="lc-filmstrip-name" title={photo.fileName}>{photo.fileName}</span>}
               {ui.filmBadges && <span aria-label={details}>{visibleBadge}{photo.rating ? `${visibleBadge ? ' ' : ''}${photo.rating}★` : ''}</span>}
             </span>}
           </button>;

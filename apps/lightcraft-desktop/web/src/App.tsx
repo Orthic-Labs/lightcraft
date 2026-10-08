@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { AppShell, ShellProvider, createThemeStore, useCommands, useShortcuts, type Command, type NavGroup } from '@rightkit/app-shell/react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { AppShell, SegmentedControl, ShellProvider, createThemeStore, useCommands, useShortcuts, type Command, type NavGroup } from '@rightkit/app-shell/react';
 import { getPlatform } from '@rightkit/platform-ui';
 import { createShell } from '@rightkit/shell';
 import { DesktopProvider, useDesktop } from './desktop';
 import { paletteCommands } from './commands';
 import { Icon } from './icons';
-import { LibraryShellSidebar, LibraryWorkspace, libraryGroups, type LibraryGroup } from './library';
+import { Filmstrip, LibraryShellSidebar, LibraryWorkspace, libraryGroups, type LibraryGroup } from './library';
 import { StageWorkspace } from './stage/StageWorkspace';
 import { Inspector } from './inspector';
 import { DialogHost } from './dialogs';
@@ -51,6 +51,35 @@ function ShortcutBindings({ commands }: { commands: Command[] }) {
   return null;
 }
 
+function resizeInspectorByKey(event: ReactKeyboardEvent<HTMLButtonElement>, width: number, setUi: (patch: { inspectorWidth: number }) => void) {
+  const step = event.shiftKey ? 32 : 16;
+  if (event.key === 'ArrowLeft') { event.preventDefault(); setUi({ inspectorWidth: width + step }); }
+  else if (event.key === 'ArrowRight') { event.preventDefault(); setUi({ inspectorWidth: width - step }); }
+  else if (event.key === 'Home') { event.preventDefault(); setUi({ inspectorWidth: 260 }); }
+  else if (event.key === 'End') { event.preventDefault(); setUi({ inspectorWidth: 520 }); }
+}
+
+function WorkspaceModeSwitch() {
+  const { ui, t, setUi, run } = useDesktop();
+  const value = ui.view === 'photoGrid' || ui.view === 'squareGrid' ? 'library' : 'develop';
+  const change = (next: 'library' | 'develop') => {
+    if (next === value) return;
+    if (next === 'library') {
+      setUi({ view: 'photoGrid', panel: 'info' });
+      void run('view.photoGrid', {});
+    } else {
+      setUi({ view: 'detail', panel: 'edit' });
+      void run('view.detail', {});
+    }
+  };
+  return <SegmentedControl
+    value={value}
+    options={[{ value: 'library', label: t('Library'), title: t('Library') }, { value: 'develop', label: t('Develop'), title: t('Develop') }]}
+    onChange={change}
+    label={t('Workspace')}
+  />;
+}
+
 function Workspace() {
   const desktop = useDesktop();
   const { snapshot, ui, locale, t, setUi, run, native, error, notice } = desktop;
@@ -82,7 +111,7 @@ function Workspace() {
       activeId={sourceId(snapshot)}
       onNavigate={navigate}
       sidebar={<LibraryShellSidebar groups={navGroups} sectionIds={groups.map((group) => group.id)} activeId={sourceId(snapshot)} onNavigate={navigate} />}
-      title={t(ui.view === 'photoGrid' || ui.view === 'squareGrid' ? 'Library' : ui.view[0].toUpperCase() + ui.view.slice(1))}
+      title={<WorkspaceModeSwitch />}
       wordmark={<span className="lc-wordmark"><span>Light</span>Craft</span>}
       sidebarWidth={ui.sidebarCollapsed ? 48 : ui.sidebarWidth}
       sidebarCollapsed={ui.sidebarCollapsed}
@@ -100,15 +129,16 @@ function Workspace() {
       titlebarEnd={<div className="lc-title-status" aria-live="polite">{snapshot?.status.unsaved && <span className="lc-status-dot" title={t('Unsaved changes')} />} {error && <span className="lc-title-error">{error}</span>}{notice && !error && <span>{notice}</span>}</div>}
     >
       <div className={`lc-content ${ui.sidebarCollapsed ? 'is-shell-collapsed' : ''}`}>
-        {(ui.view === 'photoGrid' || ui.view === 'squareGrid') ? <LibraryWorkspace showSidebar={false} /> : <StageLayout />}
+        <WorkspaceLayout />
       </div>
     </AppShell>
     <DialogHost />
   </>;
 }
 
-function StageLayout() {
+function WorkspaceLayout() {
   const { ui, t, setUi } = useDesktop();
+  const isLibrary = ui.view === 'photoGrid' || ui.view === 'squareGrid';
   const drag = useRef<{ x: number; width: number } | null>(null);
   const [dragging, setDragging] = useState(false);
   useEffect(() => {
@@ -118,11 +148,10 @@ function StageLayout() {
     window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
     return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
   }, [dragging, setUi]);
-  return <div className="lc-stage-layout" style={{ '--lc-inspector-width': `${ui.inspectorCollapsed ? 0 : ui.inspectorWidth}px` } as CSSProperties}>
-    <StageWorkspace />
-    {!ui.inspectorCollapsed && <button className="lc-inspector-resizer" aria-label={t('Resize inspector')} onPointerDown={(event) => { drag.current = { x: event.clientX, width: ui.inspectorWidth }; setDragging(true); event.currentTarget.setPointerCapture(event.pointerId); }} />}
-    {!ui.inspectorCollapsed && <Inspector />}
-    {ui.inspectorCollapsed && <button type="button" className="lc-inspector-collapsed" aria-label={t('Expand inspector')} onClick={() => setUi({ inspectorCollapsed: false })}>◧</button>}
+  return <div className={`${isLibrary ? 'lc-library-layout' : 'lc-stage-layout'}${ui.inspectorCollapsed ? ' is-inspector-collapsed' : ''}`} style={{ '--lc-inspector': `${ui.inspectorWidth}px` } as CSSProperties}>
+    {isLibrary ? <div className="lc-library-center"><LibraryWorkspace showSidebar={false} />{ui.filmstrip && <Filmstrip />}</div> : <StageWorkspace />}
+    {!ui.inspectorCollapsed && <button className="lc-inspector-resizer" type="button" role="slider" tabIndex={0} aria-orientation="vertical" aria-valuemin={260} aria-valuemax={520} aria-valuenow={ui.inspectorWidth} aria-label={t('Resize inspector')} onKeyDown={(event) => resizeInspectorByKey(event, ui.inspectorWidth, setUi)} onPointerDown={(event) => { drag.current = { x: event.clientX, width: ui.inspectorWidth }; setDragging(true); event.currentTarget.setPointerCapture(event.pointerId); }} />}
+    <Inspector key="workspace-inspector" className={ui.inspectorCollapsed ? 'is-collapsed' : ''} />
   </div>;
 }
 
