@@ -756,21 +756,147 @@ fn native_hidden_control_journeys() {
                         wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
                         click_dom(control, ".stage-toolstrip button[aria-label='Edit']", "edit tool click must execute");
                         wait_for_dom(control, r#"return document.querySelector("input[aria-label='Exposure']") !== null;"#);
+                        let prepared = control
+                            .eval(r#"return (() => {
+                                const e = document.querySelector("input[aria-label='Exposure']");
+                                if (!e) return {found: false};
+                                e.scrollIntoView({block: 'center', inline: 'nearest'});
+                                const r = e.getBoundingClientRect();
+                                return {
+                                    found: true,
+                                    rect: {x: r.x, y: r.y, width: r.width, height: r.height},
+                                    viewport: {width: innerWidth, height: innerHeight, dpr: devicePixelRatio},
+                                };
+                            })();"#)
+                            .expect("exposure slider visibility query must execute");
+                        assert_eq!(prepared["found"].as_bool(), Some(true), "exposure slider must exist before gesture");
+                        assert_eq!(
+                            wait_for_dom(control, r#"return (() => {
+                                const e = document.querySelector("input[aria-label='Exposure']");
+                                if (!e) return false;
+                                const r = e.getBoundingClientRect();
+                                return r.width > 1 && r.height > 1 && r.left >= 0 && r.top >= 0 &&
+                                    r.right <= innerWidth && r.bottom <= innerHeight;
+                            })();"#)
+                            .as_bool(),
+                            Some(true),
+                            "exposure slider must be fully within native viewport",
+                        );
                         let slider = control
-                            .eval(r#"return (() => { const e = document.querySelector("input[aria-label='Exposure']"); const r = e.getBoundingClientRect(); return {x:r.x, y:r.y, width:r.width, height:r.height}; })();"#)
+                            .eval(r#"return (() => {
+                                const e = document.querySelector("input[aria-label='Exposure']");
+                                const r = e.getBoundingClientRect();
+                                return {
+                                    x: r.x, y: r.y, width: r.width, height: r.height,
+                                    value: e.value, ariaValueNow: e.getAttribute('aria-valuenow'),
+                                    viewport: {width: innerWidth, height: innerHeight, dpr: devicePixelRatio},
+                                };
+                            })();"#)
                             .expect("exposure slider geometry query must execute");
                         let x = slider["x"].as_f64().expect("exposure slider x must be numeric");
                         let y = slider["y"].as_f64().expect("exposure slider y must be numeric") + slider["height"].as_f64().unwrap_or(16.0) / 2.0;
                         let width = slider["width"].as_f64().expect("exposure slider width must be numeric");
-                        control.drag((x + width * 0.45, y), (x + width * 0.7, y), 8).expect("exposure slider drag must execute");
-                        let edited = wait_for_snapshot(
-                            control,
-                            |value| {
-                                value["develop"]["light"]["exposure"] != imported["develop"]["light"]["exposure"]
-                                    && value["undo"].as_u64().is_some_and(|undo| undo > before)
+                        assert!(x >= 0.0 && y >= 0.0 && x + width <= slider["viewport"]["width"].as_f64().unwrap_or(0.0), "exposure slider drag start must be within viewport: {slider}");
+                        let diagnostic_setup = control
+                            .eval(r#"return (() => {
+                                const e = document.querySelector("input[aria-label='Exposure']");
+                                if (!e) return {found: false};
+                                const read = () => {
+                                    const r = e.getBoundingClientRect();
+                                    return {
+                                        value: e.value,
+                                        ariaValueNow: e.getAttribute('aria-valuenow'),
+                                        rect: {x: r.x, y: r.y, width: r.width, height: r.height},
+                                        viewport: {width: innerWidth, height: innerHeight, dpr: devicePixelRatio},
+                                        visible: r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight,
+                                    };
+                                };
+                                const state = window.__lcGestureDiagnostics || {events: [], bound: false};
+                                if (!state.bound) {
+                                    for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'input', 'change']) {
+                                        e.addEventListener(type, event => {
+                                            if (state.events.length < 64) state.events.push({
+                                                type,
+                                                trusted: event.isTrusted,
+                                                clientX: event.clientX,
+                                                clientY: event.clientY,
+                                                buttons: event.buttons,
+                                                value: e.value,
+                                            });
+                                        }, true);
+                                    }
+                                    state.bound = true;
+                                }
+                                state.before = read();
+                                window.__lcGestureDiagnostics = state;
+                                return {found: true, before: state.before, events: state.events};
+                            })();"#)
+                            .expect("exposure slider diagnostics setup must execute");
+                        let drag_result = control.drag((x + width * 0.45, y), (x + width * 0.7, y), 8);
+                        let after_drag = snapshot(control);
+                        let mut edited = None;
+                        let mut last_snapshot = after_drag.clone();
+                        for _ in 0..100 {
+                            let value = snapshot(control);
+                            last_snapshot = value.clone();
+                            if value["develop"]["light"]["exposure"] != imported["develop"]["light"]["exposure"]
+                                && value["undo"].as_u64().is_some_and(|undo| undo > before)
+                            {
+                                edited = Some(value);
+                                break;
+                            }
+                            sleep(Duration::from_millis(50));
+                        }
+                        let diagnostic_after = control
+                            .eval(r#"return (() => {
+                                const e = document.querySelector("input[aria-label='Exposure']");
+                                const state = window.__lcGestureDiagnostics || {events: []};
+                                if (!e) return {found: false, events: state.events};
+                                const r = e.getBoundingClientRect();
+                                return {
+                                    found: true,
+                                    value: e.value,
+                                    ariaValueNow: e.getAttribute('aria-valuenow'),
+                                    rect: {x: r.x, y: r.y, width: r.width, height: r.height},
+                                    viewport: {width: innerWidth, height: innerHeight, dpr: devicePixelRatio},
+                                    visible: r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight,
+                                    events: state.events,
+                                };
+                            })();"#)
+                            .expect("exposure slider diagnostics readback must execute");
+                        let compact_host = |value: &Value| {
+                            json!({
+                                "exposure": value.pointer("/develop/light/exposure").cloned().unwrap_or(Value::Null),
+                                "undo": value.get("undo").cloned().unwrap_or(Value::Null),
+                                "active": value.get("active").cloned().unwrap_or(Value::Null),
+                                "viewGeneration": value.get("viewGeneration").cloned().unwrap_or(Value::Null),
+                                "status": {"error": value.pointer("/status/error").cloned().unwrap_or(Value::Null)},
+                            })
+                        };
+                        let events = diagnostic_after
+                            .get("events")
+                            .and_then(Value::as_array)
+                            .map(|values| values.iter().take(64).cloned().collect::<Vec<_>>())
+                            .unwrap_or_default();
+                        let receipt = scenario.dir().join("gesture-pointer.json");
+                        let receipt_value = json!({
+                            "slider": slider,
+                            "prepared": prepared,
+                            "setup": diagnostic_setup.get("before").cloned().unwrap_or(Value::Null),
+                            "after": diagnostic_after,
+                            "events": events,
+                            "host": {
+                                "before": compact_host(&imported),
+                                "afterDrag": compact_host(&after_drag),
+                                "after": compact_host(&last_snapshot),
                             },
-                            "pointer drag edit did not settle through host bridge",
-                        );
+                        });
+                        if let Ok(bytes) = serde_json::to_vec_pretty(&receipt_value) {
+                            let _ = fs::write(&receipt, bytes);
+                        }
+                        eprintln!("[qa] gesture pointer receipt={}", receipt.display());
+                        drag_result.expect("exposure slider drag must execute");
+                        let edited = edited.unwrap_or_else(|| panic!("pointer drag edit did not settle through host bridge; receipt={}", receipt.display()));
                         assert_ne!(edited["develop"]["light"]["exposure"], imported["develop"]["light"]["exposure"], "pointer drag must change exposure through UI");
                         assert_eq!(edited["undo"].as_u64(), Some(before + 1), "one pointer gesture must create one undo step");
                         let edited_exposure = edited["develop"]["light"]["exposure"].clone();
