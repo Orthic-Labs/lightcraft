@@ -170,6 +170,7 @@ impl Controller {
                 self.tasks.start_export(&mut self.session, &previous)
             }
             "library.import" => self.tasks.start_import(&mut self.session, params),
+            "library.importPreview" => self.tasks.start_import_review(&mut self.session, params),
             "library.importLightroom" => self.tasks.start_lightroom_import(&mut self.session, params),
             "library.inspectLightroom" => self.tasks.start_lightroom_inspection(&mut self.session, params),
             "merge.hdr" | "merge.panorama" | "merge.hdrPanorama" => {

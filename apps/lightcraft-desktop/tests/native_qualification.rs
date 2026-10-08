@@ -1506,6 +1506,17 @@ fn native_hidden_control_journeys() {
                         assert_eq!(snapshot(control)["counts"]["catalog"].as_u64(), Some(2));
                     }
                     "engineExport" => {
+                        click_dom(control, "button[data-nav-id=\"all\"]", "All Photos must open library");
+                        wait_for_dom(control, "return document.querySelector('.lc-header-action') !== null;");
+                        click_dom(control, ".lc-header-action", "Import must open review before asking for a native picker");
+                        wait_for_dom(control, "return document.querySelector('#lc-dialog-title')?.textContent === 'Import Photos';");
+                        assert_eq!(snapshot(control)["status"]["jobs"].as_array().map(Vec::len), Some(0), "opening Import must not start a scan or block library owner");
+                        control.key("escape").expect("empty import dialog must dismiss");
+                        wait_for_dom(control, "return document.querySelector('.lc-dialog') === null;");
+                        let picker = control.command("lc_native", &json!({"action": "pickFiles", "params": {}}));
+                        assert!(picker.is_err(), "background control must refuse interactive pickers");
+                        let explicit = control.command("lc_native", &json!({"action": "pickFiles", "params": {"paths": [inputs.png.to_string_lossy()]}})).expect("background picker must accept explicit paths");
+                        assert_eq!(explicit["paths"].as_array().map(Vec::len), Some(1));
                         let imported = import_file(control, &inputs.png);
                         let id = imported["active"].as_u64().expect("PNG import must select photo");
                         control.key("D").expect("develop route key must execute for engine export journey");

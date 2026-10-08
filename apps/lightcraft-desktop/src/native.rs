@@ -236,6 +236,16 @@ mod tauri_commands {
             let action = if action == "fullscreen" { "toggleFullscreen" } else { action.as_str() };
             return native_window_action(&app, action, &params, Some(&caller_label));
         }
+        if services::is_import_picker(&action) {
+            let explicit = services::has_explicit_picker_input(&action, &params)?;
+            if qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_HIDDEN").as_deref()) && !explicit {
+                return Err("interactive import picker unavailable in hidden QA; supply explicit path(s)".into());
+            }
+            if explicit {
+                return services::run(&action, &params);
+            }
+            return services::run_import_picker(&action, &params, &window).await;
+        }
         blocking(move || services::run(&action, &params)).await
     }
 }
@@ -592,6 +602,11 @@ fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<Strin
             } else if matches!(action, "secondWindow" | "fullscreen" | "toggleFullscreen" | "confirmClose" | "closeWindow") {
                 let mapped = if action == "fullscreen" { "toggleFullscreen" } else { action };
                 native_window_action(app, mapped, &params, None)?
+            } else if services::is_import_picker(action) {
+                if !services::has_explicit_picker_input(action, &params)? {
+                    return Err("interactive import picker unavailable in QA control; supply explicit path(s)".into());
+                }
+                services::run(action, &params)?
             } else {
                 services::run(action, &params)?
             }

@@ -6,7 +6,7 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use serde_json::{Value, json};
 
 use lightcraft_catalog::PhotoId;
-use lightcraft_engine::import::{ImportJob, ImportOptions, Prepared};
+use lightcraft_engine::import::{ImportJob, ImportOptions, Prepared, ScanInput, ScanOutput, ScanProgress};
 use lightcraft_engine::merge::{MergeJob, MergeOutput};
 use lightcraft_engine::{Selection, Session};
 
@@ -15,6 +15,7 @@ use crate::snapshot::{JobStatus, TerminalTask};
 const EVENT_CAPACITY: usize = 64;
 const MAX_TASKS: usize = 128;
 const MAX_MERGE_IDS: usize = 256;
+const MAX_REVIEW_PATHS: usize = 512;
 const MAX_COMPLETED_TASKS: usize = 64;
 
 struct Task {
@@ -66,6 +67,12 @@ enum Event {
         id: String,
         result: Result<Value, String>,
         cancelled: bool,
+    },
+    ImportReview {
+        id: String,
+        result: Result<ScanOutput, String>,
+        cancelled: bool,
+        restore_probes: std::collections::HashMap<String, lightcraft_engine::media::ProbeInfo>,
     },
 }
 
@@ -164,6 +171,94 @@ impl Tasks {
 
     pub(crate) fn start_auto_import(&mut self, session: &mut Session, params: &Value) -> Result<Value, String> {
         self.start_import_with_selection(session, params, true)
+    }
+
+    pub(crate) fn start_import_review(&mut self, session: &mut Session, params: &Value) -> Result<Value, String> {
+        if self.running_import() {
+            return Err("an import is already running".into());
+        }
+        if self.jobs.len() >= MAX_TASKS {
+            return Err("too many background tasks".into());
+        }
+        let values = params.get("paths").and_then(Value::as_array).ok_or_else(|| "library.importPreview: paths must be an array".to_string())?;
+        if values.is_empty() {
+            return Err("library.importPreview: no paths".into());
+        }
+        if values.len() > MAX_REVIEW_PATHS {
+            return Err(format!("library.importPreview: at most {MAX_REVIEW_PATHS} paths"));
+        }
+        let mut paths = Vec::with_capacity(values.len());
+        for value in values {
+            let path = value.as_str().ok_or_else(|| "library.importPreview: paths must contain strings".to_string())?;
+            if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
+                return Err("library.importPreview: invalid path".into());
+            }
+            paths.push(path.to_string());
+        }
+
+        // ScanInput::new drains the review cache into its detached snapshot. Restore the owner
+        // cache immediately; a review must leave owner state unchanged until it completes.
+        let restore_probes = session.import_probes.clone();
+        let (input, paths) = ScanInput::new(session, &paths);
+        session.import_probes = restore_probes.clone();
+        let progress = Arc::new(ScanProgress::default());
+        let total = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let task_id = self.new_id("importReview");
+        let task = Task {
+            id: task_id.clone(),
+            kind: "importReview".into(),
+            label: "Review Import".into(),
+            total: total.clone(),
+            completed: completed.clone(),
+            cancel: cancel.clone(),
+            worker: None,
+        };
+        let tx = self.tx.clone();
+        let id_for_worker = task_id.clone();
+        let worker_cancel = cancel.clone();
+        let worker_progress = progress.clone();
+        let worker_total = total.clone();
+        let worker_completed = completed.clone();
+        let worker = std::thread::Builder::new()
+            .name("lightcraft-import-review".into())
+            .spawn(move || {
+                let monitor_done = Arc::new(AtomicBool::new(false));
+                let monitor_done_for_worker = monitor_done.clone();
+                let monitor_cancel = worker_cancel.clone();
+                let monitor = match std::thread::Builder::new().name("lightcraft-import-review-progress".into()).spawn(move || {
+                    while !monitor_done.load(Ordering::Acquire) {
+                        worker_total.store(worker_progress.total.load(Ordering::Relaxed), Ordering::Relaxed);
+                        worker_completed.store(worker_progress.done.load(Ordering::Relaxed), Ordering::Relaxed);
+                        if monitor_cancel.load(Ordering::Relaxed) {
+                            worker_progress.cancel.store(true, Ordering::Relaxed);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    worker_total.store(worker_progress.total.load(Ordering::Relaxed), Ordering::Relaxed);
+                    worker_completed.store(worker_progress.done.load(Ordering::Relaxed), Ordering::Relaxed);
+                }) {
+                    Ok(monitor) => monitor,
+                    Err(error) => {
+                        let _ = tx.send(Event::ImportReview {
+                            id: id_for_worker.clone(),
+                            result: Err(format!("could not start import review progress: {error}")),
+                            cancelled: false,
+                            restore_probes: restore_probes.clone(),
+                        });
+                        return;
+                    }
+                };
+                let result = lightcraft_engine::guard::catch("import review", || lightcraft_engine::import::scan_with(input, &paths, &progress));
+                monitor_done_for_worker.store(true, Ordering::Release);
+                let _ = monitor.join();
+                let cancelled = worker_cancel.load(Ordering::Relaxed);
+                let _ = tx.send(Event::ImportReview { id: id_for_worker, result, cancelled, restore_probes });
+            })
+            .map_err(|error| format!("could not start import review: {error}"))?;
+        self.insert(Task { worker: Some(worker), ..task })?;
+        Ok(json!({"taskId": task_id, "kind": "importReview", "total": 0}))
     }
 
     fn start_import_with_selection(&mut self, session: &mut Session, params: &Value, preserve_selection: bool) -> Result<Value, String> {
@@ -416,6 +511,31 @@ impl Tasks {
                     self.finish_lightroom(id, report, result, index_path, commit_error)
                 }
                 Event::LightroomInspection { id, result, cancelled } => self.finish(id, result, "lightroomInspect", cancelled),
+                Event::ImportReview { id, result, cancelled, restore_probes } => {
+                    let cancelled = cancelled || self.jobs.get(&id).is_some_and(|task| task.cancel.load(Ordering::Relaxed));
+                    if cancelled {
+                        session.import_probes = restore_probes;
+                        self.finish(id, Err("cancelled".into()), "importReview", true);
+                    } else {
+                        match result {
+                            Ok(output) => {
+                                let duplicates = output.candidates.iter().filter(|candidate| candidate.duplicate.is_some()).count();
+                                let scanned = output.candidates.len();
+                                session.import_probes = output.probes;
+                                self.finish(
+                                    id,
+                                    Ok(json!({"candidates": output.candidates, "duplicates": duplicates, "scanned": scanned})),
+                                    "importReview",
+                                    false,
+                                );
+                            }
+                            Err(error) => {
+                                session.import_probes = restore_probes;
+                                self.finish(id, Err(error), "importReview", false);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -567,7 +687,9 @@ impl Tasks {
     }
 
     pub(crate) fn running_kind(&self, kind: &str) -> bool {
-        self.jobs.values().any(|job| if kind == "import" { job.kind == "import" || job.kind == "lightroomImport" } else { job.kind == kind })
+        self.jobs.values().any(|job| {
+            if kind == "import" { job.kind == "import" || job.kind == "importReview" || job.kind == "lightroomImport" } else { job.kind == kind }
+        })
     }
 
     fn running_import(&self) -> bool {
@@ -808,6 +930,17 @@ impl Tasks {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::fs;
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    struct ReleaseProbe(Arc<AtomicBool>);
+
+    impl Drop for ReleaseProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
 
     fn finished_task(tasks: &mut Tasks, id: &str, result: Result<Value, String>) {
         tasks.jobs.insert(
@@ -957,5 +1090,88 @@ mod tests {
             warning.contains("permission denied") && warning.contains("/library/Interop/lightroom-index.json") && warning.contains("import committed")
         }));
         assert!(tasks.take_notices().iter().any(|notice| notice.contains("permission denied")));
+    }
+
+    #[test]
+    fn import_review_is_cancellable_without_owner_mutation_and_reports_candidates() {
+        let root = std::env::temp_dir().join(format!(
+            "lightcraft-import-review-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_nanos()).unwrap_or_default()
+        ));
+        assert!(fs::create_dir_all(&root).is_ok());
+        let path = root.join("review.png");
+        assert!(fs::write(&path, [1_u8, 2, 3, 4]).is_ok());
+
+        let mut session = Session::new().with_fs();
+        let selection_before = session.selection.clone();
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let _release_probe = ReleaseProbe(release.clone());
+        let probe_entered = entered.clone();
+        let probe_release = release.clone();
+        session.media.file_probe = Some(Arc::new(move |_| {
+            probe_entered.store(true, Ordering::Release);
+            while !probe_release.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok(lightcraft_engine::media::ProbeInfo {
+                format: "PNG".into(),
+                kind: lightcraft_catalog::MediaKind::Image,
+                width: 1,
+                height: 1,
+                file_size: 4,
+                ..Default::default()
+            })
+        }));
+        let mut tasks = Tasks::new();
+        let response = tasks.start_import_review(&mut session, &json!({"paths": [path.to_string_lossy()]})).expect("review task starts");
+        let task_id = response["taskId"].as_str().expect("task id").to_string();
+        for _ in 0..200 {
+            if entered.load(Ordering::Acquire) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(entered.load(Ordering::Acquire), "probe should run off owner thread");
+        assert_eq!(tasks.cancel(Some(&task_id)).expect("cancel review")["cancelled"], 1);
+        assert_eq!(session.selection, selection_before, "cancellation must not change selection");
+        release.store(true, Ordering::Release);
+        for _ in 0..200 {
+            tasks.poll(&mut session);
+            if tasks.completed_jobs().iter().any(|task| task.id == task_id) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let cancelled = tasks.completed_jobs().into_iter().find(|task| task.id == task_id).expect("cancelled review terminal record");
+        assert_eq!(cancelled.state, "cancelled");
+
+        session.media.file_probe = Some(Arc::new(|_| {
+            Ok(lightcraft_engine::media::ProbeInfo {
+                format: "PNG".into(),
+                kind: lightcraft_catalog::MediaKind::Image,
+                width: 1,
+                height: 1,
+                file_size: 4,
+                ..Default::default()
+            })
+        }));
+        let response = tasks.start_import_review(&mut session, &json!({"paths": [path.to_string_lossy()]})).expect("second review task starts");
+        let task_id = response["taskId"].as_str().expect("task id").to_string();
+        for _ in 0..200 {
+            tasks.poll(&mut session);
+            if tasks.completed_jobs().iter().any(|task| task.id == task_id) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let completed = tasks.completed_jobs().into_iter().find(|task| task.id == task_id).expect("review terminal record");
+        assert_eq!(completed.state, "done");
+        assert_eq!(completed.result.as_ref().and_then(|value| value.get("scanned")).and_then(Value::as_u64), Some(1));
+        assert_eq!(completed.result.as_ref().and_then(|value| value.get("duplicates")).and_then(Value::as_u64), Some(0));
+        assert_eq!(completed.result.as_ref().and_then(|value| value.get("candidates")).and_then(Value::as_array).map(Vec::len), Some(1));
+        assert_eq!(session.selection, selection_before, "review completion must not change selection");
+        let _ = fs::remove_dir_all(root);
     }
 }

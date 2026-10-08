@@ -109,6 +109,7 @@ function Progress({ job, label, onCancel, cancelling = false }: { job: AnyRecord
 function JobDialog({ kind, desktop, d }: { kind: string; desktop: DesktopContextValue; d: DialogState }) {
   const lightroomInspect = kind.includes('lightroominspect');
   const lightroomImport = kind.includes('lightroomimport');
+  const importReview = kind.includes('importreview');
   const taskId = text(d.params?.taskId);
   const [job, setJob] = useState<AnyRecord | null>(null);
   const [terminal, setTerminal] = useState<JobTerminal | null>(null);
@@ -143,10 +144,15 @@ function JobDialog({ kind, desktop, d }: { kind: string; desktop: DesktopContext
         setCompletion(result);
         setJob({ id: completed.id, label: completed.label, completed: 1, total: 1, cancellable: false, ...(completionError ? { error: completionError } : {}) });
         markTerminal(completed.state);
-        if (completed.state === 'done' && (lightroomInspect || lightroomImport)) {
-          const terminalResult = { ...(result || {}), ...(completionError && !result?.error ? { error: completionError } : {}) };
+        if (completed.state === 'done' && (lightroomInspect || lightroomImport || importReview)) {
+          const terminalResult: AnyRecord = { ...(result || {}), ...(completionError && !result?.error ? { error: completionError } : {}) };
           if (lightroomInspect) desktop.setDialog({ kind: 'lightroom', params: { path: text(d.params?.path), report: terminalResult } });
-          else desktop.setDialog({ kind: 'lightroomResult', params: { path: text(d.params?.path), updateExisting: bool(d.params?.updateExisting), result: terminalResult } });
+          else if (lightroomImport) desktop.setDialog({ kind: 'lightroomResult', params: { path: text(d.params?.path), updateExisting: bool(d.params?.updateExisting), result: terminalResult } });
+          else if (importReview) {
+            const params: AnyRecord = { ...(d.params || {}), candidates: arr(terminalResult.candidates) };
+            delete params.taskId;
+            desktop.setDialog({ kind: 'import', params });
+          }
         }
         return;
       }
@@ -172,10 +178,18 @@ function JobDialog({ kind, desktop, d }: { kind: string; desktop: DesktopContext
     if (!lightroomInspect && !lightroomImport) return;
     desktop.setDialog({ kind: 'lightroom', params: { path: text(d.params?.path), updateExisting: bool(d.params?.updateExisting), ...(d.params?.report ? { report: d.params.report } : {}) } });
   };
+  const retryImportReview = () => {
+    if (!importReview) return;
+    const params: AnyRecord = { ...(d.params || {}) };
+    delete params.taskId;
+    delete params.candidates;
+    delete params.checked;
+    desktop.setDialog({ kind: 'import', params });
+  };
   const successful = terminal === 'done';
   const imported = completion ? (Array.isArray(completion.imported) ? completion.imported.length : num(completion.imported)) : 0;
-  const title = lightroomInspect ? 'Inspecting Lightroom Catalog' : lightroomImport ? 'Importing Lightroom Catalog' : kind.includes('import') ? 'Importing Photos' : kind.includes('merge') ? 'Merging Photos' : 'Exporting Photos';
-  return <Frame title={title} dismissible={terminal !== null} onClose={() => terminal && desktop.setDialog(null)} actions={<>{terminal === 'failed' && (lightroomInspect || lightroomImport) && <Button primary onClick={retryLightroom}>Retry</Button>}<Button disabled={!terminal} onClick={() => desktop.setDialog(null)}>Close</Button>{kind.includes('export') && successful && <Button primary onClick={() => void reveal()}>Show in Folder</Button>}</>}><Progress job={job} label={label} onCancel={terminal ? undefined : () => void cancel()} cancelling={cancelling} />{pollError && <Note tone="error">{pollError}</Note>}{terminal === 'done' && <Note>Operation complete. Changes are recorded in library history.{imported > 0 ? ` ${imported} photos imported.` : ''}</Note>}{terminal === 'cancelled' && <Note tone="warning">Operation cancelled.</Note>}{terminal === 'failed' && <Note tone="error">{text(job?.error, 'Operation failed.')}</Note>}</Frame>;
+  const title = importReview ? 'Reviewing Photos' : lightroomInspect ? 'Inspecting Lightroom Catalog' : lightroomImport ? 'Importing Lightroom Catalog' : kind.includes('import') ? 'Importing Photos' : kind.includes('merge') ? 'Merging Photos' : 'Exporting Photos';
+  return <Frame title={title} dismissible={terminal !== null} onClose={() => terminal && desktop.setDialog(null)} actions={<>{terminal === 'failed' && (lightroomInspect || lightroomImport) && <Button primary onClick={retryLightroom}>Retry</Button>}{importReview && terminal && terminal !== 'done' && <Button primary onClick={retryImportReview}>Retry review</Button>}<Button disabled={!terminal} onClick={() => desktop.setDialog(null)}>Close</Button>{kind.includes('export') && successful && <Button primary onClick={() => void reveal()}>Show in Folder</Button>}</>}><Progress job={job} label={label} onCancel={terminal ? undefined : () => void cancel()} cancelling={cancelling} />{pollError && <Note tone="error">{pollError}</Note>}{terminal === 'done' && !importReview && <Note>Operation complete. Changes are recorded in library history.{imported > 0 ? ` ${imported} photos imported.` : ''}</Note>}{terminal === 'cancelled' && <Note tone="warning">{importReview ? 'Review cancelled. Chosen paths remain available for retry.' : 'Operation cancelled.'}</Note>}{terminal === 'failed' && <Note tone="error">{text(job?.error, 'Operation failed.')}{importReview && ' Chosen paths remain available for retry.'}</Note>}</Frame>;
 }
 
 function UnsavedQuitDialog({ desktop, d }: { desktop: DesktopContextValue; d: DialogState }) {
@@ -232,11 +246,170 @@ function ConfirmDeleteDialog({ desktop, d }: { desktop: DesktopContextValue; d: 
 async function choose(native: DesktopContextValue['native'], action: string, params: JsonObject = {}) { const result: AnyRecord = await native(action, params) as AnyRecord; if (typeof result === 'string') return [result]; if (Array.isArray(result)) return result.filter((p) => typeof p === 'string'); return arr(result?.paths || result?.files || result?.selected || (result?.path ? [result.path] : [] )).filter((p) => typeof p === 'string'); }
 
 function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextValue }) {
-  const p = d.params || {}; const [source, setSource] = useState(text(p.source)); const [mode, setMode] = useState(text(p.mode, 'add')); const [album, setAlbum] = useState(text(p.album)); const [newAlbum, setNewAlbum] = useState(''); const [keywords, setKeywords] = useState(''); const [organize, setOrganize] = useState(text(p.organize, 'date')); const [folderTemplate, setFolderTemplate] = useState(text(p.folderTemplate, '{date:%Y}/{date:%Y%m%d}')); const [destination, setDestination] = useState(text(p.destination)); const [rename, setRename] = useState(''); const [renameStart, setRenameStart] = useState('1'); const [preset, setPreset] = useState(''); const [metadataPreset, setMetadataPreset] = useState(''); const [dng, setDng] = useState(false); const [candidates, setCandidates] = useState<AnyRecord[]>(arr(p.candidates)); const [checked, setChecked] = useState<boolean[]>(arr(p.checked).length ? arr(p.checked).map(Boolean) : arr(p.candidates).map((c) => !c.duplicate && !c.error)); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
-  const scan = async (paths: string[]) => { if (!paths.length) return; setSource(paths.join(', ')); setBusy(true); setError(''); try { const result = (await desktop.run('library.importPreview', { paths })) as AnyRecord; setCandidates(arr(result?.candidates)); setChecked(arr(result?.candidates).map((c) => !c.duplicate && !c.error)); } catch (e) { setError(String(e)); } finally { setBusy(false); } };
-  const pick = async (kind: 'files' | 'folder' | 'device') => { const paths = await choose(desktop.native, kind === 'folder' ? 'chooseFolder' : kind === 'device' ? 'chooseDevice' : 'chooseFiles', { multiple: kind === 'files' }); await scan(paths); if (kind === 'device') setMode('copy'); };
-  const submit = async () => { const paths = candidates.filter((_, i) => checked[i]).map((c) => c.path).filter(Boolean); if (!paths.length) { setError('Choose at least one photo.'); return; } const custom = folderTemplate.trim(); const templateError = mode !== 'add' && organize === 'custom' ? folderTemplateError(custom) : null; if (templateError) { setError(templateError); return; } setBusy(true); setError(''); try { const result = await desktop.run('library.import', { paths, mode, album: album ? Number(album) : undefined, albumName: newAlbum.trim() || undefined, keywords: keywords.split(',').map((v) => v.trim()).filter(Boolean), preset: preset || undefined, metadataPreset: metadataPreset || undefined, destination: destination || undefined, organize: mode === 'add' ? undefined : organize === 'custom' ? custom : organize || undefined, rename: rename || undefined, renameStart: renameStart ? Number(renameStart) : undefined, dng: dng && mode === 'copy' }) as AnyRecord; const taskId = text(result?.taskId); if (!taskId) throw new Error('Import did not return a task ID.'); desktop.setDialog({ kind: 'importProgress', params: { taskId, paths } }); } catch (e) { setError(String(e)); } finally { setBusy(false); } };
-  return <Frame title="Import Photos" wide busy={busy} onClose={() => desktop.setDialog(null)} actions={<><Button onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary disabled={busy || !candidates.length} onClick={() => void submit()}>Import {candidates.filter((_, i) => checked[i]).length || ''} Photos</Button></>}><div className="lc-dialog-toolbar"><Button onClick={() => void pick('files')}>Choose Photos…</Button><Button onClick={() => void pick('folder')}>Choose Folder…</Button><Button onClick={() => void pick('device')}>Camera or Card…</Button></div>{source && <Note>Source: {source}</Note>}{error && <Note tone="error">{error}</Note>}<div className="lc-import-layout"><div className="lc-candidate-list"><div className="lc-section-heading"><strong>Review</strong><span>{candidates.length} found</span></div>{candidates.length ? candidates.map((c, i) => <label className={`lc-candidate ${c.duplicate || c.error ? 'lc-candidate-muted' : ''}`} key={`${c.path || c.name || i}-${i}`}><input type="checkbox" checked={checked[i] ?? false} disabled={Boolean(c.duplicate || c.error)} onChange={(e) => setChecked((old) => old.map((v, n) => n === i ? e.target.checked : v))} /><span className="lc-thumb-placeholder" aria-hidden="true">{text(c.format, 'IMG').slice(0, 3).toUpperCase()}</span><span className="lc-candidate-copy"><strong>{text(c.name, text(c.path, 'Photo'))}</strong><small>{text(c.path)}{c.duplicate ? ` · Duplicate (${c.duplicate})` : c.error ? ` · ${c.error}` : ''}</small></span></label>) : <Note>Choose photos or a folder to review files before adding them.</Note>}</div><div className="lc-form-stack"><Select label="Add photos" value={mode} options={[["add", 'In place'], ['copy', 'Copy into library'], ['move', 'Move into library']]} onChange={setMode} /><Field label="Existing album ID" value={album} onChange={setAlbum} placeholder="Optional" /><Field label="New album" value={newAlbum} onChange={setNewAlbum} placeholder="Optional" /><Field label="Keywords" value={keywords} onChange={setKeywords} placeholder="Comma-separated" />{mode !== 'add' && <><Field label="Destination folder" value={destination} onChange={setDestination} placeholder="Library Originals by default" /><Select label="Organize copies" value={organize} options={[["date", 'By capture date'], ['month', 'By month'], ['flat', 'One folder'], ['custom', 'Custom template']]} onChange={setOrganize} />{organize === 'custom' && <><Field label="Folder template" value={folderTemplate} onChange={setFolderTemplate} placeholder="{date:%Y}/{date:%Y%m%d}" /><Note>Use relative folders & photo tags such as {`{date:%Y}`}; no drive or parent folders.</Note></>}<Field label="File naming" value={rename} onChange={setRename} placeholder="Keep original names" /><Check checked={dng} onChange={setDng} disabled={mode !== 'copy'}>Copy raw files as DNG</Check></>}<Field label="Develop preset ID" value={preset} onChange={setPreset} placeholder="Optional" /><Field label="Metadata preset" value={metadataPreset} onChange={setMetadataPreset} placeholder="Optional" /></div></div></Frame>;
+  const p = d.params || {};
+  const initialPaths = arr(p.paths).filter((path): path is string => typeof path === 'string' && path.length > 0);
+  const suppliedCandidates = Array.isArray(p.candidates);
+  const initialCandidates = suppliedCandidates ? arr(p.candidates) as AnyRecord[] : [];
+  const initialSource = text(p.initialSource);
+  const initialAlbum = typeof p.album === 'number' ? String(p.album) : text(p.album);
+  const initialRenameStart = typeof p.renameStart === 'number' ? String(p.renameStart) : text(p.renameStart, '1');
+  const [source, setSource] = useState(text(p.source, initialPaths.join(', ')));
+  const [sourceType, setSourceType] = useState(initialSource);
+  const [mode, setMode] = useState(text(p.mode, 'add'));
+  const [album, setAlbum] = useState(initialAlbum);
+  const [newAlbum, setNewAlbum] = useState(text(p.newAlbum, text(p.albumName)));
+  const [keywords, setKeywords] = useState(text(p.keywords));
+  const [organize, setOrganize] = useState(text(p.organize, 'date'));
+  const [folderTemplate, setFolderTemplate] = useState(text(p.folderTemplate, '{date:%Y}/{date:%Y%m%d}'));
+  const [destination, setDestination] = useState(text(p.destination));
+  const [rename, setRename] = useState(text(p.rename));
+  const [renameStart, setRenameStart] = useState(initialRenameStart);
+  const [preset, setPreset] = useState(text(p.preset));
+  const [metadataPreset, setMetadataPreset] = useState(text(p.metadataPreset));
+  const [dng, setDng] = useState(bool(p.dng));
+  const [candidates, setCandidates] = useState<AnyRecord[]>(initialCandidates);
+  const [checked, setChecked] = useState<boolean[]>(arr(p.checked).length ? arr(p.checked).map(Boolean) : initialCandidates.map((c) => !c.duplicate && !c.error));
+  const [busy, setBusy] = useState(false);
+  const [phase, setPhase] = useState<'idle' | 'choosing' | 'scanning' | 'submitting'>('idle');
+  const [error, setError] = useState('');
+  const liveRef = useRef(true);
+  const busyRef = useRef(false);
+  const scanSequenceRef = useRef(0);
+
+  useEffect(() => {
+    liveRef.current = true;
+    return () => { liveRef.current = false; scanSequenceRef.current += 1; };
+  }, []);
+
+  const preview = async (paths: string[], kind: string, sequence: number) => {
+    if (!paths.length) return;
+    setPhase('scanning');
+    setSource(paths.join(', '));
+    if (kind) setSourceType(kind);
+    setError('');
+    try {
+      const result = (await desktop.run('library.importPreview', { paths })) as AnyRecord;
+      if (!liveRef.current || sequence !== scanSequenceRef.current) return;
+      const taskId = text(result?.taskId);
+      if (taskId) {
+        const params: AnyRecord = {
+          ...p,
+          paths,
+          source: paths.join(', '),
+          initialSource: kind,
+          mode,
+          album,
+          newAlbum,
+          keywords,
+          organize,
+          folderTemplate,
+          destination,
+          rename,
+          renameStart,
+          preset,
+          metadataPreset,
+          dng,
+        };
+        delete params.candidates;
+        delete params.checked;
+        desktop.setDialog({ kind: 'importReviewProgress', params: { ...params, taskId } });
+        return;
+      }
+      const nextCandidates = arr(result?.candidates) as AnyRecord[];
+      setCandidates(nextCandidates);
+      setChecked(nextCandidates.map((candidate) => !candidate.duplicate && !candidate.error));
+    } catch (e) {
+      if (liveRef.current && sequence === scanSequenceRef.current) {
+        setCandidates([]);
+        setChecked([]);
+        setError(errorText(e));
+      }
+    } finally {
+      if (liveRef.current && sequence === scanSequenceRef.current) {
+        busyRef.current = false;
+        setBusy(false);
+        setPhase('idle');
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (suppliedCandidates || !initialPaths.length) return;
+    busyRef.current = true;
+    setBusy(true);
+    const sequence = ++scanSequenceRef.current;
+    if (initialSource === 'device') setMode('copy');
+    void preview(initialPaths, initialSource, sequence);
+  }, []);
+
+  const pick = async (kind: 'files' | 'folder' | 'device') => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setPhase('choosing');
+    setError('');
+    setSource('');
+    setSourceType(kind);
+    setCandidates([]);
+    setChecked([]);
+    if (kind === 'device') setMode('copy');
+    const sequence = ++scanSequenceRef.current;
+    try {
+      const paths = await choose(desktop.native, kind === 'folder' ? 'chooseFolder' : kind === 'device' ? 'chooseDevice' : 'chooseFiles', { multiple: kind === 'files' });
+      if (!liveRef.current || sequence !== scanSequenceRef.current) return;
+      if (!paths.length) return;
+      await preview(paths, kind, sequence);
+    } catch (e) {
+      if (liveRef.current && sequence === scanSequenceRef.current) setError(errorText(e));
+    } finally {
+      if (liveRef.current && sequence === scanSequenceRef.current) {
+        busyRef.current = false;
+        setBusy(false);
+        setPhase('idle');
+      }
+    }
+  };
+
+  const submit = async () => {
+    if (busyRef.current) return;
+    const paths = candidates.filter((_, i) => checked[i]).map((c) => c.path).filter((path): path is string => typeof path === 'string' && path.length > 0);
+    if (!paths.length) { setError('Choose at least one photo.'); return; }
+    const custom = folderTemplate.trim();
+    const templateError = mode !== 'add' && organize === 'custom' ? folderTemplateError(custom) : null;
+    if (templateError) { setError(templateError); return; }
+    busyRef.current = true;
+    setBusy(true);
+    setPhase('submitting');
+    setError('');
+    try {
+      const payload: AnyRecord = { ...p, paths, mode, album: album ? Number(album) : undefined, albumName: newAlbum.trim() || undefined, keywords: keywords.split(',').map((v) => v.trim()).filter(Boolean), preset: preset || undefined, metadataPreset: metadataPreset || undefined, destination: destination || undefined, organize: mode === 'add' ? undefined : organize === 'custom' ? custom : organize || undefined, rename: rename || undefined, renameStart: renameStart ? Number(renameStart) : undefined, dng: dng && mode === 'copy' };
+      delete payload.candidates;
+      delete payload.checked;
+      delete payload.taskId;
+      delete payload.initialSource;
+      delete payload.source;
+      const result = await desktop.run('library.import', payload) as AnyRecord;
+      const taskId = text(result?.taskId);
+      if (!taskId) throw new Error('Import did not return a task ID.');
+      if (liveRef.current) desktop.setDialog({ kind: 'importProgress', params: { taskId, paths } });
+    } catch (e) {
+      if (liveRef.current) setError(errorText(e));
+    } finally {
+      if (liveRef.current) {
+        busyRef.current = false;
+        setBusy(false);
+        setPhase('idle');
+      }
+    }
+  };
+
+  const close = () => {
+    liveRef.current = false;
+    scanSequenceRef.current += 1;
+    desktop.setDialog(null);
+  };
+  const sourceLabel = sourceType === 'folder' ? 'Folder' : sourceType === 'device' ? 'Camera or card' : 'Photos';
+  return <Frame title="Import Photos" wide busy={busy} onClose={close} actions={<><Button disabled={busy} onClick={close}>Cancel</Button><Button primary disabled={busy || !candidates.length} onClick={() => void submit()}>Import {candidates.filter((_, i) => checked[i]).length || ''} Photos</Button></>}><div className="lc-dialog-toolbar"><Button disabled={busy} onClick={() => void pick('files')}>Choose Photos…</Button><Button disabled={busy} onClick={() => void pick('folder')}>Choose Folder…</Button><Button disabled={busy} onClick={() => void pick('device')}>Camera or Card…</Button></div>{source && <Note>Source: {sourceLabel} — {source}</Note>}{phase === 'scanning' && <Note>Reviewing photos…</Note>}{error && <Note tone="error">{error}</Note>}<div className="lc-import-layout"><div className="lc-candidate-list"><div className="lc-section-heading"><strong>Review</strong><span>{candidates.length} found</span></div>{candidates.length ? candidates.map((c, i) => <label className={`lc-candidate ${c.duplicate || c.error ? 'lc-candidate-muted' : ''}`} key={`${c.path || c.name || i}-${i}`}><input type="checkbox" checked={checked[i] ?? false} disabled={busy || Boolean(c.duplicate || c.error)} onChange={(e) => setChecked((old) => old.map((v, n) => n === i ? e.target.checked : v))} /><span className="lc-thumb-placeholder" aria-hidden="true">{text(c.format, 'IMG').slice(0, 3).toUpperCase()}</span><span className="lc-candidate-copy"><strong>{text(c.name, text(c.path, 'Photo'))}</strong><small>{text(c.path)}{c.duplicate ? ` · Duplicate (${c.duplicate})` : c.error ? ` · ${c.error}` : ''}</small></span></label>) : <Note>Choose photos or a folder to review files before adding them.</Note>}</div><div className="lc-form-stack"><Select label="Add photos" value={mode} options={[["add", 'In place'], ['copy', 'Copy into library'], ['move', 'Move into library']]} onChange={setMode} disabled={busy} /><Field label="Existing album ID" value={album} onChange={setAlbum} placeholder="Optional" disabled={busy} /><Field label="New album" value={newAlbum} onChange={setNewAlbum} placeholder="Optional" disabled={busy} /><Field label="Keywords" value={keywords} onChange={setKeywords} placeholder="Comma-separated" disabled={busy} />{mode !== 'add' && <><Field label="Destination folder" value={destination} onChange={setDestination} placeholder="Library Originals by default" disabled={busy} /><Select label="Organize copies" value={organize} options={[["date", 'By capture date'], ['month', 'By month'], ['flat', 'One folder'], ['custom', 'Custom template']]} onChange={setOrganize} disabled={busy} />{organize === 'custom' && <><Field label="Folder template" value={folderTemplate} onChange={setFolderTemplate} placeholder="{date:%Y}/{date:%Y%m%d}" disabled={busy} /><Note>Use relative folders & photo tags such as {`{date:%Y}`}; no drive or parent folders.</Note></>}<Field label="File naming" value={rename} onChange={setRename} placeholder="Keep original names" disabled={busy} /><Check checked={dng} onChange={setDng} disabled={busy || mode !== 'copy'}>Copy raw files as DNG</Check></>}<Field label="Develop preset ID" value={preset} onChange={setPreset} placeholder="Optional" disabled={busy} /><Field label="Metadata preset" value={metadataPreset} onChange={setMetadataPreset} placeholder="Optional" disabled={busy} /></div></div></Frame>;
 }
 
 function folderTemplateError(template: string): string | null { const value = template.trim(); if (!value) return 'Enter a folder template.'; if (!value.includes('{') && !value.includes('/') && !value.includes('\\')) return 'Folder template must contain {, / or \\.'; if (value.startsWith('/') || value.startsWith('\\') || value.startsWith('~') || /^[A-Za-z]:/.test(value)) return 'Folder template must stay inside destination folder.'; if (value.split(/[\\/]/).some((part) => part.trim() === '.' || part.trim() === '..')) return 'Folder template cannot contain . or .. folders.'; return null; }

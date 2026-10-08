@@ -9,6 +9,9 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use tauri::{WebviewWindow, Wry};
+
+use rfd::{AsyncFileDialog, FileHandle};
 
 const MAX_PATHS: usize = 512;
 const MAX_PREFERENCES_BYTES: usize = 4 * 1024 * 1024;
@@ -128,6 +131,104 @@ pub fn run(action: &str, params: &Value) -> Result<Value, String> {
     }
 }
 
+/// Import-related pickers must be awaited by the Tauri command so macOS presents them from the
+/// caller's window instead of synchronously dispatching from a worker to the main thread.
+pub(crate) fn is_import_picker(action: &str) -> bool {
+    matches!(
+        action,
+        "pickPhotos"
+            | "pickFiles"
+            | "import"
+            | "chooseFiles"
+            | "pickFolder"
+            | "chooseFolder"
+            | "importFolder"
+            | "pickDevice"
+            | "chooseDevice"
+            | "importDevice"
+            | "pickLightroomCatalog"
+            | "importLightroom"
+    )
+}
+
+/// Validate whether automation supplied all picker input needed to bypass a modal dialog.
+pub(crate) fn has_explicit_picker_input(action: &str, params: &Value) -> Result<bool, String> {
+    if matches!(action, "pickPhotos" | "pickFiles" | "import" | "chooseFiles") {
+        return provided_paths(params).map(|paths| paths.is_some_and(|paths| !paths.is_empty()));
+    }
+    provided_path(params).map(|path| path.is_some())
+}
+
+pub(crate) async fn run_import_picker(action: &str, params: &Value, parent: &WebviewWindow<Wry>) -> Result<Value, String> {
+    match action {
+        "pickPhotos" | "pickFiles" | "import" => {
+            if let Some(paths) = provided_paths(params)?.filter(|paths| !paths.is_empty()) {
+                return Ok(paths_value(paths));
+            }
+            pick_files_async(parent, "Photos", PHOTO_EXTENSIONS).await
+        }
+        "chooseFiles" => {
+            if let Some(paths) = provided_paths(params)?.filter(|paths| !paths.is_empty()) {
+                return Ok(paths_value(paths));
+            }
+            pick_files_with_params_async(parent, params).await
+        }
+        "pickFolder" | "chooseFolder" | "importFolder" => {
+            if let Some(path) = provided_path(params)? {
+                return Ok(path_value(Some(path)));
+            }
+            pick_folder_async(parent, "Open Folder").await
+        }
+        "pickDevice" | "chooseDevice" | "importDevice" => {
+            if let Some(path) = provided_path(params)? {
+                return Ok(path_value(Some(path)));
+            }
+            pick_folder_async(parent, "Import from Device").await
+        }
+        "pickLightroomCatalog" | "importLightroom" => {
+            if let Some(path) = provided_path(params)? {
+                return Ok(path_value(Some(path)));
+            }
+            let dialog =
+                AsyncFileDialog::new().set_parent(parent).set_title("Import Lightroom Catalog").add_filter("Lightroom Classic Catalog", &["lrcat"]);
+            Ok(path_value(dialog.pick_file().await.map(|file| file.path().to_path_buf())))
+        }
+        _ => Err(format!("unknown import picker {action}")),
+    }
+}
+
+async fn pick_files_async(parent: &WebviewWindow<Wry>, title: &str, extensions: &[&str]) -> Result<Value, String> {
+    let files = AsyncFileDialog::new().set_parent(parent).set_title(title).add_filter(title, extensions).pick_files().await.unwrap_or_default();
+    selected_paths(files)
+}
+
+async fn pick_files_with_params_async(parent: &WebviewWindow<Wry>, params: &Value) -> Result<Value, String> {
+    let extensions = params
+        .get("extensions")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).filter(|value| value.len() < 32).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let dialog = AsyncFileDialog::new().set_parent(parent).set_title("Open File");
+    let dialog = if extensions.is_empty() { dialog } else { dialog.add_filter("Selected files", &extensions) };
+    if params.get("multiple").and_then(Value::as_bool).unwrap_or(true) {
+        selected_paths(dialog.pick_files().await.unwrap_or_default())
+    } else {
+        Ok(path_value(dialog.pick_file().await.map(|file| file.path().to_path_buf())))
+    }
+}
+
+async fn pick_folder_async(parent: &WebviewWindow<Wry>, title: &str) -> Result<Value, String> {
+    let path = AsyncFileDialog::new().set_parent(parent).set_title(title).pick_folder().await;
+    Ok(path_value(path.map(|folder| folder.path().to_path_buf())))
+}
+
+fn selected_paths(files: Vec<FileHandle>) -> Result<Value, String> {
+    if files.len() > MAX_PATHS {
+        return Err("too many files selected".into());
+    }
+    Ok(paths_value(files.into_iter().map(|file| file.path().to_string_lossy().to_string()).collect()))
+}
+
 fn pick_files(title: &str, extensions: &[&str]) -> Result<Value, String> {
     let files = rfd::FileDialog::new().set_title(title).add_filter(title, extensions).pick_files().unwrap_or_default();
     if files.len() > MAX_PATHS {
@@ -200,7 +301,8 @@ fn paths_value(paths: Vec<String>) -> Value {
 }
 
 fn provided_paths(params: &Value) -> Result<Option<Vec<String>>, String> {
-    let Some(paths) = params.get("paths").and_then(Value::as_array) else { return Ok(None) };
+    let Some(value) = params.get("paths") else { return Ok(None) };
+    let paths = value.as_array().ok_or_else(|| "paths must be an array".to_string())?;
     if paths.len() > MAX_PATHS {
         return Err("too many paths supplied".into());
     }

@@ -421,13 +421,9 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
           return value;
         }
         if (id === 'file.addPhotos' || id === 'file.addFolder' || id === 'file.addFromDevice') {
-          const action = id === 'file.addFolder' ? 'pickFolder' : id === 'file.addFromDevice' ? 'pickDevice' : 'pickFiles';
-          const picked = pathsFrom(params.paths ?? params.path) .length ? (params.paths ?? params.path) : await nativeAction(action, params);
-          const paths = pathsFrom(picked);
-          if (!paths.length) return null;
-          const report = await runCommand('library.importPreview', { paths });
-          setDialog({ kind: 'import', params: { paths, mode: id === 'file.addFromDevice' ? 'copy' : 'add', candidates: (report as JsonObject)?.candidates } });
-          return report;
+          const paths = pathsFrom(params.paths ?? params.path);
+          setDialog({ kind: 'import', params: { paths, initialSource: id === 'file.addFolder' ? 'folder' : id === 'file.addFromDevice' ? 'device' : 'files', mode: id === 'file.addFromDevice' ? 'copy' : 'add' } });
+          return null;
         }
         if (id === 'file.importLightroom') {
           const path = firstPath(params.path) || firstPath(await nativeAction('pickLightroomCatalog', params));
