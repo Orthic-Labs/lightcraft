@@ -1287,7 +1287,7 @@ fn native_hidden_control_journeys() {
                         let descending_before = snapshot(control);
                         let descending_generation = descending_before["viewGeneration"].as_u64().expect("descending generation must be numeric");
                         assert!(descending_generation > generation, "descending sort must advance view generation");
-                        wait_for_dom(control, "return Boolean(document.querySelector('.lc-grid-window .lc-photo-caption span:first-child')?.textContent?.trim());");
+                        wait_for_dom(control, &format!("return (() => {{ const name = document.querySelector('.lc-grid-window .lc-photo-caption span:first-child')?.textContent?.trim() || ''; return Boolean(name) && name !== {initial_name:?}; }})();"));
                         let descending_name = control
                             .eval("return document.querySelector('.lc-grid-window .lc-photo-caption span:first-child')?.textContent?.trim() || '';")
                             .expect("descending sort filename query must execute")
@@ -1299,7 +1299,7 @@ fn native_hidden_control_journeys() {
                         let ascending_snapshot = snapshot(control);
                         let ascending_generation = ascending_snapshot["viewGeneration"].as_u64().expect("ascending generation must be numeric");
                         assert!(ascending_generation > descending_generation, "ascending sort must advance view generation");
-                        wait_for_dom(control, &format!("return (document.querySelector('.lc-grid-window .lc-photo-caption span:first-child')?.textContent?.trim() || '') !== {descending_name:?};"));
+                        wait_for_dom(control, &format!("return (() => {{ const name = document.querySelector('.lc-grid-window .lc-photo-caption span:first-child')?.textContent?.trim() || ''; return Boolean(name) && name !== {descending_name:?}; }})();"));
                         let ascending_name = control
                             .eval("return document.querySelector('.lc-grid-window .lc-photo-caption span:first-child')?.textContent?.trim() || '';")
                             .expect("ascending sort filename query must execute")
