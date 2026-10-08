@@ -61,6 +61,10 @@ pub struct PreviewDescriptor {
     pub histogram: Value,
     pub render_ms: f64,
     pub encoding: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provisional: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -72,6 +76,7 @@ struct Pending {
     key: u64,
     priority: u32,
     forced_draft: bool,
+    quick: bool,
     reply: std::sync::mpsc::Sender<Result<PreviewDescriptor, String>>,
 }
 
@@ -103,6 +108,7 @@ pub struct Renderer {
     store: PreviewStore,
     pool: JobPool<SlotId, JobOutput>,
     slots: HashMap<String, SlotId>,
+    quick_slots: HashMap<String, SlotId>,
     next_slot: u64,
     next_ticket: u64,
     pending: HashMap<SlotId, Pending>,
@@ -120,6 +126,7 @@ impl Renderer {
             store,
             pool: JobPool::new(threads),
             slots: HashMap::new(),
+            quick_slots: HashMap::new(),
             next_slot: 1,
             next_ticket: 1,
             pending: HashMap::new(),
@@ -147,7 +154,11 @@ impl Renderer {
             return Ok(());
         }
         let slot = self.slot_id(&request.slot);
-        if self.pending.get(&slot).is_some_and(|pending| pending.request.sequence >= request.sequence) {
+        if self
+            .pending
+            .get(&slot)
+            .is_some_and(|pending| pending.request.sequence > request.sequence || (pending.request.sequence == request.sequence && !pending.quick))
+        {
             let _ = reply.send(Err("preview request is stale".to_string()));
             return Ok(());
         }
@@ -215,7 +226,7 @@ impl Renderer {
         if request.before {
             return self.request(session, request, reply);
         }
-        let slot = self.slot_id(&request.slot);
+        let slot = self.quick_slot_id(&request.slot);
         if self.pending.get(&slot).is_some_and(|pending| pending.request.sequence >= request.sequence) {
             let _ = reply.send(Err("preview request is stale".to_string()));
             return Ok(());
@@ -302,6 +313,12 @@ impl Renderer {
                 histogram: payload.histogram.clone(),
                 render_ms: done.ms,
                 encoding: "png",
+                provisional: result.quick.map(|_| true),
+                source: result.quick.map(|source| match source {
+                    lightcraft_engine::media::QuickSource::Cached => "cached",
+                    lightcraft_engine::media::QuickSource::Embedded => "embedded",
+                    lightcraft_engine::media::QuickSource::Small => "quick",
+                }),
             };
             self.failed.retain(|(candidate, key), _| *candidate != slot || *key != result.key);
             if self.is_thumb_slot(&pending.request.slot) {
@@ -333,11 +350,18 @@ impl Renderer {
     }
 
     pub fn cancel(&mut self, slot: &str) -> bool {
-        let Some(slot_id) = self.slots.get(slot).copied() else { return false };
-        let Some(pending) = self.pending.remove(&slot_id) else { return false };
-        let _ = pending.reply.send(Err("preview cancelled".to_string()));
-        self.drop_queued();
-        true
+        let slots = [self.slots.get(slot), self.quick_slots.get(slot)];
+        let mut cancelled = false;
+        for slot_id in slots.into_iter().flatten().copied() {
+            if let Some(pending) = self.pending.remove(&slot_id) {
+                let _ = pending.reply.send(Err("preview cancelled".to_string()));
+                cancelled = true;
+            }
+        }
+        if cancelled {
+            self.drop_queued();
+        }
+        cancelled
     }
 
     /// Finish every outstanding IPC request before the owner thread exits. Running worker jobs
@@ -358,9 +382,8 @@ impl Renderer {
     }
 
     pub fn retry(&mut self, slot: &str) {
-        if let Some(slot_id) = self.slots.get(slot).copied() {
-            self.failed.retain(|(candidate, _), _| *candidate != slot_id);
-        }
+        let slots = [self.slots.get(slot), self.quick_slots.get(slot)];
+        self.failed.retain(|(candidate, _), _| !slots.iter().flatten().any(|slot_id| *slot_id == candidate));
     }
 
     pub fn pending(&self) -> usize {
@@ -391,7 +414,7 @@ impl Renderer {
             }),
         );
         let forced_draft = forced_draft(request.quality, interactive);
-        self.pending.insert(slot, Pending { ticket, request, key, priority, forced_draft, reply });
+        self.pending.insert(slot, Pending { ticket, request, key, priority, forced_draft, quick: false, reply });
     }
 
     fn submit_quick(
@@ -417,7 +440,7 @@ impl Renderer {
                 JobOutput { ticket, view_generation, sequence, result, payload }
             }),
         );
-        self.pending.insert(slot, Pending { ticket, request, key, priority, forced_draft: false, reply });
+        self.pending.insert(slot, Pending { ticket, request, key, priority, forced_draft: false, quick: true, reply });
     }
 
     fn ticket(&mut self) -> u64 {
@@ -441,6 +464,23 @@ impl Renderer {
         let slot = SlotId(self.next_slot);
         self.next_slot = self.next_slot.wrapping_add(1).max(1);
         self.slots.insert(name.to_owned(), slot);
+        slot
+    }
+
+    fn quick_slot_id(&mut self, name: &str) -> SlotId {
+        if let Some(slot) = self.quick_slots.get(name) {
+            return *slot;
+        }
+        if self.quick_slots.len() >= MAX_SLOTS
+            && let Some(victim) = self.quick_slots.iter().find(|(_, slot)| !self.pending.contains_key(slot)).map(|(name, slot)| (name.clone(), *slot))
+        {
+            self.quick_slots.remove(&victim.0);
+            self.failed.retain(|(slot, _), _| *slot != victim.1);
+            self.drop_queued();
+        }
+        let slot = SlotId(self.next_slot);
+        self.next_slot = self.next_slot.wrapping_add(1).max(1);
+        self.quick_slots.insert(name.to_owned(), slot);
         slot
     }
 
@@ -473,6 +513,8 @@ impl Renderer {
             histogram,
             render_ms: 0.0,
             encoding: "png",
+            provisional: None,
+            source: None,
         })
     }
 
@@ -798,6 +840,7 @@ mod tests {
                 key: 0,
                 priority: 1000,
                 forced_draft: false,
+                quick: false,
                 reply: gate_reply,
             },
         );
@@ -861,6 +904,52 @@ mod tests {
     }
 
     #[test]
+    fn quick_and_full_same_generation_publish_and_release_independent_handles() {
+        let store = PreviewStore::new(8, 8 * 1024 * 1024, std::time::Duration::from_secs(30));
+        let mut renderer = Renderer::new(store.clone());
+        let mut session = Session::with_demo();
+        let photo = session.active().expect("demo session has an active photo");
+        let (generation, _) = session.visible_shared();
+        let request = PreviewRequest {
+            photo_id: photo.0,
+            slot: "main".into(),
+            view_generation: generation,
+            width: 320,
+            height: 240,
+            quality: PreviewQuality::Full,
+            before: false,
+            sequence: 7,
+        };
+        let (quick_reply, quick_results) = std::sync::mpsc::channel();
+        renderer.request_quick(&mut session, request.clone(), quick_reply).unwrap();
+        let (full_reply, full_results) = std::sync::mpsc::channel();
+        renderer.request(&mut session, request, full_reply).unwrap();
+        assert_ne!(renderer.slots.get("main"), renderer.quick_slots.get("main"));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut quick = None;
+        let mut full = None;
+        while (quick.is_none() || full.is_none()) && std::time::Instant::now() < deadline {
+            renderer.poll(&mut session);
+            quick = quick.or_else(|| quick_results.try_recv().ok().and_then(Result::ok));
+            full = full.or_else(|| full_results.try_recv().ok().and_then(Result::ok));
+            if quick.is_none() || full.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        let quick = quick.expect("quick preview should publish");
+        let full = full.expect("full preview should publish");
+        assert_eq!(quick.provisional, Some(true));
+        assert_eq!(full.provisional, None);
+        assert_ne!(quick.handle, full.handle);
+        assert!(store.get(&quick.handle).is_some());
+        assert!(store.get(&full.handle).is_some());
+        assert!(store.acknowledge(&quick.handle));
+        assert!(store.acknowledge(&full.handle));
+        assert!(store.is_empty());
+    }
+
+    #[test]
     fn stale_result_never_passes_presentation_gate() {
         let (reply, _) = std::sync::mpsc::channel();
         let pending = Pending {
@@ -878,6 +967,7 @@ mod tests {
             key: 17,
             priority: 100,
             forced_draft: false,
+            quick: false,
             reply,
         };
         assert!(publishable(&pending, 8, 3, 9, 17, PhotoId(42)));

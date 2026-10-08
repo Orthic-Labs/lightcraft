@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { acknowledgePreview, cancelMergePreview, convertFileSrc, requestMergePreview } from '../api';
 import { useDesktop } from '../desktop';
+import { ImportCandidatePreview } from '../preview/ImportCandidatePreview';
 import type { DesktopContextValue, DialogState, JsonObject, MergePreviewDescriptor, UiState } from '../types';
 import './dialogs.css';
 
@@ -267,11 +268,18 @@ function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
   const [preset, setPreset] = useState(text(p.preset));
   const [metadataPreset, setMetadataPreset] = useState(text(p.metadataPreset));
   const [dng, setDng] = useState(bool(p.dng));
+  const [includeSubfolders, setIncludeSubfolders] = useState(bool(p.includeSubfolders, true));
+  const [rawJpegPolicy, setRawJpegPolicy] = useState<'keepBoth' | 'rawOnly'>(() => text(p.rawJpegPolicy) === 'rawOnly' ? 'rawOnly' : 'keepBoth');
+  const extensionText = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').join(', ') : text(value);
+  const [allowedExtensions, setAllowedExtensions] = useState(extensionText(p.allowedExtensions));
+  const [excludedExtensions, setExcludedExtensions] = useState(extensionText(p.excludedExtensions));
   const [candidates, setCandidates] = useState<AnyRecord[]>(initialCandidates);
-  const [checked, setChecked] = useState<boolean[]>(arr(p.checked).length ? arr(p.checked).map(Boolean) : initialCandidates.map((c) => !c.duplicate && !c.error));
+  const candidateDefaultChecked = (candidate: AnyRecord) => !candidate.duplicate && !candidate.error && candidate.policyExcluded !== 'rawOnly';
+  const [checked, setChecked] = useState<boolean[]>(arr(p.checked).length ? arr(p.checked).map(Boolean) : initialCandidates.map(candidateDefaultChecked));
   const [busy, setBusy] = useState(false);
   const [phase, setPhase] = useState<'idle' | 'choosing' | 'scanning' | 'submitting'>('idle');
   const [error, setError] = useState('');
+  const [scanPaths, setScanPaths] = useState<string[]>(initialPaths);
   const liveRef = useRef(true);
   const busyRef = useRef(false);
   const scanSequenceRef = useRef(0);
@@ -281,14 +289,16 @@ function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
     return () => { liveRef.current = false; scanSequenceRef.current += 1; };
   }, []);
 
+  const scanOptions = () => ({ includeSubfolders, allowedExtensions: allowedExtensions.split(',').map((v) => v.trim()).filter(Boolean), excludedExtensions: excludedExtensions.split(',').map((v) => v.trim()).filter(Boolean), rawJpegPolicy });
   const preview = async (paths: string[], kind: string, sequence: number) => {
     if (!paths.length) return;
     setPhase('scanning');
+    setScanPaths(paths);
     setSource(paths.join(', '));
     if (kind) setSourceType(kind);
     setError('');
     try {
-      const result = (await desktop.run('library.importPreview', { paths })) as AnyRecord;
+      const result = (await desktop.run('library.importPreview', { paths, ...scanOptions() })) as AnyRecord;
       if (!liveRef.current || sequence !== scanSequenceRef.current) return;
       const taskId = text(result?.taskId);
       if (taskId) {
@@ -310,6 +320,10 @@ function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
           preset,
           metadataPreset,
           dng,
+          includeSubfolders,
+          allowedExtensions,
+          excludedExtensions,
+          rawJpegPolicy,
         };
         delete params.candidates;
         delete params.checked;
@@ -318,7 +332,7 @@ function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
       }
       const nextCandidates = arr(result?.candidates) as AnyRecord[];
       setCandidates(nextCandidates);
-      setChecked(nextCandidates.map((candidate) => !candidate.duplicate && !candidate.error));
+      setChecked(nextCandidates.map(candidateDefaultChecked));
     } catch (e) {
       if (liveRef.current && sequence === scanSequenceRef.current) {
         setCandidates([]);
@@ -371,6 +385,17 @@ function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
     }
   };
 
+  const rescan = () => {
+    if (busyRef.current || !scanPaths.length) return;
+    busyRef.current = true;
+    setBusy(true);
+    const sequence = ++scanSequenceRef.current;
+    void preview(scanPaths, sourceType, sequence).finally(() => {
+      busyRef.current = false;
+      setBusy(false);
+    });
+  };
+
   const submit = async () => {
     if (busyRef.current) return;
     const paths = candidates.filter((_, i) => checked[i]).map((c) => c.path).filter((path): path is string => typeof path === 'string' && path.length > 0);
@@ -383,7 +408,7 @@ function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
     setPhase('submitting');
     setError('');
     try {
-      const payload: AnyRecord = { ...p, paths, mode, album: album ? Number(album) : undefined, albumName: newAlbum.trim() || undefined, keywords: keywords.split(',').map((v) => v.trim()).filter(Boolean), preset: preset || undefined, metadataPreset: metadataPreset || undefined, destination: destination || undefined, organize: mode === 'add' ? undefined : organize === 'custom' ? custom : organize || undefined, rename: rename || undefined, renameStart: renameStart ? Number(renameStart) : undefined, dng: dng && mode === 'copy' };
+      const payload: AnyRecord = { ...p, paths, mode, includeSubfolders, rawJpegPolicy, allowedExtensions: scanOptions().allowedExtensions, excludedExtensions: scanOptions().excludedExtensions, album: album ? Number(album) : undefined, albumName: newAlbum.trim() || undefined, keywords: keywords.split(',').map((v) => v.trim()).filter(Boolean), preset: preset || undefined, metadataPreset: metadataPreset || undefined, destination: destination || undefined, organize: mode === 'add' ? undefined : organize === 'custom' ? custom : organize || undefined, rename: rename || undefined, renameStart: renameStart ? Number(renameStart) : undefined, dng: dng && mode === 'copy' };
       delete payload.candidates;
       delete payload.checked;
       delete payload.taskId;
@@ -410,7 +435,7 @@ function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
     desktop.setDialog(null);
   };
   const sourceLabel = sourceType === 'folder' ? 'Folder' : sourceType === 'device' ? 'Camera or card' : 'Photos';
-  return <Frame title="Import Photos" wide busy={busy} onClose={close} actions={<><Button disabled={busy} onClick={close}>Cancel</Button><Button primary disabled={busy || !candidates.length} onClick={() => void submit()}>Import {candidates.filter((_, i) => checked[i]).length || ''} Photos</Button></>}><div className="lc-dialog-toolbar"><Button disabled={busy} onClick={() => void pick('files')}>Choose Photos…</Button><Button disabled={busy} onClick={() => void pick('folder')}>Choose Folder…</Button><Button disabled={busy} onClick={() => void pick('device')}>Camera or Card…</Button></div>{source && <Note>Source: {sourceLabel} — {source}</Note>}{phase === 'scanning' && <Note>Reviewing photos…</Note>}{error && <Note tone="error">{error}</Note>}<div className="lc-import-layout"><div className="lc-candidate-list"><div className="lc-section-heading"><strong>Review</strong><span>{candidates.length} found</span></div>{candidates.length ? candidates.map((c, i) => <label className={`lc-candidate ${c.duplicate || c.error ? 'lc-candidate-muted' : ''}`} key={`${c.path || c.name || i}-${i}`}><input type="checkbox" checked={checked[i] ?? false} disabled={busy || Boolean(c.duplicate || c.error)} onChange={(e) => setChecked((old) => old.map((v, n) => n === i ? e.target.checked : v))} /><span className="lc-thumb-placeholder" aria-hidden="true">{text(c.format, 'IMG').slice(0, 3).toUpperCase()}</span><span className="lc-candidate-copy"><strong>{text(c.name, text(c.path, 'Photo'))}</strong><small>{text(c.path)}{c.duplicate ? ` · Duplicate (${c.duplicate})` : c.error ? ` · ${c.error}` : ''}</small></span></label>) : <Note>Choose photos or a folder to review files before adding them.</Note>}</div><div className="lc-form-stack"><Select label="Add photos" value={mode} options={[["add", 'In place'], ['copy', 'Copy into library'], ['move', 'Move into library']]} onChange={setMode} disabled={busy} /><Field label="Existing album ID" value={album} onChange={setAlbum} placeholder="Optional" disabled={busy} /><Field label="New album" value={newAlbum} onChange={setNewAlbum} placeholder="Optional" disabled={busy} /><Field label="Keywords" value={keywords} onChange={setKeywords} placeholder="Comma-separated" disabled={busy} />{mode !== 'add' && <><Field label="Destination folder" value={destination} onChange={setDestination} placeholder="Library Originals by default" disabled={busy} /><Select label="Organize copies" value={organize} options={[["date", 'By capture date'], ['month', 'By month'], ['flat', 'One folder'], ['custom', 'Custom template']]} onChange={setOrganize} disabled={busy} />{organize === 'custom' && <><Field label="Folder template" value={folderTemplate} onChange={setFolderTemplate} placeholder="{date:%Y}/{date:%Y%m%d}" disabled={busy} /><Note>Use relative folders & photo tags such as {`{date:%Y}`}; no drive or parent folders.</Note></>}<Field label="File naming" value={rename} onChange={setRename} placeholder="Keep original names" disabled={busy} /><Check checked={dng} onChange={setDng} disabled={busy || mode !== 'copy'}>Copy raw files as DNG</Check></>}<Field label="Develop preset ID" value={preset} onChange={setPreset} placeholder="Optional" disabled={busy} /><Field label="Metadata preset" value={metadataPreset} onChange={setMetadataPreset} placeholder="Optional" disabled={busy} /></div></div></Frame>;
+  return <Frame title="Import Photos" wide busy={busy} onClose={close} actions={<><Button disabled={busy} onClick={close}>Cancel</Button><Button primary disabled={busy || !candidates.length} onClick={() => void submit()}>Import {candidates.filter((_, i) => checked[i]).length || ''} Photos</Button></>}><div className="lc-dialog-toolbar"><Button disabled={busy} onClick={() => void pick('files')}>Choose Photos…</Button><Button disabled={busy} onClick={() => void pick('folder')}>Choose Folder…</Button><Button disabled={busy} onClick={() => void pick('device')}>Camera or Card…</Button><Button disabled={busy || !scanPaths.length} onClick={rescan}>Rescan</Button></div>{source && <Note>Source: {sourceLabel} — {source}</Note>}{phase === 'scanning' && <Note>Reviewing photos…</Note>}{error && <Note tone="error">{error}</Note>}<div className="lc-import-layout"><div className="lc-candidate-list"><div className="lc-section-heading"><strong>Review</strong><span>{candidates.length} found</span></div>{candidates.length ? candidates.map((c, i) => { const pairing = c.pairing && typeof c.pairing === 'object' ? c.pairing as AnyRecord : null; const pairingNotice = c.policyExcluded === 'rawOnly' ? ` · RAW only default (paired with ${text(pairing?.with, 'JPEG')})` : pairing ? ` · Paired ${text(pairing.kind, 'variant')}: ${text(pairing.with)}` : ''; return <label className={`lc-candidate ${c.duplicate || c.error ? 'lc-candidate-muted' : ''}`} key={`${c.path || c.name || i}-${i}`}><input type="checkbox" checked={checked[i] ?? false} disabled={busy || Boolean(c.duplicate || c.error)} onChange={(e) => setChecked((old) => old.map((v, n) => n === i ? e.target.checked : v))} /><ImportCandidatePreview preview={c.preview} aria-hidden="true" /><span className="lc-candidate-copy"><strong>{text(c.name, text(c.path, 'Photo'))}</strong><small>{text(c.path)}{c.duplicate ? ` · Duplicate (${c.duplicate})` : c.error ? ` · ${c.error}` : ''}{pairingNotice}</small></span></label>; }) : <Note>Choose photos or a folder to review files before adding them.</Note>}</div><div className="lc-form-stack"><Check checked={includeSubfolders} onChange={setIncludeSubfolders} disabled={busy}>Include subfolders</Check><Field label="Only extensions" value={allowedExtensions} onChange={setAllowedExtensions} placeholder="raw, dng (optional)" disabled={busy} /><Field label="Exclude extensions" value={excludedExtensions} onChange={setExcludedExtensions} placeholder="jpg, jpeg (optional)" disabled={busy} /><Select label="RAW/JPEG pairs" value={rawJpegPolicy} options={[['keepBoth', 'Keep both (default)'], ['rawOnly', 'RAW only']]} onChange={(value) => setRawJpegPolicy(value === 'rawOnly' ? 'rawOnly' : 'keepBoth')} disabled={busy} /><Select label="Add photos" value={mode} options={[["add", 'In place'], ['copy', 'Copy into library'], ['move', 'Move into library']]} onChange={setMode} disabled={busy} /><Field label="Existing album ID" value={album} onChange={setAlbum} placeholder="Optional" disabled={busy} /><Field label="New album" value={newAlbum} onChange={setNewAlbum} placeholder="Optional" disabled={busy} /><Field label="Keywords" value={keywords} onChange={setKeywords} placeholder="Comma-separated" disabled={busy} />{mode !== 'add' && <><Field label="Destination folder" value={destination} onChange={setDestination} placeholder="Library Originals by default" disabled={busy} /><Select label="Organize copies" value={organize} options={[["date", 'By capture date'], ['month', 'By month'], ['flat', 'One folder'], ['custom', 'Custom template']]} onChange={setOrganize} disabled={busy} />{organize === 'custom' && <><Field label="Folder template" value={folderTemplate} onChange={setFolderTemplate} placeholder="{date:%Y}/{date:%Y%m%d}" disabled={busy} /><Note>Use relative folders & photo tags such as {`{date:%Y}`}; no drive or parent folders.</Note></>}<Field label="File naming" value={rename} onChange={setRename} placeholder="Keep original names" disabled={busy} /><Check checked={dng} onChange={setDng} disabled={busy || mode !== 'copy'}>Copy raw files as DNG</Check></>}<Field label="Develop preset ID" value={preset} onChange={setPreset} placeholder="Optional" disabled={busy} /><Field label="Metadata preset" value={metadataPreset} onChange={setMetadataPreset} placeholder="Optional" disabled={busy} /></div></div></Frame>;
 }
 
 function folderTemplateError(template: string): string | null { const value = template.trim(); if (!value) return 'Enter a folder template.'; if (!value.includes('{') && !value.includes('/') && !value.includes('\\')) return 'Folder template must contain {, / or \\.'; if (value.startsWith('/') || value.startsWith('\\') || value.startsWith('~') || /^[A-Za-z]:/.test(value)) return 'Folder template must stay inside destination folder.'; if (value.split(/[\\/]/).some((part) => part.trim() === '.' || part.trim() === '..')) return 'Folder template cannot contain . or .. folders.'; return null; }
@@ -846,6 +871,98 @@ function InfoDialog({ kind, desktop, d }: { kind: string; desktop: DesktopContex
 function FormDialog({ kind, d, desktop }: { kind: string; d: DialogState; desktop: DesktopContextValue }) { const formKind = kind.toLowerCase(); const p = d.params || {}; const [values, setValues] = useState<AnyRecord>({ ...p }); const update = (key: string, value: unknown) => setValues((old) => ({ ...old, [key]: value })); const config: AnyRecord = { rename: ['Rename Photos', 'photo.rename', [['template', 'Name template'], ['start', 'Start number']]], renamealbum: ['Rename Album', 'album.rename', [['id', 'Album ID'], ['name', 'Name']]], capturetime: ['Edit Capture Time', 'photo.setCaptureTime', [['time', 'Capture time'], ['shift', 'Shift seconds'], ['hours', 'Time-zone shift hours']]], autostack: ['Auto-Stack by Capture Time', 'stack.auto', [['gap', 'Maximum gap (seconds)']]], createpreset: ['Create Preset', 'preset.create', [['name', 'Preset name'], ['group', 'Group']]], copysettings: ['Copy Edit Settings', 'develop.copy', []], pastesettings: ['Paste Edit Settings', 'develop.paste', []], labelnames: ['Color Label Names', 'label.setNames', [['red', 'Red'], ['yellow', 'Yellow'], ['green', 'Green'], ['blue', 'Blue'], ['purple', 'Purple']]], savemetadatapreset: ['Save Metadata Preset', 'metadata.savePreset', [['name', 'Preset name']]], cull: ['Assisted Culling', 'photo.analyze', [['rejectBelow', 'Reject below focus score']]], textprompt: [text(p.title, 'Enter a value'), text(p.command), [[text(p.key, 'value'), text(p.hint, 'Value')]]], metadatapreset: ['Metadata Preset', 'metadata.applyPreset', [['name', 'Preset name']]], renamekeyword: ['Rename Keyword', 'keyword.rename', [['from', 'Current keyword'], ['to', 'New keyword']]], mergekeywords: ['Merge Keywords', 'keyword.merge', [['from', 'Keywords to merge (comma-separated)'], ['into', 'Merge into']]] }; const c = config[formKind]; const submit = async () => { try { let payload: AnyRecord = { ...values }; if (formKind === 'labelnames') payload = { names: Object.fromEntries(['red', 'yellow', 'green', 'blue', 'purple'].map((label) => [label, text(values[label]) || null])) }; else if (formKind === 'capturetime') { payload = {}; if (Array.isArray(values.ids)) payload.ids = values.ids; if (text(values.time)) payload.time = text(values.time); else if (values.shift !== undefined && text(values.shift) !== '') payload.shift = num(values.shift); else if (values.hours !== undefined && text(values.hours) !== '') payload.hours = num(values.hours); if (bool(values.each)) payload.each = true; } else if (formKind === 'rename') payload = { template: text(values.template), start: num(values.start, 1), ...(Array.isArray(values.ids) ? { ids: values.ids } : {}) }; else if (formKind === 'renamealbum') payload = { id: num(values.id), name: text(values.name) }; else if (formKind === 'autostack') payload = { gap: num(values.gap), ...(bool(values.preview) ? { preview: true } : {}) }; else if (formKind === 'createpreset') payload = { name: text(values.name), ...(text(values.group) ? { group: text(values.group) } : {}) }; else if (formKind === 'copysettings' || formKind === 'pastesettings') payload = { ...(Array.isArray(values.groups) ? { groups: values.groups } : {}) }; else if (formKind === 'metadatapreset') payload = { name: text(values.name) }; else if (formKind === 'savemetadatapreset') payload = { name: text(values.name), ...(values.fields ? { fields: values.fields } : {}) }; else if (formKind === 'renamekeyword') payload = { from: text(values.from), to: text(values.to) }; else if (formKind === 'mergekeywords') payload = { from: text(values.from).split(',').map((item) => item.trim()).filter(Boolean), into: text(values.into) }; else if (formKind === 'cull') payload = { ...(Array.isArray(values.ids) ? { ids: values.ids } : {}), rejectBelow: num(values.rejectBelow), pickBest: bool(values.pickBest, true) }; else if (formKind === 'textprompt') { const promptKey = text(p.key, 'value'); payload = { ...(typeof values.path === 'string' ? { path: values.path } : {}), [promptKey]: text(values[promptKey]) }; } await desktop.run(c[1], payload); desktop.setDialog(null); } catch (e) { desktop.setNotice(String(e)); } }; return <Frame title={c[0]} onClose={() => desktop.setDialog(null)} actions={<><Button onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary onClick={() => void submit()}>Apply</Button></>}><div className="lc-form-stack">{arr(c[2]).map((field: any[]) => <Field key={field[0]} label={field[1]} value={typeof values[field[0]] === 'number' ? values[field[0]] : text(values[field[0]])} type={typeof values[field[0]] === 'number' ? 'number' : 'text'} onChange={(v) => update(field[0], typeof values[field[0]] === 'number' ? Number(v) : v)} />)}{formKind === 'capturetime' && <Check checked={bool(values.each)} onChange={(v) => update('each', v)}>Set this time on every selected photo</Check>}{['copysettings', 'pastesettings'].includes(formKind) && <Note>Choose groups in Inspector before applying settings.</Note>}{formKind === 'cull' && <Check checked={bool(values.pickBest, true)} onChange={(v) => update('pickBest', v)}>Keep best frame in each burst</Check>}</div></Frame>; }
 
 const EXPLICIT_FORM_KINDS = new Set(['rename', 'renamealbum', 'capturetime', 'autostack', 'createpreset', 'copysettings', 'pastesettings', 'labelnames', 'savemetadatapreset', 'cull', 'textprompt', 'metadatapreset', 'renamekeyword', 'mergekeywords']);
+function SamModelSetupDialogHost({ desktop }: { desktop: DesktopContextValue }) {
+  const licenseUrl = 'https://github.com/facebookresearch/sam3/blob/main/LICENSE';
+  const [status, setStatus] = useState<AnyRecord | null>(null);
+  const [accepted, setAccepted] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const load = async () => {
+    try { setStatus((await desktop.run('segment.model.status', {})) as AnyRecord); }
+    catch (reason) { setError(errorText(reason)); }
+  };
+  useEffect(() => {
+    void load();
+    const timer = window.setInterval(() => { void load(); }, 750);
+    return () => window.clearInterval(timer);
+  }, []);
+  const download = async () => {
+    if (!accepted || busy) return;
+    setBusy(true); setError('');
+    try { await desktop.run('segment.model.download', { acknowledged: true }); await load(); }
+    catch (reason) { setError(errorText(reason)); }
+    finally { setBusy(false); }
+  };
+  const cancelDownload = async () => {
+    setBusy(true); setError('');
+    try { await desktop.run('segment.model.cancel', {}); await load(); }
+    catch (reason) { setError(errorText(reason)); }
+    finally { setBusy(false); }
+  };
+  const chooseFolder = async () => {
+    setBusy(true); setError('');
+    try {
+      const selected = await desktop.native('selectFolder', {});
+      const path = typeof selected === 'string' ? selected : selected && typeof selected === 'object' && 'path' in selected ? text((selected as AnyRecord).path) : '';
+      if (!path) return;
+      await desktop.run('segment.model.selectFolder', { path });
+      for (;;) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 250));
+        const next = await desktop.run('segment.model.status', {}) as AnyRecord;
+        setStatus(next);
+        const validation = next.validation && typeof next.validation === 'object' ? next.validation as AnyRecord : {};
+        if (!bool(validation.running)) {
+          const validationError = text(validation.error);
+          if (validationError) throw new Error(validationError);
+          break;
+        }
+      }
+      await desktop.native('preferences.patch', { sam3Dir: path });
+      await load();
+    } catch (reason) { setError(errorText(reason)); }
+    finally { setBusy(false); }
+  };
+  const cancelValidation = async () => {
+    setError('');
+    try { await desktop.run('segment.model.cancelSelection', {}); }
+    catch (reason) { setError(errorText(reason)); }
+  };
+  const openFolder = async () => {
+    const path = text(status?.dir);
+    if (!path) return;
+    try { await desktop.native('openFolder', { path }); }
+    catch (reason) { setError(errorText(reason)); }
+  };
+  const downloadState = (status?.download && typeof status.download === 'object') ? status.download as AnyRecord : {};
+  const running = bool(downloadState.running);
+  const validation = status?.validation && typeof status.validation === 'object' ? status.validation as AnyRecord : {};
+  const validating = bool(validation.running);
+  const installed = bool(status?.installed) && !validating;
+  const mirrors = num(status?.mirrors);
+  const done = num(downloadState.done);
+  const total = num(downloadState.total);
+  const percent = total > 0 ? Math.min(100, Math.round(done / total * 100)) : 0;
+  const validationDone = num(validation.done);
+  const validationTotal = num(validation.total, 3439938512);
+  const validationPercent = validationTotal > 0 ? Math.min(100, Math.round(validationDone / validationTotal * 100)) : 0;
+  const sizeGb = (num(status?.sizeBytes, 3439938512) / 1e9).toFixed(1);
+  return <Frame title="SAM 3 Model Setup" busy={busy} onClose={() => desktop.setDialog(null)} dismissible={!running && !validating} actions={<><Button disabled={busy && !validating} onClick={() => desktop.setDialog(null)}>{running || validating ? 'Close' : 'Cancel'}</Button>{installed ? <Button primary onClick={() => desktop.setDialog(null)}>Continue</Button> : running ? <Button disabled={busy} onClick={() => void cancelDownload()}>Cancel Download</Button> : validating ? <Button onClick={() => void cancelValidation()}>Cancel Verification</Button> : <Button primary disabled={busy || !accepted || mirrors === 0} onClick={() => void download()}>Download</Button>}</>}>
+    <Note>Object & Describe masks use SAM 3, Meta’s segmentation model. Everything else works without it.</Note>
+    <p>A one-time download of about {sizeGb} GB is saved in:</p>
+    <code className="lc-path-value">{text(status?.dir, 'No model folder configured')}</code>
+    <div className="lc-dialog-toolbar"><Button disabled={busy || !status?.dir} onClick={() => void openFolder()}>Open Model Folder</Button><Button disabled={busy} onClick={() => void chooseFolder()}>Select Existing Model Folder…</Button></div>
+    <p>Licence: SAM License (Meta). Downloading means accepting Meta’s terms.</p>
+    <div className="lc-dialog-toolbar"><Button onClick={() => void desktop.native('openUrl', { url: licenseUrl })}>Read SAM License</Button><Button onClick={() => void desktop.native('openUrl', { url: 'https://github.com/storytold/lightcraft/blob/main/docs/ai-masks.md' })}>SAM 3 Install Guide</Button></div>
+    {!installed && !running && <Check checked={accepted} onChange={setAccepted}>I accept SAM License terms & want to download this model.</Check>}
+    {mirrors === 0 && !installed && <Note tone="warning">No HTTPS download mirror is configured. Set LIGHTCRAFT_SAM3_MIRRORS or install files manually, then select their folder.</Note>}
+    {running && <div className="lc-progress" aria-live="polite"><div className="lc-progress-label"><span>{text(downloadState.file, 'Downloading SAM 3…')}</span><span>{percent}%</span></div><progress max={100} value={percent} /></div>}
+    {validating && <div className="lc-progress" aria-live="polite"><div className="lc-progress-label"><span>Verifying SAM 3 model folder…</span><span>{validationPercent}%</span></div><progress max={100} value={validationPercent} /></div>}
+    {installed && <Note>SAM 3 files are installed. Object & Describe masks are ready.</Note>}
+    {error && <Note tone="error">{error}</Note>}
+    {text(downloadState.error) && <Note tone="error">{text(downloadState.error)}</Note>}
+  </Frame>;
+}
+
 function UnsupportedDialog({ desktop }: { kind: string; desktop: DesktopContextValue }) { return <Frame title="Dialog unavailable" onClose={() => desktop.setDialog(null)} actions={<Button primary onClick={() => desktop.setDialog(null)}>Close</Button>}><Note tone="error">Sorry, this action isn’t available in this version.</Note></Frame>; }
 
 function MissingDialog({ desktop, d }: { desktop: DesktopContextValue; d: DialogState }) { const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const run = async () => { const paths = await choose(desktop.native, 'chooseFolder'); if (!paths[0]) return; setBusy(true); try { await desktop.run('library.findMissing', { folder: paths[0] }); desktop.setDialog(null); } catch (e) { setError(String(e)); } finally { setBusy(false); } }; return <Frame title="Find Missing Photos" busy={busy} onClose={() => desktop.setDialog(null)} actions={<><Button onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary disabled={busy} onClick={() => void run()}>Choose Search Folder…</Button></>}>{error && <Note tone="error">{error}</Note>}<Note>LightCraft checks names, sizes & content hashes, then relinks matches in one undoable step.</Note>{d.params?.count != null && <p>{num(d.params.count)} photos are missing.</p>}</Frame>; }
@@ -894,6 +1011,7 @@ export default function DialogHost({ desktop: provided }: HostProps = {}) {
   if (kind === 'allmetadata') return <MetadataDialog d={dialog} desktop={context} />;
   if (kind === 'about' || kind === 'systeminfo' || kind === 'shortcuts' || kind === 'whatsnew') return <InfoDialog kind={kind} d={dialog} desktop={context} />;
   if (kind === 'settings') return <SettingsDialog d={dialog} desktop={context} />;
+  if (kind === 'sammodel' || kind === 'sammodelsetup' || kind === 'samsetup') return <SamModelSetupDialogHost desktop={context} />;
   if (kind === 'copysettings') return <GroupsDialog paste={false} d={dialog} desktop={context} />;
   if (kind === 'pastsettings' || kind === 'pastesettings') return <GroupsDialog paste d={dialog} desktop={context} />;
   if (kind === 'presetimport') return <PresetFileDialog exportMode={false} curve={false} d={dialog} desktop={context} />;

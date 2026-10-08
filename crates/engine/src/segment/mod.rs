@@ -157,6 +157,23 @@ impl Segmenter {
     /// Whether this build can compute AI masks at all.
     pub const AVAILABLE: bool = cfg!(feature = "sam");
 
+    /// Validate a user-selected folder without mutating a session. Desktop hosts run this on a
+    /// worker thread so hashing a large checkpoint never blocks owner-thread commands.
+    pub fn validate_model_dir_with_progress<F>(dir: &std::path::Path, progress: F) -> Result<(), String>
+    where
+        F: FnMut(u64, u64) -> bool,
+    {
+        #[cfg(feature = "sam")]
+        {
+            lightcraft_segment::validate_model_dir_with_progress(dir, progress).map_err(|e| e.to_string())
+        }
+        #[cfg(not(feature = "sam"))]
+        {
+            let _ = (dir, progress);
+            Err("AI masks are not available in this build".into())
+        }
+    }
+
     /// Whether the model's files are in place.
     pub fn installed(&self) -> bool {
         #[cfg(feature = "sam")]
@@ -164,6 +181,35 @@ impl Segmenter {
             return lightcraft_segment::is_model_dir(dir);
         }
         false
+    }
+
+    /// Verify a user-selected model folder before making it active.
+    pub fn select_model_dir(&mut self, dir: PathBuf) -> Result<(), String> {
+        if !Self::AVAILABLE {
+            return Err("AI masks are not available in this build".into());
+        }
+        if dir.as_os_str().is_empty() || dir.to_string_lossy().len() > 8_192 || dir.to_string_lossy().contains('\0') {
+            return Err("invalid SAM 3 model folder".into());
+        }
+        #[cfg(feature = "sam")]
+        lightcraft_segment::validate_model_dir(&dir).map_err(|e| e.to_string())?;
+        self.configure_model_dir(Some(dir));
+        Ok(())
+    }
+
+    /// Set the configured folder without requiring its files to exist yet. Hosts use this for
+    /// persisted preferences & download destinations; changing it always drops any in-memory
+    /// checkpoint before a request can load from the new folder.
+    pub fn configure_model_dir(&mut self, dir: Option<PathBuf>) {
+        if self.dir == dir {
+            return;
+        }
+        #[cfg(feature = "sam")]
+        if self.worker.loaded() || self.worker.pending() > 0 || self.worker.detail() > 0 {
+            self.worker.discard_model(dir.as_deref());
+        }
+        self.pending = None;
+        self.dir = dir;
     }
 
     /// Whether requests are queued or running (loading, analyzing the photo, a click…).
@@ -262,7 +308,7 @@ impl Segmenter {
             if mirrors.is_empty() {
                 return Err(lightcraft_segment::fetch::no_mirrors_message());
             }
-            self.download.start(lightcraft_segment::fetch::SAM3_FILES, mirrors, dir, lightcraft_segment::fetch::Options::default())
+            self.download.start(lightcraft_segment::fetch::SAM3_FILES, mirrors, dir, lightcraft_segment::fetch::options())
         }
         #[cfg(not(feature = "sam"))]
         {

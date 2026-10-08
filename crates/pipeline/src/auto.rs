@@ -2,13 +2,13 @@
 
 use lightcraft_color::cct::xy_to_temp_tint;
 use lightcraft_color::perceptual::oklab_from_2020;
-use lightcraft_color::{REC2020, Xy, bradford, luminance_2020};
+use lightcraft_color::{bradford, luminance_2020, Xy, REC2020};
 use lightcraft_develop::DevelopSettings;
 use lightcraft_raster::Rgb32f;
 use serde::Serialize;
 
-use crate::SourceInfo;
 use crate::local::effective_wb;
+use crate::SourceInfo;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct AutoTone {
@@ -78,7 +78,9 @@ pub fn auto_tone(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings) -> AutoTo
         0.0
     };
     let median_gain = if low_key || high_key { 0.85 } else { 1.0 };
-    let mut exposure = ((target - median) * median_gain - 0.1).clamp(-4.0, 4.0);
+    // BaselineExposure has already been applied by the RAW loader. Keep an ordinary scene's
+    // median on target instead of adding a second, undocumented underexposure bias here.
+    let mut exposure = ((target - median) * median_gain).clamp(-4.0, 4.0);
     if backlit {
         // Let highlight recovery work, but do not spend several stops on a dark foreground
         // when a small bright tail (sun, window, or lamp) defines the upper percentile.
@@ -251,3 +253,28 @@ mod bw_tests {
 
 #[cfg(test)]
 mod auto_regression;
+
+#[cfg(test)]
+mod tint_tests {
+    use super::*;
+
+    #[test]
+    fn auto_wb_and_picker_correct_green_with_positive_tint() {
+        // The picker delegates a sampled patch to this same auto_wb implementation.
+        for (rgb, sign) in [([0.18, 0.24, 0.18], 1.0), ([0.24, 0.18, 0.24], -1.0)] {
+            let img = Rgb32f::filled(16, 16, rgb);
+            let info = SourceInfo { raw: true, relative_wb: true, ..Default::default() };
+            let (temp, tint) = auto_wb(&img, &info);
+            assert!(tint * sign > 0.0, "{rgb:?}: temp {temp}, tint {tint}");
+            let mut s = DevelopSettings::default();
+            s.wb.mode = lightcraft_develop::WbMode::Custom;
+            s.wb.temp = temp;
+            s.wb.tint = tint;
+            let mut corrected = img;
+            crate::local::white_balance(&mut corrected, &info, &s);
+            let p = corrected.get(0, 0);
+            let spread = p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]);
+            assert!(spread < 0.003, "{rgb:?} -> {p:?}");
+        }
+    }
+}

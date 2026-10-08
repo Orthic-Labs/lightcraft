@@ -574,6 +574,7 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
       return value;
     } catch (reason: unknown) {
       const text = messageOf(reason);
+      if (text.startsWith('The SAM 3 model is not installed')) setDialog({ kind: 'samModelSetup', params: { error: text } });
       setError(text);
       throw reason;
     }

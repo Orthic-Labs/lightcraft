@@ -28,6 +28,7 @@ use lightcraft_catalog::{MediaKind, Op, Photo, PhotoId, Source};
 use serde::{Deserialize, Serialize};
 
 use crate::Session;
+pub use crate::import_pairs::{RawJpegImportPolicy, RawJpegPair, RawJpegPairKind};
 use crate::media::ProbeInfo;
 
 /// File extensions LightCraft imports (lower case).
@@ -35,6 +36,38 @@ pub const EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "tif", "tiff", "webp", "dng", "cr2", "cr3", "nef", "nrw", "arw", "raf", "orf", "rw2", "rwl", "raw", "pef", "psd", "jxl",
     "gif", "bmp", "heic", "avif",
 ];
+
+/// File-system choices used by import review. Empty extension lists retain all supported formats.
+/// Explicit file paths are always retained; options only filter files discovered in folders.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ImportScanOptions {
+    pub include_subfolders: bool,
+    pub allowed_extensions: Vec<String>,
+    pub excluded_extensions: Vec<String>,
+}
+
+impl Default for ImportScanOptions {
+    fn default() -> Self {
+        Self { include_subfolders: true, allowed_extensions: Vec::new(), excluded_extensions: Vec::new() }
+    }
+}
+
+impl ImportScanOptions {
+    fn allows_extension(&self, path: &Path) -> bool {
+        let extension = path.extension().map(|value| value.to_string_lossy().to_ascii_lowercase());
+        let matches = |values: &[String]| {
+            extension.as_deref().is_some_and(|ext| values.iter().any(|value| value.trim().trim_start_matches('.').eq_ignore_ascii_case(ext)))
+        };
+        if matches(&self.excluded_extensions) {
+            return false;
+        }
+        self.allowed_extensions.is_empty() || matches(&self.allowed_extensions)
+    }
+}
+
+/// Upper bound on concurrent native probe reads. Memory gating bounds bytes in flight as well.
+const MAX_IMPORT_PROBE_WORKERS: usize = 8;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ImportMode {
@@ -48,9 +81,36 @@ pub enum ImportMode {
     Move,
 }
 
+/// What an import does with a file the library already has in Recently Deleted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OnDeleted {
+    /// Leave it there; the report says so ([`Duplicate::existing_deleted`]).
+    #[default]
+    Skip,
+    /// Bring the trashed photo back, with its edits ([`ImportReport::restored`]).
+    Restore,
+    /// Delete the trashed record permanently and import the file as a new photo.
+    Fresh,
+}
+
+impl OnDeleted {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "skip" => Some(Self::Skip),
+            "restore" => Some(Self::Restore),
+            "fresh" => Some(Self::Fresh),
+            _ => None,
+        }
+    }
+}
+
 /// What an import does besides adding the photos.
 #[derive(Clone, Debug, Default)]
 pub struct ImportOptions {
+    /// Folder expansion choices shared by import review & direct imports.
+    pub scan: ImportScanOptions,
+    /// A file that is in Recently Deleted: skip (default), restore, or import afresh.
+    pub on_deleted: OnDeleted,
     pub mode: ImportMode,
     /// Applied to every imported photo (one History entry).
     pub preset: Option<lightcraft_develop::Preset>,
@@ -71,6 +131,8 @@ pub struct ImportOptions {
     pub metadata_preset: Option<String>,
     /// Copy: raws are copied as DNG (Copy as DNG).
     pub convert_dng: bool,
+    /// How confidently paired RAW/JPEG variants are selected. Keep both is the default.
+    pub raw_jpeg_policy: RawJpegImportPolicy,
 }
 
 /// How copies are filed in the destination. The date is the capture time, else the time of the
@@ -138,6 +200,15 @@ pub struct ImportCandidate {
     /// A raw variant that can't be decoded yet (why): it imports as preview only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview_only: Option<String>,
+    /// A presentation hint for a confidently paired RAW/JPEG variant; this is not a duplicate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pairing: Option<RawJpegPair>,
+    /// Set by a caller that requested RawOnly. The file remains visible so the user can keep it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_excluded: Option<String>,
+    /// Camera metadata retained for conservative descendant export pairing.
+    #[serde(skip)]
+    pub pairing_camera: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -147,12 +218,18 @@ pub struct Duplicate {
     pub existing: Option<u64>,
     /// `"path"` (already imported from there) or `"content"` (same bytes elsewhere).
     pub reason: &'static str,
+    /// That photo is in Recently Deleted (see [`OnDeleted`]).
+    #[serde(rename = "existingDeleted", skip_serializing_if = "std::ops::Not::not")]
+    pub existing_deleted: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ImportReport {
     pub imported: Vec<u64>,
     pub duplicates: Vec<Duplicate>,
+    /// [`OnDeleted::Restore`]: photos brought back from Recently Deleted instead of imported.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub restored: Vec<u64>,
     /// Move: the originals that were moved (and removed from the source).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub moved: Vec<Moved>,
@@ -288,26 +365,35 @@ pub fn is_supported(path: &Path) -> bool {
 /// Expand files and folders (recursively) into supported files. `skip` (e.g. the library folder)
 /// is never descended into.
 pub fn expand(paths: &[String], skip: Option<&Path>) -> Vec<String> {
-    fn walk(p: &Path, skip: Option<&Path>, out: &mut Vec<String>, top: bool) {
+    expand_with_options(paths, skip, &ImportScanOptions::default())
+}
+
+/// Expand using import review options. Directory children are filtered before probing; explicitly
+/// named files remain candidates even when extension filters would exclude them.
+pub fn expand_with_options(paths: &[String], skip: Option<&Path>, options: &ImportScanOptions) -> Vec<String> {
+    fn walk(p: &Path, skip: Option<&Path>, out: &mut Vec<String>, top: bool, options: &ImportScanOptions) {
         let hidden = p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'));
         if (hidden && !top) || skip.is_some_and(|s| p == s) {
             return;
         }
         if p.is_dir() {
+            if !top && !options.include_subfolders {
+                return;
+            }
             let Ok(rd) = std::fs::read_dir(p) else { return };
             let mut v: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
             v.sort();
             for c in v {
-                walk(&c, skip, out, false);
+                walk(&c, skip, out, false, options);
             }
-        } else if top || is_supported(p) {
+        } else if top || (is_supported(p) && options.allows_extension(p)) {
             // explicitly named files are attempted even with an unknown extension (sniffed)
             out.push(p.to_string_lossy().to_string());
         }
     }
     let mut out = Vec::new();
     for p in paths {
-        walk(Path::new(p), skip, &mut out, true);
+        walk(Path::new(p), skip, &mut out, true, options);
     }
     let mut seen = std::collections::HashSet::new();
     out.retain(|p| seen.insert(p.clone()));
@@ -320,9 +406,19 @@ pub(crate) fn probe_paths(s: &Session, paths: &[String]) -> Vec<Result<ProbeInfo
 }
 
 fn probe_all(probe: Option<&crate::media::FileProbe>, paths: &[String], progress: &ScanProgress) -> Vec<Result<ProbeInfo, String>> {
+    probe_all_with_cancel(probe, paths, progress, &progress.cancel)
+}
+
+fn probe_all_with_cancel(
+    probe: Option<&crate::media::FileProbe>,
+    paths: &[String],
+    progress: &ScanProgress,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Vec<Result<ProbeInfo, String>> {
     use std::sync::atomic::Ordering::Relaxed;
+    let started = web_time::Instant::now();
     let Some(probe) = probe.cloned() else {
-        return paths
+        let results = paths
             .iter()
             .map(|p| {
                 Ok(ProbeInfo {
@@ -331,10 +427,12 @@ fn probe_all(probe: Option<&crate::media::FileProbe>, paths: &[String], progress
                 })
             })
             .collect();
+        progress.metrics.probe_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+        return results;
     };
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8).min(paths.len().max(1));
+        let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, MAX_IMPORT_PROBE_WORKERS).min(paths.len().max(1));
         if n > 1 {
             let mut results: Vec<Option<Result<ProbeInfo, String>>> = vec![None; paths.len()];
             let next = std::sync::atomic::AtomicUsize::new(0);
@@ -347,30 +445,138 @@ fn probe_all(probe: Option<&crate::media::FileProbe>, paths: &[String], progress
                             if i >= paths.len() {
                                 break;
                             }
-                            if progress.cancel.load(Relaxed) {
+                            if cancel.load(Relaxed) {
                                 break;
                             }
                             let r = probe(&paths[i]);
+                            if r.is_ok() {
+                                progress.metrics.probes.fetch_add(1, Relaxed);
+                            } else {
+                                progress.metrics.probe_failures.fetch_add(1, Relaxed);
+                            }
+                            if let Ok(info) = &r {
+                                progress.metrics.bytes_read.fetch_add(info.file_size, Relaxed);
+                            }
                             progress.done.fetch_add(1, Relaxed);
                             out.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
                         }
                     });
                 }
             });
+            progress.metrics.probe_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+            if cancel.load(Relaxed) {
+                progress.metrics.cancelled.store(true, Relaxed);
+            }
             return results.into_iter().map(|r| r.unwrap_or_else(|| Err("not probed".into()))).collect();
         }
     }
-    paths
+    let results: Vec<Result<ProbeInfo, String>> = paths
         .iter()
         .map(|p| {
-            if progress.cancel.load(Relaxed) {
+            if cancel.load(Relaxed) {
+                progress.metrics.cancelled.store(true, Relaxed);
                 return Err("cancelled".into());
             }
             let r = probe(p);
+            if r.is_ok() {
+                progress.metrics.probes.fetch_add(1, Relaxed);
+            } else {
+                progress.metrics.probe_failures.fetch_add(1, Relaxed);
+            }
+            if let Ok(info) = &r {
+                progress.metrics.bytes_read.fetch_add(info.file_size, Relaxed);
+            }
             progress.done.fetch_add(1, Relaxed);
             r
         })
-        .collect()
+        .collect();
+    progress.metrics.probe_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+    results
+}
+
+/// Read/parse sidecars concurrently after probes finish. Results stay indexed by source path, so
+/// naming, capture-time fallback, copy order, and duplicate decisions remain deterministic; file
+/// placement itself stays serial in [`ImportJob::prepare_files`].
+const MAX_SIDECAR_BYTES: u64 = 4 << 20;
+
+fn read_sidecar_packet(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let metadata = std::fs::metadata(path).ok()?;
+    if metadata.len() > MAX_SIDECAR_BYTES {
+        log::warn!("import {}: XMP sidecar exceeds {} bytes", path.display(), MAX_SIDECAR_BYTES);
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let mut packet = String::new();
+    let mut limited = file.take(MAX_SIDECAR_BYTES.saturating_add(1));
+    limited.read_to_string(&mut packet).ok()?;
+    (packet.len() as u64 <= MAX_SIDECAR_BYTES).then_some(packet)
+}
+
+fn read_sidecars(
+    paths: &[String],
+    probes: &[Result<ProbeInfo, String>],
+    eligible: &[bool],
+    naming: crate::sidecar::SidecarNaming,
+    cancel: &std::sync::atomic::AtomicBool,
+    metrics: &ImportMetrics,
+) -> Vec<Option<crate::sidecar::SidecarData>> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut out: Vec<Option<crate::sidecar::SidecarData>> = vec![None; paths.len()];
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    #[cfg(not(target_arch = "wasm32"))]
+    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, MAX_IMPORT_PROBE_WORKERS).min(paths.len().max(1));
+    #[cfg(target_arch = "wasm32")]
+    let workers = 1;
+    let read_one = |i: usize| {
+        if !eligible.get(i).copied().unwrap_or(false) {
+            return None;
+        }
+        let Some(Ok(info)) = probes.get(i) else { return None };
+        let started = web_time::Instant::now();
+        let raw = info.kind == MediaKind::Raw;
+        let packet =
+            crate::sidecar::find_sidecar(&paths[i], naming).and_then(|f| read_sidecar_packet(&f)).or_else(|| info.xmp.clone().filter(|_| raw));
+        let sidecar = packet.and_then(|x| match crate::sidecar::parse_sidecar(&x, raw) {
+            Ok(sc) => Some(sc),
+            Err(e) => {
+                log::warn!("import {}: XMP: {e}", paths[i]);
+                None
+            }
+        });
+        metrics.sidecar_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+        if sidecar.is_some() {
+            metrics.sidecars.fetch_add(1, Relaxed);
+        }
+        sidecar
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    if workers > 1 {
+        let shared = std::sync::Mutex::new(&mut out);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, Relaxed);
+                        if i >= paths.len() || cancel.load(Relaxed) {
+                            break;
+                        }
+                        let sidecar = read_one(i);
+                        shared.lock().unwrap_or_else(|e| e.into_inner())[i] = sidecar;
+                    }
+                });
+            }
+        });
+        return out;
+    }
+    for i in 0..paths.len() {
+        if cancel.load(Relaxed) {
+            metrics.cancelled.store(true, Relaxed);
+            break;
+        }
+        out[i] = read_one(i);
+    }
+    out
 }
 
 /// Copy `src` into `root`/`folders` as `name` (default: its own name), made unique with -1, -2…;
@@ -396,6 +602,8 @@ pub struct ScanInput {
     by_path: HashMap<PathBuf, (PhotoId, ImportCandidate)>,
     by_hash: HashMap<String, PhotoId>,
     cache: HashMap<String, ProbeInfo>,
+    pub raw_jpeg_policy: RawJpegImportPolicy,
+    pub scan_options: ImportScanOptions,
 }
 
 /// Progress and cancellation of a running [`scan_with`].
@@ -405,6 +613,78 @@ pub struct ScanProgress {
     pub total: std::sync::atomic::AtomicUsize,
     pub done: std::sync::atomic::AtomicUsize,
     pub cancel: std::sync::atomic::AtomicBool,
+    /// Fixed-size counters/timers for import diagnostics. No per-file history is retained.
+    pub metrics: std::sync::Arc<ImportMetrics>,
+}
+
+impl ScanProgress {
+    fn with_metrics(metrics: std::sync::Arc<ImportMetrics>) -> Self {
+        Self { total: Default::default(), done: Default::default(), cancel: Default::default(), metrics }
+    }
+}
+
+/// Bounded import instrumentation suitable for a progress panel or a CI probe. Counters are
+/// monotonic for one scan/job; stage times are nanoseconds and never retain paths or samples.
+#[derive(Default)]
+pub struct ImportMetrics {
+    pub expanded: std::sync::atomic::AtomicUsize,
+    pub skipped_paths: std::sync::atomic::AtomicUsize,
+    pub cache_hits: std::sync::atomic::AtomicUsize,
+    pub cache_misses: std::sync::atomic::AtomicUsize,
+    pub probes: std::sync::atomic::AtomicUsize,
+    pub probe_failures: std::sync::atomic::AtomicUsize,
+    pub bytes_read: std::sync::atomic::AtomicU64,
+    pub sidecars: std::sync::atomic::AtomicUsize,
+    pub transfers: std::sync::atomic::AtomicUsize,
+    pub transfer_failures: std::sync::atomic::AtomicUsize,
+    pub cancelled: std::sync::atomic::AtomicBool,
+    pub expand_ns: std::sync::atomic::AtomicU64,
+    pub probe_ns: std::sync::atomic::AtomicU64,
+    pub sidecar_ns: std::sync::atomic::AtomicU64,
+    pub transfer_ns: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportMetricsSnapshot {
+    pub expanded: usize,
+    pub skipped_paths: usize,
+    pub cache_hits: usize,
+    pub cache_misses: usize,
+    pub probes: usize,
+    pub probe_failures: usize,
+    pub bytes_read: u64,
+    pub sidecars: usize,
+    pub transfers: usize,
+    pub transfer_failures: usize,
+    pub cancelled: bool,
+    pub expand_ns: u64,
+    pub probe_ns: u64,
+    pub sidecar_ns: u64,
+    pub transfer_ns: u64,
+}
+
+impl ImportMetrics {
+    pub fn snapshot(&self) -> ImportMetricsSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        ImportMetricsSnapshot {
+            expanded: self.expanded.load(Relaxed),
+            skipped_paths: self.skipped_paths.load(Relaxed),
+            cache_hits: self.cache_hits.load(Relaxed),
+            cache_misses: self.cache_misses.load(Relaxed),
+            probes: self.probes.load(Relaxed),
+            probe_failures: self.probe_failures.load(Relaxed),
+            bytes_read: self.bytes_read.load(Relaxed),
+            sidecars: self.sidecars.load(Relaxed),
+            transfers: self.transfers.load(Relaxed),
+            transfer_failures: self.transfer_failures.load(Relaxed),
+            cancelled: self.cancelled.load(Relaxed),
+            expand_ns: self.expand_ns.load(Relaxed),
+            probe_ns: self.probe_ns.load(Relaxed),
+            sidecar_ns: self.sidecar_ns.load(Relaxed),
+            transfer_ns: self.transfer_ns.load(Relaxed),
+        }
+    }
 }
 
 /// The result of [`scan_with`]: the candidates, and the probes to keep for the import that follows.
@@ -415,6 +695,16 @@ pub struct ScanOutput {
 
 impl ScanInput {
     pub fn new(s: &mut Session, paths: &[String]) -> (Self, Vec<String>) {
+        Self::new_with_options(s, paths, ImportScanOptions::default())
+    }
+
+    pub fn new_with_policy(s: &mut Session, paths: &[String], raw_jpeg_policy: RawJpegImportPolicy) -> (Self, Vec<String>) {
+        let (mut input, paths) = Self::new_with_options(s, paths, ImportScanOptions::default());
+        input.raw_jpeg_policy = raw_jpeg_policy;
+        (input, paths)
+    }
+
+    pub fn new_with_options(s: &mut Session, paths: &[String], scan_options: ImportScanOptions) -> (Self, Vec<String>) {
         let skip = s.library.as_ref().filter(|l| l.on_disk).map(|l| l.dir.clone());
         let mut by_path = HashMap::new();
         let mut by_hash = HashMap::new();
@@ -438,7 +728,15 @@ impl ScanInput {
                 by_hash.insert(h.clone(), p.id);
             }
         }
-        let input = ScanInput { probe: s.media.file_probe.clone(), skip, by_path, by_hash, cache: std::mem::take(&mut s.import_probes) };
+        let input = ScanInput {
+            probe: s.media.file_probe.clone(),
+            skip,
+            by_path,
+            by_hash,
+            cache: std::mem::take(&mut s.import_probes),
+            raw_jpeg_policy: RawJpegImportPolicy::KeepBoth,
+            scan_options,
+        };
         (input, paths.to_vec())
     }
 }
@@ -447,26 +745,47 @@ impl ScanInput {
 /// against the library and earlier candidates). Nothing is added; the probes are kept for the
 /// import that follows.
 pub fn scan(s: &mut Session, paths: &[String]) -> Vec<ImportCandidate> {
-    let (input, paths) = ScanInput::new(s, paths);
+    scan_with_policy(s, paths, RawJpegImportPolicy::KeepBoth)
+}
+
+pub fn scan_with_policy(s: &mut Session, paths: &[String], policy: RawJpegImportPolicy) -> Vec<ImportCandidate> {
+    let (input, paths) = ScanInput::new_with_policy(s, paths, policy);
     let out = scan_with(input, &paths, &ScanProgress::default());
     s.import_probes = out.probes;
     out.candidates
+}
+
+fn cached_probe_is_current(path: &str, info: &ProbeInfo) -> bool {
+    let Some(metadata) = std::fs::metadata(path).ok() else { return false };
+    metadata.len() == info.file_size
+        && info.source_stamp.is_none_or(|stamp| {
+            metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).is_some_and(|d| d.as_nanos() == stamp)
+        })
 }
 
 /// [`scan`] without the session, so it can run on a worker thread. Stops early (returning what it
 /// has) when `progress.cancel` is set.
 pub fn scan_with(mut input: ScanInput, paths: &[String], progress: &ScanProgress) -> ScanOutput {
     use std::sync::atomic::Ordering::Relaxed;
-    let files = expand(paths, input.skip.as_deref());
+    let expand_started = web_time::Instant::now();
+    let files = expand_with_options(paths, input.skip.as_deref(), &input.scan_options);
+    progress.metrics.expanded.fetch_add(files.len(), Relaxed);
+    progress.metrics.expand_ns.fetch_add(expand_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
     let todo: Vec<String> = files.iter().filter(|f| !input.by_path.contains_key(Path::new(f))).cloned().collect();
+    progress.metrics.skipped_paths.fetch_add(files.len().saturating_sub(todo.len()), Relaxed);
     progress.total.store(todo.len(), Relaxed);
-    // probes from a preceding `scan` are reused when the file is unchanged (same size)
+    // probes from a preceding `scan` are reused only when size and native modification stamp match
     let cached: Vec<Option<ProbeInfo>> = todo
         .iter()
         .map(|f| {
             let info = input.cache.remove(f)?;
-            let size = std::fs::metadata(f).map(|m| m.len()).ok();
-            (size.is_none() || size == Some(info.file_size)).then_some(info)
+            let valid = cached_probe_is_current(f, &info);
+            if valid {
+                progress.metrics.cache_hits.fetch_add(1, Relaxed);
+            } else {
+                progress.metrics.cache_misses.fetch_add(1, Relaxed);
+            }
+            valid.then_some(info)
         })
         .collect();
     let missing: Vec<String> = todo.iter().zip(&cached).filter(|(_, c)| c.is_none()).map(|(f, _)| f.clone()).collect();
@@ -492,6 +811,7 @@ pub fn scan_with(mut input: ScanInput, paths: &[String], progress: &ScanProgress
             Some(Ok(info)) => {
                 (c.format, c.kind, c.width, c.height, c.file_size, c.captured) =
                     (info.format.clone(), info.kind, info.width, info.height, info.file_size, info.captured.clone());
+                c.pairing_camera = info.meta.camera.clone();
                 c.preview_only = info.preview_only.clone();
                 if let Some(h) = &info.content_hash {
                     match seen_hash.get(h) {
@@ -511,7 +831,31 @@ pub fn scan_with(mut input: ScanInput, paths: &[String], progress: &ScanProgress
         }
         out.push(c);
     }
+    annotate_pairings(&mut out, input.raw_jpeg_policy);
     ScanOutput { candidates: out, probes: kept }
+}
+
+fn annotate_pairings(candidates: &mut [ImportCandidate], policy: RawJpegImportPolicy) {
+    let inputs: Vec<crate::import_pairs::PairInput> = candidates
+        .iter()
+        .map(|c| crate::import_pairs::PairInput {
+            path: c.path.clone(),
+            kind: c.kind,
+            captured: c.captured.clone(),
+            camera: c.pairing_camera.clone(),
+            width: c.width,
+            height: c.height,
+        })
+        .collect();
+    for pair in crate::import_pairs::classify(&inputs) {
+        let raw_path = inputs[pair.raw].path.clone();
+        let jpeg_path = inputs[pair.jpeg].path.clone();
+        candidates[pair.raw].pairing = Some(RawJpegPair { with: jpeg_path.clone(), kind: RawJpegPairKind::Raw, relation: pair.relation.into() });
+        candidates[pair.jpeg].pairing = Some(RawJpegPair { with: raw_path, kind: RawJpegPairKind::Jpeg, relation: pair.relation.into() });
+        if policy == RawJpegImportPolicy::RawOnly {
+            candidates[pair.jpeg].policy_excluded = Some("rawOnly".into());
+        }
+    }
 }
 
 /// Import files/folders. See the module docs.
@@ -556,6 +900,8 @@ pub struct ImportJob {
     /// Files found so far (folders expanded) and handled so far, for progress.
     pub total: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub done: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Fixed-size diagnostics shared by preparation workers and their caller.
+    pub metrics: std::sync::Arc<ImportMetrics>,
 }
 
 /// The outcome of [`ImportJob::prepare`] for one batch, in file order.
@@ -682,6 +1028,10 @@ impl ImportJob {
         let mut by_path = HashMap::new();
         let mut by_hash = HashMap::new();
         for p in s.catalog.photos() {
+            // a trashed photo is replaced by a fresh import, so it doesn't count as a duplicate
+            if p.deleted && opts.on_deleted == OnDeleted::Fresh {
+                continue;
+            }
             if let Source::File { path } = &p.source {
                 by_path.insert(path.clone(), (p.id, p.local));
             }
@@ -704,6 +1054,7 @@ impl ImportJob {
             now: (s.clock)(),
             total: Default::default(),
             done: Default::default(),
+            metrics: Default::default(),
         })
     }
 
@@ -718,8 +1069,11 @@ impl ImportJob {
     /// Expand `paths` (folders recursively, the library's own folder skipped) into the files an
     /// import would handle; counted in [`ImportJob::total`].
     pub fn expand(&self, paths: &[String]) -> Vec<String> {
-        let files = expand(paths, self.lib_dir.as_deref());
+        let started = web_time::Instant::now();
+        let files = expand_with_options(paths, self.lib_dir.as_deref(), &self.opts.scan);
         self.total.fetch_add(files.len(), std::sync::atomic::Ordering::Relaxed);
+        self.metrics.expanded.fetch_add(files.len(), std::sync::atomic::Ordering::Relaxed);
+        self.metrics.expand_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, std::sync::atomic::Ordering::Relaxed);
         files
     }
 
@@ -752,15 +1106,38 @@ impl ImportJob {
         }
 
         // files a preceding scan already probed are not read again (a network share is slow to read)
-        let cached: Vec<Option<ProbeInfo>> = todo.iter().map(|f| self.cache.remove(f)).collect();
+        let cached: Vec<Option<ProbeInfo>> = todo
+            .iter()
+            .map(|f| {
+                let info = self.cache.remove(f)?;
+                if cached_probe_is_current(f, &info) {
+                    self.metrics.cache_hits.fetch_add(1, Relaxed);
+                    Some(info)
+                } else {
+                    self.metrics.cache_misses.fetch_add(1, Relaxed);
+                    None
+                }
+            })
+            .collect();
         let missing: Vec<String> = todo.iter().zip(&cached).filter(|(_, c)| c.is_none()).map(|(f, _)| f.clone()).collect();
-        let progress = ScanProgress::default();
-        let mut fresh = probe_all(self.probe.as_ref(), &missing, &progress).into_iter();
+        let progress = ScanProgress::with_metrics(self.metrics.clone());
+        let mut fresh = probe_all_with_cancel(self.probe.as_ref(), &missing, &progress, cancel).into_iter();
         let probed: Vec<Result<ProbeInfo, String>> =
             cached.into_iter().map(|c| c.map(Ok).unwrap_or_else(|| fresh.next().unwrap_or_else(|| Err("not probed".into())))).collect();
         crate::memory::release();
-        for (path, info) in todo.into_iter().zip(probed) {
+        let mut sidecar_hashes: std::collections::HashSet<String> = self.by_hash.keys().cloned().collect();
+        let sidecar_eligible: Vec<bool> = probed
+            .iter()
+            .map(|r| match r {
+                Ok(_) if opts.local => true,
+                Ok(info) => info.content_hash.as_ref().is_none_or(|h| sidecar_hashes.insert(h.clone())),
+                Err(_) => false,
+            })
+            .collect();
+        let sidecars = read_sidecars(&todo, &probed, &sidecar_eligible, self.naming, cancel, &self.metrics);
+        for ((path, info), sidecar) in todo.into_iter().zip(probed).zip(sidecars) {
             if cancel.load(Relaxed) {
+                self.metrics.cancelled.store(true, Relaxed);
                 break;
             }
             self.done.fetch_add(1, Relaxed);
@@ -781,20 +1158,10 @@ impl ImportJob {
             }
             // the XMP sidecar (or a raw's embedded XMP), read before copying: its capture time files
             // and names the copy when the file itself has none
-            let raw = info.kind == MediaKind::Raw;
-            let packet = crate::sidecar::find_sidecar(&path, self.naming)
-                .and_then(|f| std::fs::read_to_string(f).ok())
-                .or_else(|| info.xmp.clone().filter(|_| raw));
-            let sidecar = packet.and_then(|x| match crate::sidecar::parse_sidecar(&x, raw) {
-                Ok(sc) => Some(sc),
-                Err(e) => {
-                    log::warn!("import {path}: XMP: {e}");
-                    None
-                }
-            });
             if info.captured.is_none() {
                 info.captured = sidecar.as_ref().and_then(|sc| sc.captured.clone());
             }
+            let transfer_started = web_time::Instant::now();
             let mut placed = None;
             let stored = match (mode, &self.copy_root) {
                 (ImportMode::Copy | ImportMode::Move, Some(root))
@@ -822,6 +1189,8 @@ impl ImportJob {
                                 dst
                             }
                             Err(e) => {
+                                self.metrics.transfer_failures.fetch_add(1, Relaxed);
+                                self.metrics.transfer_ns.fetch_add(transfer_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
                                 out.items.push(PreparedItem::Failed(path, e));
                                 continue;
                             }
@@ -834,6 +1203,8 @@ impl ImportJob {
                         match copy_into(root, &path, &folders, name.as_deref(), info.content_hash.as_deref()) {
                             Ok(p) => p,
                             Err(e) => {
+                                self.metrics.transfer_failures.fetch_add(1, Relaxed);
+                                self.metrics.transfer_ns.fetch_add(transfer_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
                                 out.items.push(PreparedItem::Failed(path, e));
                                 continue;
                             }
@@ -847,6 +1218,10 @@ impl ImportJob {
                 }
                 _ => path.clone(),
             };
+            if matches!(mode, ImportMode::Copy | ImportMode::Move) {
+                self.metrics.transfers.fetch_add(1, Relaxed);
+                self.metrics.transfer_ns.fetch_add(transfer_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+            }
             if let Some(h) = &info.content_hash {
                 self.by_hash.insert(h.clone(), None);
             }
@@ -884,6 +1259,20 @@ pub fn commit_prepared(s: &mut Session, opts: &ImportOptions, now: &str, prepare
     let mut placed: Vec<crate::import_move::Placed> = Vec::new();
     // photos added by this batch, by content (a duplicate of a file earlier in the import names it)
     let mut new_hash: HashMap<String, PhotoId> = HashMap::new();
+    // Fresh: trashed photos a new import replaces (by content or by file), each removed once
+    let (mut trash_hash, mut trash_path): (HashMap<String, PhotoId>, HashMap<String, PhotoId>) = Default::default();
+    if opts.on_deleted == OnDeleted::Fresh {
+        for p in s.catalog.photos().filter(|p| p.deleted) {
+            if let Some(h) = &p.content_hash {
+                trash_hash.insert(h.clone(), p.id);
+            }
+            if let Source::File { path } = &p.source {
+                trash_path.insert(path.clone(), p.id);
+            }
+        }
+    }
+    let mut purge: Vec<PhotoId> = Vec::new();
+    let mut purged: std::collections::HashSet<PhotoId> = Default::default();
     for it in prepared.items {
         match it {
             PreparedItem::Promote(id) => {
@@ -897,7 +1286,16 @@ pub fn commit_prepared(s: &mut Session, opts: &ImportOptions, now: &str, prepare
                     let h = hash?;
                     new_hash.get(&h).copied().or_else(|| s.catalog.photos().find(|p| p.content_hash.as_deref() == Some(h.as_str())).map(|p| p.id))
                 });
-                report.duplicates.push(Duplicate { path, existing: existing.map(|i| i.0), reason });
+                let trashed = existing.filter(|id| s.catalog.photo(*id).is_some_and(|p| p.deleted));
+                match trashed {
+                    Some(id) if opts.on_deleted == OnDeleted::Restore => {
+                        if !report.restored.contains(&id.0) {
+                            ops.push(Op::SetDeleted { id, deleted: false });
+                            report.restored.push(id.0);
+                        }
+                    }
+                    _ => report.duplicates.push(Duplicate { path, existing: existing.map(|i| i.0), reason, existing_deleted: trashed.is_some() }),
+                }
             }
             PreparedItem::Failed(path, e) => report.failed.push((path, e)),
             PreparedItem::Kept(k) => report.kept.push(k),
@@ -907,6 +1305,11 @@ pub fn commit_prepared(s: &mut Session, opts: &ImportOptions, now: &str, prepare
                 let id = s.catalog.alloc_photo_id();
                 if let Some(h) = &info.content_hash {
                     new_hash.insert(h.clone(), id);
+                }
+                for old in info.content_hash.as_ref().and_then(|h| trash_hash.get(h)).into_iter().chain(trash_path.get(&stored)) {
+                    if purged.insert(*old) {
+                        purge.push(*old);
+                    }
                 }
                 let sidecar = sidecar.map(|sc| sc.resolve_label(&s.catalog)).filter(|sc| *sc != crate::sidecar::SidecarData::default());
                 // a copy is catalogued under its new name
@@ -951,9 +1354,18 @@ pub fn commit_prepared(s: &mut Session, opts: &ImportOptions, now: &str, prepare
             }
         }
     }
+    // (built against the catalog as it is: one op list for all of them, ahead of the additions)
+    if !purge.is_empty() {
+        ops.insert(0, s.catalog.delete_photos_permanently_ops(&purge));
+    }
     let log0 = s.pending_log.len();
+    let (verb, n) = if report.imported.is_empty() && !report.restored.is_empty() {
+        ("Restore", report.restored.len())
+    } else {
+        ("Add", report.imported.len().max(1))
+    };
     if !ops.is_empty()
-        && let Err(e) = s.commit(&format!("Add {} Photo{}", ops.len(), if ops.len() == 1 { "" } else { "s" }), Op::Batch { ops })
+        && let Err(e) = s.commit(&format!("{verb} {n} Photo{}", if n == 1 { "" } else { "s" }), Op::Batch { ops })
     {
         // nothing was catalogued: take the moves back (their sources were never touched)
         placed.iter().for_each(crate::import_move::rollback);
@@ -1069,6 +1481,7 @@ impl Session {
 #[cfg(test)]
 mod prepared_tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn revalidate_add_only_converts_matching_ready_item() {
@@ -1091,5 +1504,130 @@ mod prepared_tests {
         prepared.revalidate_add(&s);
         assert!(matches!(prepared.items.first(), Some(PreparedItem::Duplicate { reason: "path", .. })));
         assert!(matches!(prepared.items.get(1), Some(PreparedItem::Ready(_))));
+    }
+
+    #[test]
+    fn scan_options_filter_extensions_case_insensitively_before_probe() {
+        let root = std::env::temp_dir().join(format!("lightcraft-import-filter-{}", std::process::id()));
+        let nested = root.join("nested");
+        let _ = std::fs::create_dir_all(&nested);
+        let _ = std::fs::write(root.join("raw.CR3"), b"raw");
+        let _ = std::fs::write(root.join("render.JPG"), b"jpg");
+        let _ = std::fs::write(nested.join("nested.CR3"), b"raw");
+        let options = ImportScanOptions { include_subfolders: false, allowed_extensions: vec![".cr3".into()], excluded_extensions: Vec::new() };
+        let files = expand_with_options(&[root.to_string_lossy().into()], None, &options);
+        assert_eq!(files, vec![root.join("raw.CR3").to_string_lossy().to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_options_keep_explicit_files_even_when_extension_excluded() {
+        let root = std::env::temp_dir().join(format!("lightcraft-import-explicit-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&root);
+        let explicit = root.join("photo.JPG");
+        let _ = std::fs::write(&explicit, b"jpg");
+        let options = ImportScanOptions { include_subfolders: true, allowed_extensions: vec!["cr3".into()], excluded_extensions: vec!["JPG".into()] };
+        let files = expand_with_options(&[explicit.to_string_lossy().into()], None, &options);
+        assert_eq!(files, vec![explicit.to_string_lossy().to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cancelled_scan_does_not_start_probe_workers() {
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let calls_for_probe = calls.clone();
+        let probe: crate::media::FileProbe = std::sync::Arc::new(move |_| {
+            calls_for_probe.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(ProbeInfo { format: "JPEG".into(), file_size: 1, ..Default::default() })
+        });
+        let input = ScanInput {
+            probe: Some(probe),
+            skip: None,
+            by_path: HashMap::new(),
+            by_hash: HashMap::new(),
+            cache: HashMap::new(),
+            raw_jpeg_policy: Default::default(),
+            scan_options: Default::default(),
+        };
+        let progress = ScanProgress::default();
+        progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let out = scan_with(input, &["cancel-a.jpg".into(), "cancel-b.raw".into()], &progress);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(out.candidates.iter().all(|c| c.error.as_deref() == Some("not probed")));
+        assert!(progress.metrics.snapshot().cancelled);
+    }
+
+    #[test]
+    fn scan_keeps_order_and_content_dedup_after_partial_probe_failure() {
+        let probe: crate::media::FileProbe = std::sync::Arc::new(|path| {
+            if path.ends_with("bad.jpg") {
+                return Err("synthetic read failure".into());
+            }
+            let hash = if path.ends_with("same-1.jpg") || path.ends_with("same-2.jpg") { "same" } else { path };
+            Ok(ProbeInfo { format: "JPEG".into(), file_size: 4, content_hash: Some(hash.into()), ..Default::default() })
+        });
+        let input = ScanInput {
+            probe: Some(probe),
+            skip: None,
+            by_path: HashMap::new(),
+            by_hash: HashMap::new(),
+            cache: HashMap::new(),
+            raw_jpeg_policy: Default::default(),
+            scan_options: Default::default(),
+        };
+        let out = scan_with(input, &["same-1.jpg".into(), "bad.jpg".into(), "same-2.jpg".into()], &ScanProgress::default());
+        assert_eq!(out.candidates.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(), ["same-1.jpg", "bad.jpg", "same-2.jpg"]);
+        assert_eq!(out.candidates[1].error.as_deref(), Some("synthetic read failure"));
+        assert_eq!(out.candidates[2].duplicate.as_deref(), Some("content"));
+    }
+
+    #[test]
+    fn cache_stamp_reprobes_same_size_replacement() {
+        let path = std::env::temp_dir().join(format!("lightcraft-import-stamp-{}.jpg", std::process::id()));
+        std::fs::write(&path, b"abc").unwrap();
+        let path_s = path.to_string_lossy().to_string();
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let calls_for_probe = calls.clone();
+        let probe: crate::media::FileProbe = std::sync::Arc::new(move |_| {
+            calls_for_probe.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(ProbeInfo { format: "JPEG".into(), file_size: 3, source_stamp: Some(1), ..Default::default() })
+        });
+        let mut cache = HashMap::new();
+        cache.insert(path_s.clone(), ProbeInfo { format: "JPEG".into(), file_size: 3, source_stamp: Some(0), ..Default::default() });
+        let input = ScanInput {
+            probe: Some(probe),
+            skip: None,
+            by_path: HashMap::new(),
+            by_hash: HashMap::new(),
+            cache,
+            raw_jpeg_policy: Default::default(),
+            scan_options: Default::default(),
+        };
+        let out = scan_with(input, &[path_s], &ScanProgress::default());
+        let _ = std::fs::remove_file(path);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(out.candidates.len(), 1);
+    }
+
+    #[test]
+    fn sidecar_prefetch_preserves_order_and_honors_cancel() {
+        let root = std::env::temp_dir().join(format!("lightcraft-import-sidecars-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let paths: Vec<String> = ["a.jpg", "b.jpg"].iter().map(|name| root.join(name).to_string_lossy().into()).collect();
+        for path in &paths {
+            std::fs::write(Path::new(path).with_extension("xmp"), r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"/>"#).unwrap();
+        }
+        let probes = vec![
+            Ok(ProbeInfo { format: "JPEG".into(), file_size: 1, ..Default::default() }),
+            Ok(ProbeInfo { format: "JPEG".into(), file_size: 2, ..Default::default() }),
+        ];
+        let metrics = ImportMetrics::default();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let sidecars = read_sidecars(&paths, &probes, &[true, true], crate::sidecar::SidecarNaming::Stem, &cancel, &metrics);
+        assert!(sidecars.iter().all(Option::is_some));
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let cancelled = read_sidecars(&paths, &probes, &[true, true], crate::sidecar::SidecarNaming::Stem, &cancel, &metrics);
+        assert!(cancelled.iter().all(Option::is_none));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

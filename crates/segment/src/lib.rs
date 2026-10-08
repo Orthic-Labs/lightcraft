@@ -85,6 +85,56 @@ pub fn is_model_dir(dir: &Path) -> bool {
     dir.join(WEIGHTS_FILE).is_file() && dir.join("vocab.json").is_file() && dir.join("merges.txt").is_file()
 }
 
+/// Validate a user-selected checkpoint without loading tensors into a device.
+///
+/// The weights header and every tensor range are checked by `Weights::open`; tokenizer files
+/// are size-bounded before parsing. The official checkpoint size is pinned by the fetch manifest.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn validate_model_dir(dir: &Path) -> Result<()> {
+    validate_model_dir_with_progress(dir, |_, _| true)
+}
+
+/// Validate a selected checkpoint while reporting streamed weight-hash progress. Returning
+/// `false` from callback cancels before model files are activated.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn validate_model_dir_with_progress<F>(dir: &Path, mut progress: F) -> Result<()>
+where
+    F: FnMut(u64, u64) -> bool,
+{
+    if !dir.is_dir() {
+        return Err(Error::Missing(dir.to_path_buf()));
+    }
+    let weights_path = dir.join(WEIGHTS_FILE);
+    let weights_spec =
+        fetch::SAM3_FILES.iter().find(|spec| spec.name == WEIGHTS_FILE).ok_or_else(|| Error::Model("SAM 3 manifest has no weights entry".into()))?;
+    let weights_size = std::fs::metadata(&weights_path).map_err(|e| Error::Model(format!("{}: {e}", weights_path.display())))?.len();
+    if weights_size != fetch::SAM3_WEIGHTS_SIZE {
+        return Err(Error::Model(format!(
+            "{}: expected official SAM 3 checkpoint size {}, found {weights_size}",
+            weights_path.display(),
+            fetch::SAM3_WEIGHTS_SIZE
+        )));
+    }
+    let verified = fetch::verify_file_progress(weights_spec, &weights_path, |done, total| progress(done, total))
+        .map_err(|e| Error::Model(format!("{}: {e}", weights_path.display())))?;
+    let Some(verified) = verified else {
+        return Err(Error::Model("SAM 3 model validation cancelled".into()));
+    };
+    if !verified {
+        return Err(Error::Model(format!("{}: SHA-256 does not match the pinned SAM 3 manifest", weights_path.display())));
+    }
+    let _ = weights::Weights::open(&weights_path)?;
+    for name in ["vocab.json", "merges.txt"] {
+        let path = dir.join(name);
+        let size = std::fs::metadata(&path).map_err(|e| Error::Model(format!("{}: {e}", path.display())))?.len();
+        if size > 16 << 20 {
+            return Err(Error::Model(format!("{}: tokenizer file is too large", path.display())));
+        }
+    }
+    let _ = tokenizer::Tokenizer::load(dir)?;
+    Ok(())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 /// The best device here: Metal on macOS (when a GPU is available), else the CPU.
 pub fn best_device() -> Device {

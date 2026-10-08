@@ -369,6 +369,125 @@ pub(crate) fn synthetic_dng_with(xmp: Option<&str>, metadata: lightcraft_meta::M
     write_dng(&raw, &DngWriteOptions { xmp: xmp.map(str::to_string), ..Default::default() }).unwrap()
 }
 
+/// Serialized LinearRaw DNG with varied keys, highlight detail, non-neutral as-shot WB, & a
+/// configurable BaselineExposure. RAW Auto therefore exercises TIFF decode, loader, & pipeline.
+fn synthetic_auto_dng(baseline_exposure: f64) -> Vec<u8> {
+    use lightcraft_color::Mat3;
+    use lightcraft_geom::Orientation;
+    use lightcraft_raw::{BlackLevel, ColorData, DngWriteOptions, OpcodeLists, RawData, RawFormat, RawImage, Rect, write_dng};
+    let (w, h) = (48usize, 32usize);
+    let data = (0..w * h)
+        .flat_map(|i| {
+            let x = i % w;
+            let p = if x < 10 {
+                [0.55, 0.48, 0.4]
+            } else if x < 34 {
+                [0.045, 0.04, 0.035]
+            } else {
+                [0.02, 0.018, 0.016]
+            };
+            p.into_iter()
+        })
+        .collect();
+    let raw = RawImage {
+        format: RawFormat::Dng,
+        width: w,
+        height: h,
+        cpp: 3,
+        data: RawData::F32(data),
+        cfa: None,
+        bits: 32,
+        black: BlackLevel::uniform(0.0),
+        white: vec![1.0],
+        active_area: Rect::new(0, 0, w, h),
+        crop: Rect::new(0, 0, w, h),
+        orientation: Orientation::Normal,
+        color: ColorData {
+            illuminant: [21, 0],
+            color_matrix: [Some(Mat3::IDENTITY), None],
+            forward_matrix: [Some(Mat3::IDENTITY), None],
+            as_shot_neutral: Some([1.25, 1.0, 0.8]),
+            baseline_exposure,
+            ..Default::default()
+        },
+        wb_multipliers: None,
+        linearized: false,
+        opcodes: OpcodeLists::default(),
+        metadata: lightcraft_meta::Metadata::default(),
+    };
+    write_dng(&raw, &DngWriteOptions::default()).unwrap()
+}
+
+#[test]
+fn serialized_raw_baseline_exposure_is_applied_once_before_auto_render() {
+    let plain = synthetic_auto_dng(0.0);
+    let boosted = synthetic_auto_dng(2.0);
+    let (a, info_a) = crate::files::load_bytes(&plain, 96).unwrap();
+    let (b, info_b) = crate::files::load_bytes(&boosted, 96).unwrap();
+    assert!(info_a.raw && info_b.raw);
+    let mean = |img: &lightcraft_raster::Rgb32f| img.data.iter().map(|p| lightcraft_color::luminance_2020(*p)).sum::<f32>() / img.data.len() as f32;
+    let ratio = mean(&b) / mean(&a).max(1e-6);
+    assert!((ratio - 4.0).abs() < 0.08, "BaselineExposure gain applied more/less than once: {ratio:.3}");
+
+    let auto = |src: &lightcraft_raster::Rgb32f, info: &crate::pipeline::SourceInfo| {
+        let mut s = lightcraft_develop::DevelopSettings::default();
+        let v = crate::pipeline::auto::auto_tone(src, info, &s);
+        s.light.exposure = v.exposure;
+        s.light.contrast = v.contrast;
+        s.light.highlights = v.highlights;
+        s.light.shadows = v.shadows;
+        s.light.whites = v.whites;
+        s.light.blacks = v.blacks;
+        s.color.vibrance = v.vibrance;
+        s.color.saturation = v.saturation;
+        (s, v)
+    };
+    let (sa, va) = auto(&a, &info_a);
+    let (sb, vb) = auto(&b, &info_b);
+    assert!((va.exposure - vb.exposure - 2.0).abs() < 0.12, "serialized BaselineExposure changed Auto by more/less than 2 EV: {va:?} vs {vb:?}");
+    let ra = crate::pipeline::render(&a, &info_a, &sa, &crate::pipeline::RenderRequest::fit(48, 48)).image;
+    let rb = crate::pipeline::render(&b, &info_b, &sb, &crate::pipeline::RenderRequest::fit(48, 48)).image;
+    let luma8 = |img: &lightcraft_raster::Rgba8| {
+        img.data
+            .iter()
+            .map(|p| {
+                let c = [
+                    lightcraft_color::transfer::decode_srgb8(p[0]),
+                    lightcraft_color::transfer::decode_srgb8(p[1]),
+                    lightcraft_color::transfer::decode_srgb8(p[2]),
+                ];
+                lightcraft_color::luminance_2020(lightcraft_color::SRGB.to_space(&lightcraft_color::REC2020).apply_f32(c))
+            })
+            .sum::<f32>()
+            / img.data.len() as f32
+    };
+    let median8 = |img: &lightcraft_raster::Rgba8| {
+        let mut values: Vec<_> = img
+            .data
+            .iter()
+            .map(|p| {
+                let c = [
+                    lightcraft_color::transfer::decode_srgb8(p[0]),
+                    lightcraft_color::transfer::decode_srgb8(p[1]),
+                    lightcraft_color::transfer::decode_srgb8(p[2]),
+                ];
+                lightcraft_color::luminance_2020(lightcraft_color::SRGB.to_space(&lightcraft_color::REC2020).apply_f32(c))
+            })
+            .collect::<Vec<_>>();
+        values.sort_by(f32::total_cmp);
+        values[values.len() / 2]
+    };
+    let rendered = (luma8(&ra), luma8(&rb));
+    let medians = (median8(&ra), median8(&rb));
+    assert!(
+        rendered.0.is_finite() && rendered.1.is_finite() && rendered.0 > 0.01 && rendered.1 > 0.01,
+        "Auto render was unexpectedly dark/nonfinite: {rendered:?}"
+    );
+    let ratio = rendered.1 / rendered.0.max(1e-6);
+    assert!((0.65..=1.5).contains(&ratio), "Auto rendered luminance drifted with BaselineExposure: {rendered:?}, ratio {ratio:.3}");
+    assert!((medians.1 - medians.0).abs() < 0.12, "Auto rendered medians drifted with BaselineExposure: {medians:?}");
+}
+
 #[test]
 fn dng_embedded_crs_settings_are_read_on_import() {
     let src = temp_dir("dng");

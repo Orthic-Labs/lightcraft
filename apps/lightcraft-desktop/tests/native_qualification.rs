@@ -49,9 +49,13 @@ fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, _cata
         .env
         .iter()
         .filter(|(key, _)| {
+            // Launch owns this value on every platform; workspace's suite root is separate.
+            if key.as_str() == "RIGHTKIT_SUITE_ROOT" {
+                return false;
+            }
             #[cfg(target_os = "macos")]
             {
-                key.starts_with("RIGHTKIT_") && key != "RIGHTKIT_SUITE_ROOT"
+                key.starts_with("RIGHTKIT_")
             }
             #[cfg(not(target_os = "macos"))]
             {
@@ -1147,6 +1151,8 @@ fn native_hidden_control_journeys() {
         "preferences",
         "gesture",
         "editingTools",
+        "importFilters",
+        "modelSetup",
         "arwImport",
         "lightroomImport",
         "catalogRecovery",
@@ -1921,6 +1927,42 @@ fn native_hidden_control_journeys() {
                         wait_for_rendered_preview(control, "img.stage-preview", None);
                         capture_visible_tool_preview(control, &scenario.dir().join("tool-red-eye.png"));
                         assert_eq!(red_eye["active"].as_u64(), Some(active));
+                    }
+                    "importFilters" => {
+                        let folder = inputs.png.parent().expect("media folder must exist");
+                        let png_only = import_review(control, json!({"paths": [folder], "includeSubfolders": false, "allowedExtensions": [" .PNG "]}));
+                        let candidates = png_only["candidates"].as_array().expect("filtered review must return candidates");
+                        assert_eq!(candidates.len(), 1, "PNG filter must exclude ARW: {png_only}");
+                        let provisional = &candidates[0]["preview"];
+                        assert_eq!(provisional["state"], "provisional", "review must show quick preview before import");
+                        assert!(provisional["handle"].as_str().is_some_and(|handle| !handle.is_empty()));
+                        assert!(provisional["width"].as_u64().is_some_and(|width| width > 0 && width <= 256));
+                        control.command("lc_preview_ack", &json!({"handle": provisional["handle"]})).expect("review preview lease must release");
+                        let raw_only = import_review(control, json!({"paths": [folder], "excludedExtensions": ["png"]}));
+                        assert_eq!(raw_only["candidates"].as_array().map(Vec::len), Some(1), "exclusion must leave ARW");
+                        let explicit = import_review(control, json!({"paths": [inputs.png], "allowedExtensions": ["arw"]}));
+                        assert_eq!(explicit["candidates"].as_array().map(Vec::len), Some(1), "explicit chosen file must be retained");
+                        fs::write(scenario.dir().join("import-filters.json"), serde_json::to_vec_pretty(&json!({"png": png_only, "raw": raw_only, "explicit": explicit})).expect("filter evidence must serialize")).expect("filter evidence must save");
+                    }
+                    "modelSetup" => {
+                        let folder = scenario.dir().join("invalid-model");
+                        fs::create_dir_all(&folder).expect("malformed model folder must stage");
+                        fs::write(folder.join("model.safetensors"), b"invalid model").expect("malformed weights must stage");
+                        let before = run(control, "segment.model.status", Value::Null);
+                        let started = run(control, "segment.model.selectFolder", json!({"path": folder}));
+                        assert_eq!(started["pending"].as_bool(), Some(true), "folder selection must start background validation");
+                        let responsive = snapshot(control);
+                        assert!(responsive["revision"].is_number(), "owner snapshot must remain responsive during validation");
+                        let mut finished = Value::Null;
+                        for _ in 0..100 {
+                            finished = run(control, "segment.model.status", Value::Null);
+                            if finished["validation"]["finished"].as_bool() == Some(true) { break; }
+                            sleep(Duration::from_millis(50));
+                        }
+                        assert_eq!(finished["validation"]["finished"].as_bool(), Some(true));
+                        assert!(finished["validation"]["error"].as_str().is_some_and(|error| !error.is_empty()), "malformed model must report actionable failure");
+                        assert_eq!(finished["dir"], before["dir"], "failed validation must preserve configured model folder");
+                        fs::write(scenario.dir().join("model-validation.json"), serde_json::to_vec_pretty(&finished).expect("validation evidence must serialize")).expect("validation evidence must save");
                     }
                     "arwImport" => {
                         let imported = import_file(control, &inputs.arw);

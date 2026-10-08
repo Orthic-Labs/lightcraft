@@ -30,6 +30,7 @@ const CONTRIBUTORS_JSON: &str = include_str!("../../../contributors/contributors
 struct AppState {
     host: Option<DesktopHandle>,
     preferences: Preferences,
+    gpu_recovery: Arc<AtomicBool>,
     startup_error: Option<String>,
     startup_warnings: Vec<String>,
     /// One-shot close override set only by an explicit user-facing quit action.
@@ -70,9 +71,13 @@ mod tauri_commands {
         let host = state.host.clone();
         let error = state.startup_error.clone();
         let warnings = state.startup_warnings.clone();
+        let gpu_recovery = state.gpu_recovery.clone();
         blocking(move || {
-            let snapshot =
+            let mut snapshot =
                 host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into())).and_then(DesktopHandle::snapshot)?;
+            if gpu_recovery.load(Ordering::Acquire) {
+                mask_snapshot_gpu(&mut snapshot);
+            }
             Ok(merge_startup_warnings(snapshot, &warnings))
         })
         .await
@@ -99,6 +104,19 @@ mod tauri_commands {
         let error = state.startup_error.clone();
         blocking(move || {
             host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into())).and_then(|host| host.preview(request))
+        })
+        .await
+    }
+
+    #[tauri::command]
+    pub(super) async fn lc_preview_quick(
+        state: State<'_, AppState>,
+        request: PreviewRequest,
+    ) -> Result<lightcraft_desktop_host::PreviewDescriptor, String> {
+        let host = state.host.clone();
+        let error = state.startup_error.clone();
+        blocking(move || {
+            host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into())).and_then(|host| host.preview_quick(request))
         })
         .await
     }
@@ -145,15 +163,21 @@ mod tauri_commands {
         let host = state.host.clone();
         let startup_error = state.startup_error.clone();
         let patch = preference_patch_for_window(&window, patch);
+        let clear_gpu_recovery = patch.as_ref().and_then(gpu_preference_requested) == Some(true);
+        let gpu_recovery = state.gpu_recovery.clone();
         blocking(move || {
             let value = preferences.patch(patch)?;
-            if let Some(host) = host {
+            let result = if let Some(host) = host {
                 host.preferences(Some(value.clone()))
             } else if let Some(error) = startup_error {
                 Err(error)
             } else {
                 Ok(value.clone())
+            };
+            if result.is_ok() && clear_gpu_recovery {
+                gpu_recovery.store(false, Ordering::Release);
             }
+            result
         })
         .await
     }
@@ -167,6 +191,9 @@ mod tauri_commands {
         state: State<'_, AppState>,
     ) -> Result<Value, String> {
         let caller_label = window.label().to_string();
+        if action == "startupReady" {
+            return Ok(json!({"ready": startup_ready(&caller_label)}));
+        }
         if action == "aboutInfo" {
             return about_info();
         }
@@ -204,11 +231,20 @@ mod tauri_commands {
             let preferences = state.preferences.clone();
             let host = state.host.clone();
             let patch = preference_patch_for_window(&window, Some(params));
+            let clear_gpu_recovery = patch.as_ref().and_then(gpu_preference_requested) == Some(true);
+            let gpu_recovery = state.gpu_recovery.clone();
             return blocking(move || {
                 let value = preferences.patch(patch)?;
-                if let Some(host) = host { host.preferences(Some(value.clone())) } else { Ok(value) }
+                let result = if let Some(host) = host { host.preferences(Some(value.clone())) } else { Ok(value) };
+                if result.is_ok() && clear_gpu_recovery {
+                    gpu_recovery.store(false, Ordering::Release);
+                }
+                result
             })
             .await;
+        }
+        if matches!(action.as_str(), "openFolder" | "selectFolder") {
+            return blocking(move || model_folder_action(&action, &params)).await;
         }
         if action == "saveBeforeClose" {
             let host = state.host.clone();
@@ -315,6 +351,21 @@ fn open_library_action(host: Option<DesktopHandle>, startup_error: Option<String
     let host = host.ok_or_else(|| startup_error.unwrap_or_else(|| "desktop host is unavailable".into()))?;
     let result = host.run("library.open".into(), json!({"path": path}))?;
     persist_library_path(&preferences, Some(&host), result, Some(path))
+}
+
+fn model_folder_action(action: &str, params: &Value) -> Result<Value, String> {
+    match action {
+        "selectFolder" => services::run("chooseFolder", params),
+        "openFolder" => {
+            let path = params.get("path").and_then(Value::as_str).ok_or_else(|| "openFolder requires path".to_string())?;
+            if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
+                return Err("invalid model folder path".into());
+            }
+            services::run("openExternal", &json!({"path": path}))?;
+            Ok(json!({"path": path}))
+        }
+        _ => Err(format!("unknown model folder action {action}")),
+    }
 }
 
 fn persist_library_path(preferences: &Preferences, host: Option<&DesktopHandle>, result: Value, fallback: Option<&str>) -> Result<Value, String> {
@@ -534,6 +585,12 @@ fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<Strin
                 .preview(serde_json::from_value(request).map_err(|error| format!("lc_preview args are invalid: {error}"))?)
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))?
         }
+        "lc_preview_quick" => {
+            let request = args.get("request").cloned().unwrap_or(args);
+            control_host(app)?
+                .preview_quick(serde_json::from_value(request).map_err(|error| format!("lc_preview_quick args are invalid: {error}"))?)
+                .map(|value| json!(value))
+        }
         "lc_merge_preview" => {
             let request = args.get("request").cloned().unwrap_or(args);
             control_host(app)?
@@ -602,6 +659,8 @@ fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<Strin
             } else if matches!(action, "secondWindow" | "fullscreen" | "toggleFullscreen" | "confirmClose" | "closeWindow") {
                 let mapped = if action == "fullscreen" { "toggleFullscreen" } else { action };
                 native_window_action(app, mapped, &params, None)?
+            } else if matches!(action, "openFolder" | "selectFolder") {
+                model_folder_action(action, &params)?
             } else if services::is_import_picker(action) {
                 if !services::has_explicit_picker_input(action, &params)? {
                     return Err("interactive import picker unavailable in QA control; supply explicit path(s)".into());
@@ -624,6 +683,7 @@ fn qa_control_plugin() -> Option<TauriPlugin<Wry>> {
         .command("lc_snapshot", |app, args| control_dispatch(app, "lc_snapshot", args))
         .command("lc_view_slice", |app, args| control_dispatch(app, "lc_view_slice", args))
         .command("lc_preview", |app, args| control_dispatch(app, "lc_preview", args))
+        .command("lc_preview_quick", |app, args| control_dispatch(app, "lc_preview_quick", args))
         .command("lc_merge_preview", |app, args| control_dispatch(app, "lc_merge_preview", args))
         .command("lc_merge_preview_cancel", |app, args| control_dispatch(app, "lc_merge_preview_cancel", args))
         .command("lc_preview_ack", |app, args| control_dispatch(app, "lc_preview_ack", args))
@@ -705,6 +765,47 @@ fn preferences_root(app: &AppHandle<Wry>, qa: bool, qa_data_dir: Option<&Path>) 
         .unwrap_or_else(|| std::env::temp_dir().join("lightcraft-preview"))
 }
 
+/// Resolve preview's config root before Tauri has created its app handle. This keeps the startup
+/// marker armed through window and WebView construction, including a crash before `setup`.
+fn early_preferences_root(qa: bool, qa_data_dir: Option<&Path>) -> Option<PathBuf> {
+    qa_data_dir
+        .map(Path::to_path_buf)
+        .or_else(|| qa.then(|| std::env::temp_dir().join("lightcraft-preview-qa")))
+        .or_else(|| {
+            #[cfg(target_os = "windows")]
+            {
+                std::env::var_os("APPDATA").map(PathBuf::from)
+            }
+            #[cfg(target_os = "macos")]
+            {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library").join("Application Support"))
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                std::env::var_os("XDG_CONFIG_HOME")
+                    .map(PathBuf::from)
+                    .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            }
+            #[cfg(not(any(target_os = "windows", unix)))]
+            {
+                None
+            }
+        })
+        .map(|root| root.join("ai.storyteller.lightcraft.preview"))
+}
+
+fn early_gpu_marker_path(primary: bool) -> Option<PathBuf> {
+    if std::env::var_os("LIGHTCRAFT_NO_PREFS").is_some() {
+        return None;
+    }
+    let args: Vec<String> = std::env::args().collect();
+    let (qa, qa_data_dir) = runtime_modes(&args);
+    if primary && !qa {
+        return lightcraft_engine::camera_profiles::config_dir().map(|root| root.join("gpu-init.marker"));
+    }
+    early_preferences_root(qa, qa_data_dir.as_deref()).map(|root| root.join("gpu-init.marker"))
+}
+
 fn preferences_path(app: &AppHandle<Wry>) -> PathBuf {
     let args: Vec<String> = std::env::args().collect();
     let (qa, qa_data_dir) = runtime_modes(&args);
@@ -740,14 +841,28 @@ fn model_paths(primary: bool, qa: bool, config: &Path) -> (Option<PathBuf>, Opti
     (Some(root.join("models").join("sam3")), Some(root.join("models").join("sam3-mirrors.txt")))
 }
 
-fn gpu_preference(value: &Value) -> bool {
+fn gpu_preference_requested(value: &Value) -> Option<bool> {
     value
         .get("gpu")
         .and_then(Value::as_bool)
         .or_else(|| value.pointer("/ui/gpu").and_then(Value::as_bool))
         .or_else(|| value.pointer("/layout/gpu").and_then(Value::as_bool))
         .or_else(|| value.pointer("/settings/gpu").and_then(Value::as_bool))
-        .unwrap_or(true)
+}
+
+fn gpu_preference(value: &Value) -> bool {
+    gpu_preference_requested(value).unwrap_or(true)
+}
+
+fn mask_snapshot_gpu(snapshot: &mut Value) {
+    let Some(preferences) = snapshot.get_mut("preferences").and_then(Value::as_object_mut) else { return };
+    if let Some(ui) = preferences.get_mut("ui").and_then(Value::as_object_mut) {
+        ui.insert("gpu".into(), Value::Bool(false));
+    } else if let Some(layout) = preferences.get_mut("layout").and_then(Value::as_object_mut) {
+        layout.insert("gpu".into(), Value::Bool(false));
+    } else {
+        preferences.insert("gpu".into(), Value::Bool(false));
+    }
 }
 
 fn gpu_marker_path(primary: bool, qa: bool, config: &Path) -> Option<PathBuf> {
@@ -756,19 +871,35 @@ fn gpu_marker_path(primary: bool, qa: bool, config: &Path) -> Option<PathBuf> {
     }
     if primary && !qa {
         lightcraft_engine::camera_profiles::config_dir().map(|path| path.join("gpu-init.marker"))
-    } else {
+    } else if qa {
         Some(config.with_file_name("gpu-init.marker"))
+    } else {
+        early_preferences_root(false, None).map(|root| root.join("gpu-init.marker")).or_else(|| Some(config.with_file_name("gpu-init.marker")))
     }
 }
 
 fn gpu_crash_check(marker: Option<PathBuf>) -> Option<String> {
     let left = marker.as_deref().and_then(lightcraft_engine::gpu::backend::take_init_marker);
     lightcraft_engine::gpu::backend::set_init_marker(marker);
-    left.map(|what| {
-        format!(
-            "LightCraft closed unexpectedly while starting the GPU last time ({what}), so GPU rendering is now off and photos render on the CPU. To try the GPU again, turn on Settings ▸ Performance ▸ Use the GPU for rendering; to try another graphics backend, start LightCraft with LIGHTCRAFT_GPU_BACKEND=dx12, vulkan or off."
-        )
-    })
+    left.map(|what| gpu_crash_notice(&what))
+}
+
+fn gpu_crash_notice(what: &str) -> String {
+    format!(
+        "LightCraft closed unexpectedly while starting the GPU last time ({what}), so GPU rendering is now off and photos render on the CPU. To try the GPU again, turn on Settings ▸ Performance ▸ Use the GPU for rendering; to try another graphics backend, start LightCraft with LIGHTCRAFT_GPU_BACKEND=dx12, vulkan or off."
+    )
+}
+
+fn startup_ready(label: &str) -> bool {
+    if label != "main" {
+        return false;
+    }
+    lightcraft_engine::gpu::backend::startup_succeeded();
+    true
+}
+
+fn startup_window_failed() {
+    lightcraft_engine::gpu::backend::startup_failed();
 }
 
 fn prepare_primary_preferences(path: &Path) -> Option<String> {
@@ -823,6 +954,15 @@ fn build_shell() -> rightkit_shell::Shell {
 }
 
 pub fn run() {
+    let context = tauri::generate_context!();
+    let primary = context.config().identifier == PRIMARY_IDENTIFIER;
+    let early_marker = early_gpu_marker_path(primary);
+    let preflight_marker = early_marker.is_some();
+    let early_recovery = early_marker.as_deref().and_then(lightcraft_engine::gpu::backend::take_init_marker);
+    if let Some(marker) = early_marker.clone() {
+        lightcraft_engine::gpu::backend::set_init_marker(Some(marker));
+        lightcraft_engine::gpu::backend::begin_startup_marker(lightcraft_engine::gpu::backend::window_backends());
+    }
     let shell = build_shell();
     let builder = tauri::Builder::default()
         // RightKit shell stays first so single-instance arbitration & webview hardening run before app plugins.
@@ -836,13 +976,14 @@ pub fn run() {
             tauri_commands::lc_snapshot,
             tauri_commands::lc_view_slice,
             tauri_commands::lc_preview,
+            tauri_commands::lc_preview_quick,
             tauri_commands::lc_merge_preview,
             tauri_commands::lc_merge_preview_cancel,
             tauri_commands::lc_preview_ack,
             tauri_commands::lc_native,
             tauri_commands::lc_preferences
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let (options, _library, migration_warning) = startup_options(app.handle());
             let config = preferences_path(app.handle());
             let preferences = Preferences::load(config);
@@ -853,12 +994,15 @@ pub fn run() {
                 log::warn!("could not read startup preferences for GPU setup: {error}");
                 Value::Object(serde_json::Map::new())
             });
-            let gpu_crash = gpu_crash_check(gpu_marker_path(primary, qa, preferences_path(app.handle()).as_path()));
-            lightcraft_engine::gpu::set_enabled(gpu_preference(&preference_value) && gpu_crash.is_none());
-            let gpu_warning = gpu_crash.map(|notice| match preferences.patch(Some(json!({"ui": {"gpu": false}}))) {
-                Ok(_) => notice,
-                Err(error) => format!("{notice} Saving GPU preference failed: {error}"),
-            });
+            let gpu_crash = if preflight_marker {
+                early_recovery.clone().map(|what| gpu_crash_notice(&what))
+            } else {
+                gpu_crash_check(gpu_marker_path(primary, qa, preferences_path(app.handle()).as_path()))
+            };
+            let recovering_gpu = gpu_crash.is_some();
+            lightcraft_engine::gpu::set_enabled(gpu_preference(&preference_value) && !recovering_gpu);
+            let gpu_warning = gpu_crash.clone();
+            let gpu_recovery = Arc::new(AtomicBool::new(recovering_gpu));
             let preferences_warning = preferences.warning();
             let startup_warnings =
                 [preferences_warning.clone(), migration_warning.clone(), gpu_warning.clone()].into_iter().flatten().collect::<Vec<_>>();
@@ -867,9 +1011,13 @@ pub fn run() {
                     if let Ok(value) = preferences.get() {
                         let _ = host.preferences(Some(value));
                     }
+                    if recovering_gpu {
+                        lightcraft_engine::gpu::set_enabled(false);
+                    }
                     app.manage(AppState {
                         host: Some(host),
                         preferences,
+                        gpu_recovery: gpu_recovery.clone(),
                         startup_error: None,
                         startup_warnings: startup_warnings.clone(),
                         closing: Arc::new(AtomicBool::new(false)),
@@ -877,9 +1025,11 @@ pub fn run() {
                     None
                 }
                 Err(error) => {
+                    startup_window_failed();
                     app.manage(AppState {
                         host: None,
                         preferences,
+                        gpu_recovery,
                         startup_error: Some(error.clone()),
                         startup_warnings: startup_warnings.clone(),
                         closing: Arc::new(AtomicBool::new(false)),
@@ -944,7 +1094,8 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     let builder =
         if qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_BACKGROUND").as_deref()) { builder.activate_ignoring_other_apps(false) } else { builder };
-    if let Err(error) = builder.run(tauri::generate_context!()) {
+    if let Err(error) = builder.run(context) {
+        startup_window_failed();
         eprintln!("lightcraft desktop failed: {error}");
     }
 }
@@ -952,7 +1103,12 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        sync::Mutex,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    static GPU_MARKER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn persisted_library_path_reads_legacy_nested_key() -> Result<(), Box<dyn std::error::Error>> {
@@ -983,5 +1139,64 @@ mod tests {
         assert!(qa_hidden_enabled(Some(OsStr::new("true"))));
         assert!(qa_hidden_enabled(Some(OsStr::new(" TRUE "))));
         assert!(!qa_hidden_enabled(None));
+    }
+
+    #[test]
+    fn gpu_startup_marker_recovers_on_second_launch_without_staying_armed() {
+        let _lock = GPU_MARKER_TEST_LOCK.lock().unwrap();
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let marker = std::env::temp_dir().join(format!("lightcraft-native-gpu-{stamp}.marker"));
+        let _ = fs::remove_file(&marker);
+        lightcraft_engine::gpu::backend::set_init_marker(Some(marker.clone()));
+        assert!(lightcraft_engine::gpu::backend::begin_startup_marker(lightcraft_engine::gpu::backend::Backends::DX12));
+        assert!(marker.exists());
+
+        // Simulate a process dying during first launch: next launch consumes marker & enters CPU
+        // recovery, then arms a fresh guard for its own window startup.
+        let notice = gpu_crash_check(Some(marker.clone())).expect("uncleared marker is reported");
+        assert!(notice.contains("GPU rendering is now off"));
+        assert!(!marker.exists());
+        assert!(lightcraft_engine::gpu::backend::begin_startup_marker(lightcraft_engine::gpu::backend::Backends::DX12));
+        lightcraft_engine::gpu::backend::startup_succeeded();
+        assert!(!marker.exists(), "successful recovery launch must clear its marker");
+        lightcraft_engine::gpu::backend::set_init_marker(None);
+    }
+
+    #[test]
+    fn focus_without_ready_keeps_startup_marker_armed() {
+        let _lock = GPU_MARKER_TEST_LOCK.lock().unwrap();
+        let marker = std::env::temp_dir().join(format!("lightcraft-native-focus-{}.marker", std::process::id()));
+        let _ = fs::remove_file(&marker);
+        lightcraft_engine::gpu::backend::set_init_marker(Some(marker.clone()));
+        assert!(lightcraft_engine::gpu::backend::begin_startup_marker(lightcraft_engine::gpu::backend::Backends::DX12));
+        assert!(marker.exists(), "focus alone must not clear startup guard");
+        startup_window_failed();
+        lightcraft_engine::gpu::backend::set_init_marker(None);
+    }
+
+    #[test]
+    fn frontend_ready_clears_startup_marker_once() {
+        let _lock = GPU_MARKER_TEST_LOCK.lock().unwrap();
+        let marker = std::env::temp_dir().join(format!("lightcraft-native-ready-{}.marker", std::process::id()));
+        let _ = fs::remove_file(&marker);
+        lightcraft_engine::gpu::backend::set_init_marker(Some(marker.clone()));
+        assert!(lightcraft_engine::gpu::backend::begin_startup_marker(lightcraft_engine::gpu::backend::Backends::DX12));
+        assert!(!startup_ready("secondary"));
+        assert!(marker.exists(), "secondary window readiness must not clear main guard");
+        assert!(startup_ready("main"));
+        assert!(!marker.exists(), "frontend readiness clears startup guard");
+        lightcraft_engine::gpu::backend::set_init_marker(None);
+    }
+
+    #[test]
+    fn recoverable_window_error_clears_startup_marker() {
+        let _lock = GPU_MARKER_TEST_LOCK.lock().unwrap();
+        let marker = std::env::temp_dir().join(format!("lightcraft-native-error-{}.marker", std::process::id()));
+        let _ = fs::remove_file(&marker);
+        lightcraft_engine::gpu::backend::set_init_marker(Some(marker.clone()));
+        assert!(lightcraft_engine::gpu::backend::begin_startup_marker(lightcraft_engine::gpu::backend::Backends::DX12));
+        startup_window_failed();
+        assert!(!marker.exists(), "recoverable window errors must clear marker");
+        lightcraft_engine::gpu::backend::set_init_marker(None);
     }
 }

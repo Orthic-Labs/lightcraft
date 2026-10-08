@@ -62,7 +62,7 @@ impl SettingsHashes {
 }
 
 /// Bump when the pipeline's output changes, to invalidate cached thumbnails.
-pub const RENDER_CACHE_VERSION: u64 = 11;
+pub const RENDER_CACHE_VERSION: u64 = 12;
 
 /// Thumbnails render at one of these long edges (so window/cell size changes reuse the cache).
 pub const THUMB_SIZES: [usize; 4] = [128, 256, 384, 512];
@@ -992,6 +992,10 @@ pub struct ProbeInfo {
     pub format: String,
     pub kind: MediaKind,
     pub file_size: u64,
+    /// Native filesystem modification stamp captured with the probe. Import review caches use
+    /// this with [`file_size`](Self::file_size) to reject a stale probe when a file is replaced;
+    /// native probes use `Some(0)` when a filesystem cannot provide a stamp, disabling reuse.
+    pub source_stamp: Option<u128>,
     pub captured: Option<String>,
     pub meta: lightcraft_catalog::Meta,
     pub as_shot_wb: Option<(f64, f64)>,

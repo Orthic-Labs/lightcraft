@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -27,6 +28,24 @@ pub struct Controller {
     last_error: Option<String>,
     segmenter_dir: Option<PathBuf>,
     segmenter_mirrors_file: Option<PathBuf>,
+    sam_validation: Option<SamValidationTask>,
+    sam_validation_status: Option<SamValidationStatus>,
+}
+
+struct SamValidationTask {
+    path: PathBuf,
+    cancel: std::sync::Arc<AtomicBool>,
+    progress: std::sync::Arc<AtomicU64>,
+    result: Receiver<Result<(), String>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+struct SamValidationStatus {
+    path: PathBuf,
+    done: u64,
+    total: u64,
+    error: Option<String>,
+    finished: bool,
 }
 
 impl Controller {
@@ -59,8 +78,8 @@ impl Controller {
         Ok(Self {
             session,
             renderer: Renderer::new(store.clone()),
-            merge_previews: MergePreviews::new(store),
-            tasks: Tasks::new(),
+            merge_previews: MergePreviews::new(store.clone()),
+            tasks: Tasks::with_store(store),
             auto_import: AutoImport::new(),
             snapshot_cache: crate::snapshot::CatalogSnapshotCache::default(),
             preferences: Map::new(),
@@ -68,6 +87,8 @@ impl Controller {
             last_error: None,
             segmenter_dir,
             segmenter_mirrors_file,
+            sam_validation: None,
+            sam_validation_status: None,
         })
     }
 
@@ -137,6 +158,7 @@ impl Controller {
                 false
             }
             Request::Preview { request, reply } => self.preview(request, reply),
+            Request::PreviewQuick { request, reply } => self.preview_quick(request, reply),
             Request::MergePreview { request, reply } => self.merge_preview(request, reply),
             Request::MergePreviewCancel { request, reply } => {
                 let result = self.merge_preview_cancel(request);
@@ -163,7 +185,17 @@ impl Controller {
     }
 
     fn run(&mut self, id: &str, params: &Value) -> Result<Value, String> {
+        self.poll_sam_validation();
         let result = lightcraft_engine::guard::catch("desktop command", || match id {
+            "segment.model.status" => {
+                let mut status = self.session.execute(id, params).map_err(|error| error.to_string())?;
+                if let Some(object) = status.as_object_mut() {
+                    object.insert("validation".into(), self.sam_validation_json());
+                }
+                Ok(status)
+            }
+            "segment.model.selectFolder" => self.start_sam_validation(params),
+            "segment.model.cancelSelection" => self.cancel_sam_validation(),
             "app.export" => self.tasks.start_export(&mut self.session, params),
             "app.exportPrevious" => {
                 let previous = self.session.last_export.clone().ok_or_else(|| "nothing exported yet — use Export…".to_string())?;
@@ -212,6 +244,99 @@ impl Controller {
         Ok(value)
     }
 
+    fn start_sam_validation(&mut self, params: &Value) -> Result<Value, String> {
+        let path = params.get("path").and_then(Value::as_str).ok_or_else(|| "segment.model.selectFolder requires path".to_string())?;
+        if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
+            return Err("invalid SAM 3 model folder".into());
+        }
+        if self.sam_validation.is_some() {
+            return Err("SAM 3 model folder validation is already running".into());
+        }
+        let path = PathBuf::from(path);
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let progress = std::sync::Arc::new(AtomicU64::new(0));
+        let (tx, result) = std::sync::mpsc::sync_channel(1);
+        let worker_path = path.clone();
+        let worker_cancel = cancel.clone();
+        let worker_progress = progress.clone();
+        let worker = std::thread::Builder::new()
+            .name("sam3-validate".into())
+            .spawn(move || {
+                let result = lightcraft_engine::segment::Segmenter::validate_model_dir_with_progress(&worker_path, |done, _total| {
+                    worker_progress.store(done, Ordering::Relaxed);
+                    !worker_cancel.load(Ordering::Relaxed)
+                });
+                let _ = tx.send(result);
+            })
+            .map_err(|error| format!("could not start SAM 3 folder validation: {error}"))?;
+        self.sam_validation_status =
+            Some(SamValidationStatus { path: path.clone(), done: 0, total: lightcraft_engine::segment::MODEL_BYTES, error: None, finished: false });
+        self.sam_validation = Some(SamValidationTask { path: path.clone(), cancel, progress, result, worker: Some(worker) });
+        Ok(json!({"pending": true, "path": path.to_string_lossy()}))
+    }
+
+    fn cancel_sam_validation(&mut self) -> Result<Value, String> {
+        let cancelled = self.sam_validation.as_ref().is_some_and(|task| {
+            task.cancel.store(true, Ordering::Relaxed);
+            true
+        });
+        Ok(json!({"cancelled": cancelled}))
+    }
+
+    fn poll_sam_validation(&mut self) {
+        let Some(task) = self.sam_validation.as_ref() else { return };
+        if let Some(status) = self.sam_validation_status.as_mut() {
+            status.done = task.progress.load(Ordering::Relaxed).min(status.total);
+        }
+        let cancelled = task.cancel.load(Ordering::Relaxed);
+        let result = match task.result.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("SAM 3 model validation worker stopped".into()),
+        };
+        let Some(mut task) = self.sam_validation.take() else { return };
+        if let Some(worker) = task.worker.take() {
+            let _ = worker.join();
+        }
+        let path = task.path;
+        match result {
+            Ok(()) if !cancelled => {
+                self.segmenter_dir = Some(path.clone());
+                self.session.segmenter.configure_model_dir(Some(path.clone()));
+                if let Some(status) = self.sam_validation_status.as_mut() {
+                    status.done = status.total;
+                    status.error = None;
+                    status.finished = true;
+                }
+            }
+            Ok(()) => {
+                if let Some(status) = self.sam_validation_status.as_mut() {
+                    status.error = Some("SAM 3 model validation cancelled".into());
+                    status.finished = true;
+                }
+            }
+            Err(error) => {
+                if let Some(status) = self.sam_validation_status.as_mut() {
+                    status.error = Some(error);
+                    status.finished = true;
+                }
+            }
+        }
+    }
+
+    fn sam_validation_json(&self) -> Value {
+        let Some(status) = self.sam_validation_status.as_ref() else { return Value::Null };
+        let running = self.sam_validation.is_some();
+        json!({
+            "running": running,
+            "path": status.path.to_string_lossy(),
+            "done": status.done,
+            "total": status.total,
+            "error": status.error,
+            "finished": status.finished && !running,
+        })
+    }
+
     fn slice(&mut self, generation: Option<u64>, offset: usize, limit: usize) -> Result<Value, String> {
         crate::snapshot::view_slice(&mut self.session, generation, offset, limit)
     }
@@ -222,6 +347,21 @@ impl Controller {
             Ok(Ok(())) => {}
             Ok(Err(error)) | Err(error) => {
                 log::error!("preview request: {error}");
+                let _ = reply.send(Err(error));
+            }
+        }
+        self.renderer.poll(&mut self.session);
+        false
+    }
+
+    fn preview_quick(&mut self, request: PreviewRequest, reply: Sender<Result<PreviewDescriptor, String>>) -> bool {
+        let result = lightcraft_engine::guard::catch("desktop quick preview request", || {
+            self.renderer.request_quick(&mut self.session, request, reply.clone())
+        });
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) | Err(error) => {
+                log::error!("quick preview request: {error}");
                 let _ = reply.send(Err(error));
             }
         }
@@ -246,9 +386,14 @@ impl Controller {
 
     fn preferences(&mut self, patch: Option<Value>) -> Result<Value, String> {
         if let Some(Value::Object(values)) = patch {
+            let segmenter_dir = values.get("sam3Dir").and_then(persisted_segmenter_dir);
             let memory_patch = values.get("ui").and_then(Value::as_object).and_then(|ui| ui.get("memoryMb")).cloned();
             Self::merge_preferences(&mut self.preferences, values);
             self.apply_memory_preference(memory_patch);
+            if let Some(dir) = segmenter_dir {
+                self.segmenter_dir = Some(dir.clone());
+                self.session.segmenter.configure_model_dir(Some(dir));
+            }
         } else if patch.is_some() {
             return Err("preferences patch must be an object".into());
         }
@@ -318,6 +463,7 @@ impl Controller {
     }
 
     fn poll(&mut self) {
+        self.poll_sam_validation();
         if let Err(error) = lightcraft_engine::guard::catch("desktop task poll", || self.tasks.poll(&mut self.session)) {
             self.last_error = Some(error);
         }
@@ -337,6 +483,12 @@ impl Controller {
     }
 
     pub(crate) fn shutdown(&mut self) -> Result<(), String> {
+        if let Some(mut task) = self.sam_validation.take() {
+            task.cancel.store(true, Ordering::Relaxed);
+            if let Some(worker) = task.worker.take() {
+                let _ = worker.join();
+            }
+        }
         self.auto_import.stop()?;
         self.tasks.cancel(None)?;
         self.poll();
@@ -484,8 +636,16 @@ fn library_path(params: &Value, command: &str) -> Result<PathBuf, String> {
 }
 
 fn configure_segmenter(session: &mut Session, dir: &Option<PathBuf>, mirrors_file: &Option<PathBuf>) {
-    session.segmenter.dir = dir.clone();
+    session.segmenter.configure_model_dir(dir.clone());
     session.segmenter.mirrors_file = mirrors_file.clone();
+}
+
+fn persisted_segmenter_dir(value: &Value) -> Option<PathBuf> {
+    let path = value.as_str()?.trim();
+    if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
+        return None;
+    }
+    Some(PathBuf::from(path))
 }
 
 fn same_library_path(left: &Path, right: &Path) -> bool {
@@ -633,6 +793,63 @@ mod tests {
         let automatic = controller.preferences(Some(json!({"ui": {"memoryMb": 0}})));
         assert!(automatic.is_ok());
         assert_eq!(controller.session.memory_report().budget, lightcraft_engine::memory::default_budget());
+        assert!(controller.shutdown().is_ok());
+    }
+
+    #[test]
+    fn malformed_sam_folder_validation_is_async_and_does_not_switch_directory() {
+        let current = temp_library("sam3-current");
+        let selected = temp_library("sam3-malformed");
+        let controller_result =
+            Controller::new(HostOptions { demo: true, sam3_dir: Some(current.clone()), ..HostOptions::default() }, PreviewStore::default());
+        assert!(controller_result.is_ok());
+        let Ok(mut controller) = controller_result else { return };
+        let started = Instant::now();
+        let pending = controller.run("segment.model.selectFolder", &json!({"path": selected.to_string_lossy()}));
+        assert!(pending.is_ok());
+        assert!(started.elapsed() < Duration::from_secs(1), "selection must return before validation finishes");
+        let status = controller.run("segment.model.status", &json!({}));
+        assert!(status.is_ok());
+        assert!(status.as_ref().ok().and_then(|value| value.get("validation")).is_some());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            controller.poll();
+            let status = controller.sam_validation_json();
+            if !status.get("running").and_then(Value::as_bool).unwrap_or(false) {
+                assert!(status.get("error").and_then(Value::as_str).is_some(), "malformed folder must report validation error");
+                break;
+            }
+            assert!(Instant::now() < deadline, "malformed folder validation did not finish");
+            std::thread::yield_now();
+        }
+        assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&current));
+        assert!(controller.shutdown().is_ok());
+    }
+
+    #[test]
+    fn cancelled_sam_validation_cannot_commit_a_successful_result() {
+        let current = temp_library("sam3-cancel-current");
+        let selected = temp_library("sam3-cancel-selected");
+        let controller_result =
+            Controller::new(HostOptions { demo: true, sam3_dir: Some(current.clone()), ..HostOptions::default() }, PreviewStore::default());
+        assert!(controller_result.is_ok());
+        let Ok(mut controller) = controller_result else { return };
+        let cancel = std::sync::Arc::new(AtomicBool::new(true));
+        let progress = std::sync::Arc::new(AtomicU64::new(0));
+        let (tx, result) = std::sync::mpsc::sync_channel(1);
+        assert!(tx.send(Ok(())).is_ok());
+        controller.sam_validation_status = Some(SamValidationStatus {
+            path: selected.clone(),
+            done: 0,
+            total: lightcraft_engine::segment::MODEL_BYTES,
+            error: None,
+            finished: false,
+        });
+        controller.sam_validation = Some(SamValidationTask { path: selected, cancel, progress, result, worker: None });
+        controller.poll_sam_validation();
+        let status = controller.sam_validation_json();
+        assert!(status.get("error").and_then(Value::as_str).is_some_and(|error| error.contains("cancelled")));
+        assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&current));
         assert!(controller.shutdown().is_ok());
     }
 
@@ -811,6 +1028,9 @@ mod tests {
         let Ok(mut controller) = controller_result else { return };
         assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&model_dir));
         assert_eq!(controller.session.segmenter.mirrors_file.as_ref(), Some(&mirrors_file));
+        let selected_dir = temp_library("sam3-selected");
+        assert!(controller.preferences(Some(json!({"sam3Dir": selected_dir.to_string_lossy()}))).is_ok());
+        assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&selected_dir));
         let before_result = controller.snapshot();
         assert!(before_result.is_ok());
         let Ok(before) = before_result else { return };
@@ -829,7 +1049,7 @@ mod tests {
         let opened_result = controller.run("library.open", &json!({"path": next}));
         assert!(opened_result.is_ok());
         let Ok(opened) = opened_result else { return };
-        assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&model_dir));
+        assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&selected_dir));
         assert_eq!(controller.session.segmenter.mirrors_file.as_ref(), Some(&mirrors_file));
         assert!(opened.get("photos").and_then(Value::as_u64).is_some_and(|count| count > 0));
         let after_result = controller.snapshot();
@@ -850,5 +1070,6 @@ mod tests {
         assert!(controller.shutdown().is_ok());
         let _ = fs::remove_dir_all(old);
         let _ = fs::remove_dir_all(next);
+        let _ = fs::remove_dir_all(selected_dir);
     }
 }

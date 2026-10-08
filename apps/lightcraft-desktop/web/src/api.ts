@@ -40,6 +40,14 @@ export async function requestPreview(request: PreviewRequest): Promise<PreviewDe
   return { ...descriptor, slot: request.slot };
 }
 
+/** Request engine's disposable stand-in; a full request may supersede it at same sequence. */
+export async function requestQuickPreview(request: PreviewRequest): Promise<PreviewDescriptor> {
+  const scopedSlot = scopedPreviewSlot(request.slot);
+  const descriptor = await invoke<PreviewDescriptor>('lc_preview_quick', { request: { ...request, slot: scopedSlot } });
+  if (descriptor.slot !== scopedSlot) throw new Error('Quick preview response slot did not match request');
+  return { ...descriptor, slot: request.slot };
+}
+
 /** Run a cancellable, opaque merge preview; newer requests supersede same-slot work. */
 export function requestMergePreview(request: MergePreviewRequest): Promise<MergePreviewDescriptor> {
   if (!Number.isSafeInteger(request.sequence) || request.sequence < 0) throw new Error('Merge preview sequence is outside safe integer range');

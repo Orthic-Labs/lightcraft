@@ -126,27 +126,80 @@ pub(crate) fn env_off() -> bool {
     env_choice() == BackendChoice::Off
 }
 
-static MARKER: Mutex<Option<PathBuf>> = Mutex::new(None);
+#[derive(Default)]
+struct MarkerState {
+    path: Option<PathBuf>,
+    startup_active: bool,
+}
 
-/// Write this file before the compute device is created and remove it once creation returned
-/// (successfully or not). A file still there at the next launch means the process died inside
-/// the driver: see [`take_init_marker`]. `None` (the default) writes nothing.
+static MARKER: Mutex<MarkerState> = Mutex::new(MarkerState { path: None, startup_active: false });
+
+fn write_marker(path: &std::path::Path, phase: &str, backends: Backends) {
+    if let Some(d) = path.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let _ = std::fs::write(path, format!("GPU startup {phase} (backends {backends:?}, unix time {secs})\n"));
+}
+
+fn configured_marker() -> (Option<PathBuf>, bool) {
+    let state = MARKER.lock().unwrap_or_else(|e| e.into_inner());
+    (state.path.clone(), state.startup_active)
+}
+
+/// Configure the marker used around compute device creation and native startup. `None` (the
+/// default) writes nothing.
 pub fn set_init_marker(path: Option<PathBuf>) {
-    *MARKER.lock().unwrap_or_else(|e| e.into_inner()) = path;
+    let mut state = MARKER.lock().unwrap_or_else(|e| e.into_inner());
+    let old = state.path.clone();
+    let clear_old = path.is_none();
+    let same_path = old == path;
+    state.path = path;
+    if !same_path {
+        state.startup_active = false;
+    }
+    drop(state);
+    if clear_old && let Some(old) = old {
+        let _ = std::fs::remove_file(old);
+    }
+}
+
+/// Begin guarding native window startup and its first frame with the same marker used by GPU
+/// device creation. A process terminated by a driver while this is active leaves the marker for
+/// the next launch to recover from. Returns whether a marker path is configured.
+pub fn begin_startup_marker(backends: Backends) -> bool {
+    let (path, _) = configured_marker();
+    let Some(path) = path else { return false };
+    write_marker(&path, "startup started", backends);
+    MARKER.lock().unwrap_or_else(|e| e.into_inner()).startup_active = true;
+    true
+}
+
+/// Finish a successful startup guard. Safe to call more than once.
+pub fn startup_succeeded() {
+    let mut state = MARKER.lock().unwrap_or_else(|e| e.into_inner());
+    if !state.startup_active {
+        return;
+    }
+    if let Some(path) = state.path.as_deref() {
+        let _ = std::fs::remove_file(path);
+    }
+    state.startup_active = false;
+}
+
+/// Finish a startup guard after a recoverable window creation error.
+pub fn startup_failed() {
+    startup_succeeded();
 }
 
 /// Run device creation `f` between writing and removing the init marker (if one is set).
 pub(crate) fn with_init_marker<T>(backends: Backends, f: impl FnOnce() -> T) -> T {
-    let marker = MARKER.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let (marker, startup_active) = configured_marker();
     if let Some(m) = &marker {
-        if let Some(d) = m.parent() {
-            let _ = std::fs::create_dir_all(d);
-        }
-        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let _ = std::fs::write(m, format!("GPU device creation started (backends {backends:?}, unix time {secs})\n"));
+        write_marker(m, "device creation started", backends);
     }
     let r = f();
-    if let Some(m) = &marker {
+    if !startup_active && let Some(m) = &marker {
         let _ = std::fs::remove_file(m);
     }
     r
@@ -155,8 +208,16 @@ pub(crate) fn with_init_marker<T>(backends: Backends, f: impl FnOnce() -> T) -> 
 /// If the init marker `path` is present — the last process died while creating the GPU device —
 /// remove it and return what it recorded.
 pub fn take_init_marker(path: &std::path::Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = read_init_marker(path)?;
     let _ = std::fs::remove_file(path);
+    Some(text)
+}
+
+/// What the init marker `path` recorded, if it is present — without removing it. For sessions
+/// that must leave the disk as they found it (`--memory`, issues #164 and #169): GPU rendering
+/// still starts off, and the marker stays for the next ordinary launch to report and clear.
+pub fn read_init_marker(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
     Some(text.trim().to_string())
 }
 
@@ -164,6 +225,8 @@ pub fn take_init_marker(path: &std::path::Path) -> Option<String> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    static MARKER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn parses_backend_names() {
@@ -217,6 +280,7 @@ mod tests {
 
     #[test]
     fn init_marker_is_written_during_creation_and_removed_after() {
+        let _lock = MARKER_TEST_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("lc-gpu-marker-{}", std::process::id()));
         let m = dir.join("gpu-init.marker");
         let _ = std::fs::remove_dir_all(&dir);
@@ -225,10 +289,33 @@ mod tests {
         set_init_marker(None);
         assert!(seen, "the marker exists while the device is created");
         assert!(!m.exists(), "and is removed afterwards");
-        // a marker left behind by a crashed process is reported once
+        // a marker left behind by a crashed process is reported once; reading it leaves it in place
         std::fs::write(&m, "GPU device creation started (backends DX12)").unwrap();
+        assert!(read_init_marker(&m).unwrap().contains("DX12"));
+        assert!(m.exists(), "read_init_marker leaves the marker for the next launch");
         assert!(take_init_marker(&m).unwrap().contains("DX12"));
         assert_eq!(take_init_marker(&m), None);
+        assert_eq!(read_init_marker(&m), None);
+
+        // A startup guard spans window setup and first frame; compute setup must not clear it.
+        set_init_marker(Some(m.clone()));
+        assert!(begin_startup_marker(Backends::DX12));
+        assert!(m.exists());
+        let seen = with_init_marker(Backends::DX12, || m.exists());
+        assert!(seen && m.exists(), "device setup cannot clear the first-frame guard");
+        // Reconfiguring the same path while startup is armed must preserve that lifecycle state.
+        set_init_marker(Some(m.clone()));
+        startup_succeeded();
+        assert!(!m.exists(), "a successful second launch clears its marker");
+
+        // Once startup has completed, a later compute marker belongs to compute setup and is not
+        // removed by a repeated startup completion callback.
+        let seen = with_init_marker(Backends::DX12, || {
+            startup_succeeded();
+            m.exists()
+        });
+        assert!(seen, "startup completion cannot clear a concurrent compute marker");
+        set_init_marker(None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

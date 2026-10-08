@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as previewApi from "../api";
-import { convertFileSrc, requestPreview } from "../api";
+import { convertFileSrc, requestPreview, requestQuickPreview } from "../api";
 import type { PreviewDescriptor, PreviewQuality, PreviewRequest } from "../desktop/types";
 
 export type PreviewState =
@@ -189,6 +189,27 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
     setState((previous) => photoChanged
       ? { status: "loading", descriptor: null, url: null, error: null }
       : { status: "loading", descriptor: previous.descriptor, url: previous.url, error: null });
+    // Paint engine's disposable embedded/cached stand-in first. Full render remains
+    // authoritative & replaces it through same freshness/lease gate below.
+    void requestQuickPreview(current)
+      .then((descriptor) => {
+        const matches = descriptor.photoId === current.photoId && descriptor.slot === current.slot && descriptor.viewGeneration === current.viewGeneration && descriptor.sequence === current.sequence;
+        if (cancelled || !matches) {
+          acknowledge(descriptor.handle);
+          return;
+        }
+        const browserUrl = convertFileSrc(descriptor.handle, "lightcraft-preview");
+        void decodePreviewUrl(browserUrl).then(() => {
+          if (cancelled || pendingRequest.current?.sequence !== current.sequence || activeDescriptor.current) {
+            acknowledge(descriptor.handle);
+            return;
+          }
+          activeDescriptor.current = descriptor;
+          options.onHistogram?.(descriptor.histogram);
+          setState({ status: "loading", descriptor, url: `lightcraft-preview://${descriptor.handle}`, error: null });
+        }).catch(() => acknowledge(descriptor.handle));
+      })
+      .catch(() => undefined);
     void requestPreview(current)
       .then((descriptor) => {
         const matches = descriptor.photoId === current.photoId && descriptor.slot === current.slot && descriptor.viewGeneration === current.viewGeneration && descriptor.sequence === current.sequence;
