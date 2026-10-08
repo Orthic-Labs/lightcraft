@@ -350,7 +350,12 @@ export function StageWorkspace() {
   const selection: number[] = useMemo(() => snapshot?.selection ?? [], [snapshot?.selection]);
   const candidateIds = selection.filter((id) => id !== active);
   const candidate = candidateIds[candidateIndex % Math.max(1, candidateIds.length)] ?? null;
-  const detailIds = useMemo(() => Array.from(new Set([active, candidate, ui.referenceId, ...selection].filter((id): id is number => typeof id === "number"))), [active, candidate, selection, ui.referenceId]);
+  const detailIds = useMemo(() => {
+    const visibleIds = ui.view === "survey" ? selection
+      : ui.view === "compare" ? [candidate]
+      : ui.view === "reference" ? [ui.referenceId] : [];
+    return Array.from(new Set([active, ...visibleIds].filter((id): id is number => typeof id === "number")));
+  }, [active, candidate, selection, ui.referenceId, ui.view]);
   const inspected = useInspectedPhotos(detailIds);
   const photoFor = useCallback((id: number | null) => photoForId(snapshot, id) ?? (id == null ? null : inspected.get(id) ?? null), [inspected, snapshot]);
   const photo = photoFor(active);
