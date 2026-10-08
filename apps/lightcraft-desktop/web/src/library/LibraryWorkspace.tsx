@@ -265,7 +265,7 @@ export default function LibraryWorkspace({ showSidebar = true }: { showSidebar?:
   const mode: 'photoGrid' | 'squareGrid' = ui.view === 'squareGrid' ? 'squareGrid' : 'photoGrid';
   const thumbSize = Math.max(MIN_THUMB, Math.min(MAX_THUMB, ui.thumbSize || 180));
   const [sidebarCollapsed, setSidebarCollapsed] = useState(ui.sidebarCollapsed);
-  useEffect(() => { const handle = window.setTimeout(() => { setUi({ filterText }); void run('library.filter', { text: filterText || null }); }, 220); return () => window.clearTimeout(handle); }, [filterText, run, setUi]);
+  useEffect(() => { const handle = window.setTimeout(() => { setUi({ filterText }); void run('library.filter', { text: filterText }); }, 220); return () => window.clearTimeout(handle); }, [filterText, run, setUi]);
   const navigate = useCallback(async (item: LibraryNavItem) => {
     if (item.id === 'local') {
       const result = await native('pickFolder', {});
