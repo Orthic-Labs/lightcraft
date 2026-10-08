@@ -7,7 +7,7 @@ use std::io::Cursor;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rightkit_qa::control::{LaunchSpec, Mode, launch};
 use rightkit_qa::harness::Harness;
@@ -78,17 +78,25 @@ fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, catal
         startup_timeout: Duration::from_secs(90),
         label: "lightcraft-desktop-native".into(),
     };
+    let startup_started = Instant::now();
     let control = launch(&spec, &ws, scenario.tracker()).expect("hidden native app must expose rightkit-control");
     // Control becomes available before React mounts its command subscriptions.
     let ready = catch_unwind(AssertUnwindSafe(|| {
-        wait_for_dom(&control, "return document.querySelector('.lc-content') !== null;");
+        // Native control may answer in about:blank before WebView navigation.
+        // Renderer readiness shares existing launch deadline, rather than receiving
+        // an unrelated five-second interaction timeout.
+        wait_for_dom_with_timeout(
+            &control,
+            "return document.querySelector('.lc-content') !== null;",
+            spec.startup_timeout.saturating_sub(startup_started.elapsed()),
+        );
     }));
     if let Err(payload) = ready {
         let dom = control.eval("return {url: location.href, readyState: document.readyState, title: document.title, body: document.body?.innerText, root: document.getElementById('root')?.innerHTML, width: innerWidth, height: innerHeight};");
-        if let Ok(value) = dom {
-            if let Ok(bytes) = serde_json::to_vec_pretty(&value) {
-                let _ = fs::write(scenario.dir().join("startup-dom.json"), bytes);
-            }
+        if let Ok(value) = dom
+            && let Ok(bytes) = serde_json::to_vec_pretty(&value)
+        {
+            let _ = fs::write(scenario.dir().join("startup-dom.json"), bytes);
         }
         let _ = control.screenshot_to(&scenario.dir().join("startup-native.png"));
         resume_unwind(payload);
@@ -136,16 +144,21 @@ fn assert_sources_unchanged(paths: &[(&str, &Path)], expected: &[(&str, String)]
 }
 
 fn wait_for_dom(control: &rightkit_qa::control::Control, expression: &str) -> Value {
-    let mut last = Value::Null;
-    for _ in 0..100 {
+    wait_for_dom_with_timeout(control, expression, Duration::from_secs(5))
+}
+
+fn wait_for_dom_with_timeout(control: &rightkit_qa::control::Control, expression: &str, timeout: Duration) -> Value {
+    let started = Instant::now();
+    loop {
         let value = control.eval(expression).expect("DOM route query must execute");
         if value.as_bool() == Some(true) {
             return value;
         }
-        last = value;
+        if started.elapsed() >= timeout {
+            panic!("DOM route condition did not become true: {expression}; last result={value}; elapsed={:?}", started.elapsed());
+        }
         sleep(Duration::from_millis(50));
     }
-    panic!("DOM route condition did not become true: {expression}; last result={last}");
 }
 
 fn assert_library_header_contrast(control: &rightkit_qa::control::Control, mode: &str) {
