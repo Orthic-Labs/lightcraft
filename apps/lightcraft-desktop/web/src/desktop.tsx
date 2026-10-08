@@ -599,7 +599,9 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
         ? await openSecondWindow(nativeParams.view as ViewMode, typeof nativeParams.active === 'number' ? nativeParams.active : null)
         : await nativeAction(action, nativeParams);
       if (action === 'preferences.patch' && result && typeof result === 'object' && !Array.isArray(result)) {
-        const patch = preferenceUi(result as JsonObject);
+        // Persistence may lag current workspace state while its save is debounced.
+        // Apply only requested fields; the full response can contain older UI state.
+        const patch = preferenceUi(params);
         if (Object.keys(patch).length) setUi(patch);
       }
       setError(null);

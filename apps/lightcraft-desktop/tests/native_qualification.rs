@@ -1262,6 +1262,8 @@ fn native_hidden_control_journeys() {
                     run(control, "metadata.savePreset", json!({"name": metadata_name, "fields": {"copyright": "© QA Copyright", "creator": "QA Creator", "title": "QA Settings"}}));
                     run(control, "library.preferences", json!({"import": {"copyright": "Fixture Copyright", "creator": "Fixture Creator", "metadataPreset": metadata_name}, "cacheMb": 0}));
                     let before_library = run(control, "library.preferences", json!({}));
+                    click_dom(control, ".rk-top button.rk-seg__item[title='Develop']", "Settings must preserve current Develop workspace");
+                    wait_for_dom(control, "return document.querySelector('.stage-workspace') !== null;");
                     click_dom(control, ".rk-search--trigger", "settings hydration palette trigger must execute");
                     wait_for_dom(control, "return document.querySelector('.rk-palette') !== null;");
                     for key in ["s", "e", "t", "t", "i", "n", "g", "s"] {
@@ -1298,8 +1300,11 @@ fn native_hidden_control_journeys() {
                     assert_eq!(memory.as_str(), Some("0"), "fresh settings must expose automatic memory budget");
                     click_dom(control, "[data-settings-section=\"general\"]", "settings General tab must open");
                     set_dialog_field(control, "Theme", "dark");
+                    // Simulate a persisted workspace that lags the live UI debounce.
+                    control.command("lc_preferences", &json!({"ui": {"view": "photoGrid"}})).expect("stale persisted workspace fixture must save");
                     click_dom(control, ".lc-dialog-actions .lc-button-primary", "settings field-only save must execute");
                     assert_eq!(wait_for_dom(control, "return document.querySelector('.lc-dialog') === null;").as_bool(), Some(true));
+                    wait_for_dom(control, "return document.querySelector('.stage-workspace')?.classList.contains('stage-dark') === true;");
                     let after_library = run(control, "library.preferences", json!({}));
                     assert_eq!(after_library["import"], before_library["import"], "theme-only Settings save must preserve import defaults & metadata preset");
                     let persisted = control.command("lc_preferences", &Value::Null).expect("theme preference must reopen after field-only save");
