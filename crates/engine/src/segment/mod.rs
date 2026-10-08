@@ -176,8 +176,23 @@ impl Segmenter {
         }
         #[cfg(feature = "sam")]
         lightcraft_segment::validate_model_dir(&dir).map_err(|e| e.to_string())?;
-        self.dir = Some(dir);
+        self.configure_model_dir(Some(dir));
         Ok(())
+    }
+
+    /// Set the configured folder without requiring its files to exist yet. Hosts use this for
+    /// persisted preferences & download destinations; changing it always drops any in-memory
+    /// checkpoint before a request can load from the new folder.
+    pub fn configure_model_dir(&mut self, dir: Option<PathBuf>) {
+        if self.dir == dir {
+            return;
+        }
+        #[cfg(feature = "sam")]
+        if self.worker.loaded() || self.worker.pending() > 0 || self.worker.detail() > 0 {
+            self.worker.discard_model();
+        }
+        self.pending = None;
+        self.dir = dir;
     }
 
     /// Whether requests are queued or running (loading, analyzing the photo, a click…).

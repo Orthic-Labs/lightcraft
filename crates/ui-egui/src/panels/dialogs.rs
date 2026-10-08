@@ -929,9 +929,11 @@ pub fn keeps_open(app: &LightcraftApp, dlg: &Dialog) -> bool {
 fn sam_model_body(app: &mut LightcraftApp, ui: &mut egui::Ui, error: Option<&str>) {
     use lightcraft_engine::segment::{LICENSE_NAME, LICENSE_URL, MODEL_BYTES};
     let t = Tokens::get(ui.ctx());
-    let seg = &app.session.segmenter;
-    let d = seg.download_status();
-    if seg.installed() {
+    let (installed, d, dir, mirrors_empty) = {
+        let seg = &app.session.segmenter;
+        (seg.installed(), seg.download_status(), seg.dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default(), seg.mirrors().is_empty())
+    };
+    if installed {
         ui.label(crate::i18n::tr("The SAM 3 model is installed: Object and Describe masks are ready."));
         return;
     }
@@ -939,7 +941,6 @@ fn sam_model_body(app: &mut LightcraftApp, ui: &mut egui::Ui, error: Option<&str
     ui.label(crate::i18n::tr(
         "Object and Describe masks use SAM 3, Meta's segmentation model. It isn't part of LightCraft, and everything else works without it.",
     ));
-    let dir = seg.dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
     ui.label(format!("{} {:.1} GB, {} {dir}", crate::i18n::tr("A one-time download of about"), gb(MODEL_BYTES), crate::i18n::tr("saved in")));
     ui.label(
         egui::RichText::new(format!(
@@ -954,7 +955,12 @@ fn sam_model_body(app: &mut LightcraftApp, ui: &mut egui::Ui, error: Option<&str
     if r.clicked() {
         let _ = crate::links::open(app, LICENSE_URL);
     }
-    let seg = &app.session.segmenter;
+    let guide_url = "https://github.com/storytold/lightcraft/blob/main/docs/ai-masks.md";
+    let r = ui.link(crate::i18n::tr("SAM 3 install guide")).on_hover_text(guide_url);
+    crate::widgets::register(ui.ctx(), "link:samGuide", r.rect);
+    if r.clicked() {
+        let _ = crate::links::open(app, guide_url);
+    }
     if d.running {
         ui.add_space(4.0);
         let frac = if d.total > 0 { d.done as f64 / d.total as f64 } else { 0.0 };
@@ -970,7 +976,29 @@ fn sam_model_body(app: &mut LightcraftApp, ui: &mut egui::Ui, error: Option<&str
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         return;
     }
-    if seg.mirrors().is_empty() {
+    ui.horizontal(|ui| {
+        if app.services.pick_folder.is_some() {
+            let r = ui.button(crate::i18n::tr("Select Existing Model Folder…"));
+            crate::widgets::register(ui.ctx(), "button:samSelectFolder", r.rect);
+            if r.clicked()
+                && let Some(path) = app.services.pick_folder.as_mut().and_then(|pick| pick())
+            {
+                match app.run("segment.model.selectFolder", json!({"path": path})) {
+                    Ok(_) => app.toast(ui.ctx(), crate::i18n::tr("SAM 3 model folder verified.")),
+                    Err(e) => app.toast_error(ui.ctx(), e),
+                }
+            }
+        }
+        if !dir.is_empty() {
+            let r = ui.button(crate::i18n::tr("Open Model Folder"));
+            crate::widgets::register(ui.ctx(), "button:samOpenFolder", r.rect);
+            let result = r.clicked().then(|| app.services.reveal.as_mut().map(|reveal| reveal(&dir)));
+            if let Some(Some(Err(e))) = result {
+                app.toast_error(ui.ctx(), e);
+            }
+        }
+    });
+    if mirrors_empty {
         ui.label(
             egui::RichText::new(crate::i18n::tr(
                 "This build has no download location for the model yet: put the files in the folder above yourself (see docs/ai-masks.md).",

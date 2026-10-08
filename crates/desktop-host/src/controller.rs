@@ -262,9 +262,14 @@ impl Controller {
 
     fn preferences(&mut self, patch: Option<Value>) -> Result<Value, String> {
         if let Some(Value::Object(values)) = patch {
+            let segmenter_dir = values.get("sam3Dir").and_then(persisted_segmenter_dir);
             let memory_patch = values.get("ui").and_then(Value::as_object).and_then(|ui| ui.get("memoryMb")).cloned();
             Self::merge_preferences(&mut self.preferences, values);
             self.apply_memory_preference(memory_patch);
+            if let Some(dir) = segmenter_dir {
+                self.segmenter_dir = Some(dir.clone());
+                self.session.segmenter.configure_model_dir(Some(dir));
+            }
         } else if patch.is_some() {
             return Err("preferences patch must be an object".into());
         }
@@ -500,8 +505,16 @@ fn library_path(params: &Value, command: &str) -> Result<PathBuf, String> {
 }
 
 fn configure_segmenter(session: &mut Session, dir: &Option<PathBuf>, mirrors_file: &Option<PathBuf>) {
-    session.segmenter.dir = dir.clone();
+    session.segmenter.configure_model_dir(dir.clone());
     session.segmenter.mirrors_file = mirrors_file.clone();
+}
+
+fn persisted_segmenter_dir(value: &Value) -> Option<PathBuf> {
+    let path = value.as_str()?.trim();
+    if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
+        return None;
+    }
+    Some(PathBuf::from(path))
 }
 
 fn same_library_path(left: &Path, right: &Path) -> bool {
@@ -827,6 +840,9 @@ mod tests {
         let Ok(mut controller) = controller_result else { return };
         assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&model_dir));
         assert_eq!(controller.session.segmenter.mirrors_file.as_ref(), Some(&mirrors_file));
+        let selected_dir = temp_library("sam3-selected");
+        assert!(controller.preferences(Some(json!({"sam3Dir": selected_dir.to_string_lossy()}))).is_ok());
+        assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&selected_dir));
         let before_result = controller.snapshot();
         assert!(before_result.is_ok());
         let Ok(before) = before_result else { return };
@@ -845,7 +861,7 @@ mod tests {
         let opened_result = controller.run("library.open", &json!({"path": next}));
         assert!(opened_result.is_ok());
         let Ok(opened) = opened_result else { return };
-        assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&model_dir));
+        assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&selected_dir));
         assert_eq!(controller.session.segmenter.mirrors_file.as_ref(), Some(&mirrors_file));
         assert!(opened.get("photos").and_then(Value::as_u64).is_some_and(|count| count > 0));
         let after_result = controller.snapshot();
@@ -866,5 +882,6 @@ mod tests {
         assert!(controller.shutdown().is_ok());
         let _ = fs::remove_dir_all(old);
         let _ = fs::remove_dir_all(next);
+        let _ = fs::remove_dir_all(selected_dir);
     }
 }

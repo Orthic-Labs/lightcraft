@@ -27,6 +27,8 @@ pub const IDLE_UNLOAD: Duration = Duration::from_secs(10 * 60);
 
 /// What to compute.
 pub enum Kind {
+    /// Drop any loaded checkpoint before processing the next request.
+    Reset,
     /// Load the model and encode the photo (so the first click is fast).
     Prepare,
     Clicks(Vec<lightcraft_segment::Click>),
@@ -137,6 +139,14 @@ impl Worker {
         !self.dead() && self.shared.loaded.load(Ordering::SeqCst)
     }
 
+    /// Ask the worker to release its checkpoint and encoded-photo cache. The worker owns these
+    /// values, so the drop happens on its thread even if inference is currently in progress.
+    pub fn discard_model(&mut self) {
+        let (reply, _result) = mpsc::channel();
+        let job = Job { dir: PathBuf::new(), key: 0, render: None, missing: None, kind: Kind::Reset, tag: Tag::Prepare, reply };
+        let _ = self.submit(job);
+    }
+
     /// Queue `job`; returns at once.
     pub fn submit(&mut self, job: Job) -> Result<(), String> {
         if self.dead() {
@@ -207,6 +217,15 @@ fn run(rx: &mpsc::Receiver<Job>, shared: &Shared, idle: Duration) {
         }
         while let Ok(j) = rx.try_recv() {
             queue.push_back(j);
+        }
+        // A model-folder change invalidates every queued request. Run reset first so stale jobs
+        // cannot retain the previous checkpoint while the new folder becomes active.
+        if let Some(index) = queue.iter().position(|job| matches!(job.kind, Kind::Reset)) {
+            if index > 0 {
+                if let Some(reset) = queue.remove(index) {
+                    queue.push_front(reset);
+                }
+            }
         }
         let Some(mut job) = queue.pop_front() else { continue };
         let is_detail = matches!(job.kind, Kind::Detail { .. });
@@ -309,6 +328,11 @@ fn text_logits(model: &mut Sam3, enc: &mut Encoded, text: &str) -> Result<Option
 fn run_job(state: &mut State, shared: &Shared, job: &mut Job) -> Result<Option<SegMask>, String> {
     let side = lightcraft_segment::MASK_SIDE;
     match std::mem::replace(&mut job.kind, Kind::Prepare) {
+        Kind::Reset => {
+            *state = State::default();
+            shared.loaded.store(false, Ordering::SeqCst);
+            Ok(None)
+        }
         Kind::Prepare => {
             encoded(state, shared, job)?;
             Ok(None)

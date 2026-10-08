@@ -95,6 +95,8 @@ pub fn validate_model_dir(dir: &Path) -> Result<()> {
         return Err(Error::Missing(dir.to_path_buf()));
     }
     let weights_path = dir.join(WEIGHTS_FILE);
+    let weights_spec =
+        fetch::SAM3_FILES.iter().find(|spec| spec.name == WEIGHTS_FILE).ok_or_else(|| Error::Model("SAM 3 manifest has no weights entry".into()))?;
     let weights_size = std::fs::metadata(&weights_path).map_err(|e| Error::Model(format!("{}: {e}", weights_path.display())))?.len();
     if weights_size != fetch::SAM3_WEIGHTS_SIZE {
         return Err(Error::Model(format!(
@@ -102,6 +104,10 @@ pub fn validate_model_dir(dir: &Path) -> Result<()> {
             weights_path.display(),
             fetch::SAM3_WEIGHTS_SIZE
         )));
+    }
+    let verified = fetch::verify_file(weights_spec, &weights_path).map_err(|e| Error::Model(format!("{}: {e}", weights_path.display())))?;
+    if !verified {
+        return Err(Error::Model(format!("{}: SHA-256 does not match the pinned SAM 3 manifest", weights_path.display())));
     }
     let _ = weights::Weights::open(&weights_path)?;
     for name in ["vocab.json", "merges.txt"] {

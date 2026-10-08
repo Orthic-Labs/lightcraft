@@ -300,6 +300,14 @@ fn verified(f: &FileSpec<'_>, path: &Path) -> Result<bool, DownloadError> {
     }
 }
 
+/// Verify an existing file against its bounded manifest entry without loading it into memory.
+///
+/// This is also used when a user selects a model folder, so manually supplied files receive
+/// the same size and pinned SHA-256 checks as downloaded files.
+pub fn verify_file(f: &FileSpec<'_>, path: &Path) -> Result<bool, DownloadError> {
+    verified(f, path)
+}
+
 fn sha256_file(path: &Path) -> Result<String, String> {
     let mut file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut h = Sha256::new();
