@@ -71,7 +71,6 @@ struct Pending {
     request: PreviewRequest,
     key: u64,
     priority: u32,
-    interactive: bool,
     forced_draft: bool,
     reply: std::sync::mpsc::Sender<Result<PreviewDescriptor, String>>,
 }
@@ -392,7 +391,7 @@ impl Renderer {
             }),
         );
         let forced_draft = forced_draft(request.quality, interactive);
-        self.pending.insert(slot, Pending { ticket, request, key, priority, interactive, forced_draft, reply });
+        self.pending.insert(slot, Pending { ticket, request, key, priority, forced_draft, reply });
     }
 
     fn submit_quick(
@@ -418,7 +417,7 @@ impl Renderer {
                 JobOutput { ticket, view_generation, sequence, result, payload }
             }),
         );
-        self.pending.insert(slot, Pending { ticket, request, key, priority, interactive, forced_draft: false, reply });
+        self.pending.insert(slot, Pending { ticket, request, key, priority, forced_draft: false, reply });
     }
 
     fn ticket(&mut self) -> u64 {
@@ -798,7 +797,6 @@ mod tests {
                 },
                 key: 0,
                 priority: 1000,
-                interactive: false,
                 forced_draft: false,
                 reply: gate_reply,
             },
@@ -879,7 +877,6 @@ mod tests {
             },
             key: 17,
             priority: 100,
-            interactive: false,
             forced_draft: false,
             reply,
         };
