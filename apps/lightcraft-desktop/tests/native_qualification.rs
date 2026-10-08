@@ -185,7 +185,8 @@ fn assert_filmstrip_context_contrast(control: &rightkit_qa::control::Control, mo
                 const context = document.querySelector('.lc-filmstrip-context');
                 const position = document.querySelector('.lc-filmstrip-position');
                 const sourceChip = document.querySelector('.lc-filmstrip-context-chip');
-                if (!context || !position || !sourceChip) return null;
+                const auto = [...document.querySelectorAll('button.lc-inspector__button.primary')].find((node) => node.textContent?.trim() === 'Auto');
+                if (!context || !position || !sourceChip || !auto) return null;
                 const canvas = document.createElement('canvas');
                 canvas.width = 1;
                 canvas.height = 1;
@@ -259,13 +260,13 @@ fn assert_filmstrip_context_contrast(control: &rightkit_qa::control::Control, mo
                     const backgroundLum = luminance(background);
                     return { color: style.color, background, ratio: (Math.max(foregroundLum, backgroundLum) + 0.05) / (Math.min(foregroundLum, backgroundLum) + 0.05) };
                 };
-                return { context: measure(context), position: measure(position), sourceChip: measure(sourceChip) };
+                return { context: measure(context), position: measure(position), sourceChip: measure(sourceChip), auto: measure(auto) };
             })();"####,
         )
         .expect("filmstrip contrast query must execute");
     assert!(colors.is_object(), "{mode} filmstrip context must render contrast targets");
     eprintln!("[qa] {mode} filmstrip context contrast: {colors}");
-    for (label, key) in [("context", "context"), ("position", "position"), ("source chip", "sourceChip")] {
+    for (label, key) in [("context", "context"), ("position", "position"), ("source chip", "sourceChip"), ("Auto", "auto")] {
         let ratio = colors[key]["ratio"].as_f64().unwrap_or(0.0);
         assert!(ratio >= 4.5, "{mode} filmstrip {label} contrast must meet WCAG AA: {colors}");
     }

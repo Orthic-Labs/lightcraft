@@ -39,3 +39,4 @@
 .lc-inspector__rail{width:var(--lc-rail);min-width:var(--lc-rail);max-width:var(--lc-rail);flex-basis:var(--lc-rail);padding-inline:0;box-sizing:border-box}
 .lc-inspector__rail-tools,.lc-inspector__rail-more{margin-inline:4px}
 .lc-inspector__collapse{width:calc(100% - 8px);margin-inline:4px}
+.lc-inspector__button.primary{border-color:var(--rk-accent,var(--i-accent));background:var(--rk-accent,var(--i-accent));color:var(--rk-accent-ink,#fff)}
