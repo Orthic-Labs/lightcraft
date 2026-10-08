@@ -106,37 +106,57 @@ fn matching_capture(a: &PairInput, b: &PairInput) -> bool {
     }
 }
 
+fn matching_camera(a: &PairInput, b: &PairInput) -> bool {
+    a.camera.is_empty() || b.camera.is_empty() || same_text(&a.camera, &b.camera)
+}
+
 fn strong_export_metadata(raw: &PairInput, jpeg: &PairInput) -> bool {
     raw.captured.as_ref().is_some_and(|capture| jpeg.captured.as_ref() == Some(capture))
-        && (!raw.camera.is_empty() && !jpeg.camera.is_empty() && same_text(&raw.camera, &jpeg.camera)
+        && matching_camera(raw, jpeg)
+        && ((!raw.camera.is_empty() && !jpeg.camera.is_empty())
             || raw.width > 0 && raw.height > 0 && jpeg.width > 0 && jpeg.height > 0 && raw.width == jpeg.width && raw.height == jpeg.height)
 }
 
-/// Return one deterministic match for each RAW/JPEG pair.
+fn stem_key(path: &str) -> Option<String> {
+    stem(path).map(|value| if cfg!(windows) { value.to_ascii_lowercase() } else { value })
+}
+
+/// Return deterministic matches for confident RAW/JPEG pairs.
 pub fn classify(inputs: &[PairInput]) -> Vec<PairMatch> {
     let mut matches = Vec::new();
-    let mut used_raw = std::collections::HashSet::new();
     let mut used_jpeg = std::collections::HashSet::new();
+    let mut jpegs_by_stem = std::collections::HashMap::<String, Vec<usize>>::new();
+    for (index, input) in inputs.iter().enumerate().filter(|(_, input)| is_jpeg(input)) {
+        if let Some(key) = stem_key(&input.path) {
+            jpegs_by_stem.entry(key).or_default().push(index);
+        }
+    }
     for (raw_index, raw) in inputs.iter().enumerate().filter(|(_, input)| is_raw(input)) {
-        let Some(raw_stem) = stem(&raw.path) else { continue };
-        let mut candidates: Vec<(usize, &'static str)> = inputs
+        let Some(raw_stem) = stem_key(&raw.path) else { continue };
+        let Some(jpeg_indices) = jpegs_by_stem.get(&raw_stem) else { continue };
+        let mut candidates: Vec<(usize, &'static str)> = jpeg_indices
             .iter()
-            .enumerate()
-            .filter(|(jpeg_index, jpeg)| {
-                !used_jpeg.contains(jpeg_index)
-                    && is_jpeg(jpeg)
-                    && stem(&jpeg.path).is_some_and(|jpeg_stem| same_text(&raw_stem, &jpeg_stem))
-                    && ((same_folder(&raw.path, &jpeg.path) && matching_capture(raw, jpeg))
-                        || (direct_export_child(&raw.path, &jpeg.path) && strong_export_metadata(raw, jpeg)))
+            .copied()
+            .filter_map(|jpeg_index| {
+                if used_jpeg.contains(&jpeg_index) {
+                    return None;
+                }
+                let jpeg = &inputs[jpeg_index];
+                let relation = if same_folder(&raw.path, &jpeg.path) && matching_capture(raw, jpeg) && matching_camera(raw, jpeg) {
+                    Some("sameFolder")
+                } else if direct_export_child(&raw.path, &jpeg.path) && strong_export_metadata(raw, jpeg) {
+                    Some("directExport")
+                } else {
+                    None
+                }?;
+                Some((jpeg_index, relation))
             })
-            .map(|(index, jpeg)| (index, if same_folder(&raw.path, &jpeg.path) { "sameFolder" } else { "directExport" }))
             .collect();
         candidates.sort_by(|a, b| inputs[a.0].path.cmp(&inputs[b.0].path));
-        if let Some((jpeg_index, relation)) = candidates.into_iter().next()
-            && used_raw.insert(raw_index)
-            && used_jpeg.insert(jpeg_index)
-        {
-            matches.push(PairMatch { raw: raw_index, jpeg: jpeg_index, relation });
+        for (jpeg_index, relation) in candidates {
+            if used_jpeg.insert(jpeg_index) {
+                matches.push(PairMatch { raw: raw_index, jpeg: jpeg_index, relation });
+            }
         }
     }
     matches.sort_by_key(|pair| (inputs[pair.raw].path.clone(), inputs[pair.jpeg].path.clone()));
@@ -198,5 +218,33 @@ mod tests {
         let excluded = excluded_jpegs(&files, RawJpegImportPolicy::RawOnly);
         assert_eq!(excluded, [PathBuf::from("/shots/A.JPG")].into_iter().collect());
         assert!(excluded_jpegs(&files, RawJpegImportPolicy::KeepBoth).is_empty());
+    }
+
+    #[test]
+    fn repeated_raw_stems_use_each_jpeg_once_deterministically() {
+        let files = [
+            p("/shots/IMG_001.CR3", MediaKind::Raw, Some("t")),
+            p("/shots/IMG_001.DNG", MediaKind::Raw, Some("t")),
+            p("/shots/IMG_001.JPG", MediaKind::Image, Some("t")),
+        ];
+        assert_eq!(classify(&files), [PairMatch { raw: 0, jpeg: 2, relation: "sameFolder" }]);
+    }
+
+    #[test]
+    fn multiple_jpeg_variants_pair_with_same_raw() {
+        let files = [
+            p("/shots/IMG_001.CR3", MediaKind::Raw, Some("t")),
+            p("/shots/IMG_001.JPG", MediaKind::Image, Some("t")),
+            p("/shots/IMG_001.jpeg", MediaKind::Image, Some("t")),
+        ];
+        assert_eq!(classify(&files).len(), 2);
+        assert!(classify(&files).iter().all(|pair| pair.raw == 0));
+    }
+
+    #[test]
+    fn conflicting_camera_metadata_does_not_pair() {
+        let mut files = [p("/shots/IMG_001.CR3", MediaKind::Raw, Some("t")), p("/shots/export/IMG_001.JPG", MediaKind::Image, Some("t"))];
+        files[1].camera = "Nikon Z8".into();
+        assert!(classify(&files).is_empty());
     }
 }
