@@ -136,6 +136,20 @@ fn wait_for_dom(control: &rightkit_qa::control::Control, expression: &str) -> Va
     panic!("DOM route condition did not become true: {expression}; last result={last}");
 }
 
+fn assert_library_header_contrast(control: &rightkit_qa::control::Control, mode: &str) {
+    let colors = control
+        .eval(
+            "return (() => { const header = document.querySelector('.lc-library-header'); const title = document.querySelector('.lc-library-title h1'); const actions = Array.from(document.querySelectorAll('.lc-library-header .lc-header-action')).slice(0, 2); if (!header || !title || actions.length < 2) return null; const rgb = (value) => { const match = value.match(/rgba?\\(([^)]+)\\)/); if (!match) return null; return match[1].split(/[,\\s/]+/).slice(0, 3).map(Number); }; const luminance = (value) => { const channels = rgb(value); if (!channels || channels.length < 3 || channels.some((channel) => !Number.isFinite(channel))) return null; return channels.map((channel) => { const normalized = channel / 255; return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4; }).reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0); }; const background = getComputedStyle(header).backgroundColor; const titleColor = getComputedStyle(title).color; const actionColors = actions.map((node) => getComputedStyle(node).color); const bg = luminance(background); const titleLum = luminance(titleColor); const actionLums = actionColors.map(luminance); const ratio = (foreground) => bg === null || foreground === null ? null : (Math.max(bg, foreground) + 0.05) / (Math.min(bg, foreground) + 0.05); return { background, titleColor, actionColors, titleRatio: ratio(titleLum), actionRatios: actionLums.map(ratio) }; })();",
+        )
+        .expect("library header contrast query must execute");
+    assert!(colors.is_object(), "{mode} library header must render colors");
+    let title_ratio = colors["titleRatio"].as_f64().unwrap_or(0.0);
+    let action_ratios = colors["actionRatios"].as_array().expect("library Import & Export colors must be reported");
+    eprintln!("[qa] {mode} library header contrast: {colors}");
+    assert!(title_ratio >= 4.5, "{mode} library title contrast must meet WCAG AA: {colors}");
+    assert!(action_ratios.len() >= 2 && action_ratios.iter().all(|ratio| ratio.as_f64().is_some_and(|value| value >= 4.5)), "{mode} Import & Export contrast must meet WCAG AA: {colors}");
+}
+
 fn click_dom(control: &rightkit_qa::control::Control, selector: &str, message: &str) {
     let geometry = control
         .eval(&format!(
@@ -568,12 +582,85 @@ fn native_hidden_control_journeys() {
                     let dark = scenario.dir().join("dark-theme.png");
                     control.screenshot_to(&dark).expect("dark theme screenshot must be captured");
                     assert!(dark.is_file());
+                    assert_library_header_contrast(control, "dark");
                     control.command("lc_preferences", &json!({"ui": {"theme": "light"}})).expect("light theme preference must persist");
                 });
                 with_control(&binary, scenario, &inputs.catalog, |control, _data| {
                     let light = scenario.dir().join("light-theme.png");
                     control.screenshot_to(&light).expect("light theme screenshot must be captured");
                     assert!(light.is_file());
+                    assert_library_header_contrast(control, "light");
+                });
+                with_control(&binary, scenario, &inputs.catalog, |control, _data| {
+                    // Open through the actual RightKit command palette, then choose Settings by pointer.
+                    click_dom(control, ".rk-search--trigger", "command palette trigger click must execute");
+                    assert_eq!(wait_for_dom(control, "return document.querySelector('.rk-palette') !== null;").as_bool(), Some(true));
+                    control.key("Escape").expect("command palette Escape must execute");
+                    assert_eq!(wait_for_dom(control, "return document.querySelector('.rk-palette') === null;").as_bool(), Some(true));
+                    let pre_modal_focus = control
+                        .eval("return (() => { const node = document.activeElement; return { tag: node?.tagName, id: node?.id, className: node?.className, aria: node?.getAttribute('aria-label') }; })();")
+                        .expect("pre-modal focus query must execute");
+                    click_dom(control, ".rk-search--trigger", "settings command palette trigger click must execute");
+                    assert_eq!(wait_for_dom(control, "return document.querySelector('.rk-palette') !== null;").as_bool(), Some(true));
+                    for key in ["s", "e", "t", "t", "i", "n", "g", "s"] {
+                        control.key(key).expect("command palette search key must execute");
+                    }
+                    assert_eq!(wait_for_dom(control, "return document.querySelector('[data-command=\"app.settings\"]') !== null;").as_bool(), Some(true));
+                    click_dom(control, "[data-command=\"app.settings\"]", "settings command palette option click must execute");
+                    assert_eq!(
+                        wait_for_dom(control, "return document.querySelector('.lc-dialog')?.contains(document.activeElement) === true;").as_bool(),
+                        Some(true),
+                        "settings modal must receive focus",
+                    );
+                    let modal_state = control
+                        .eval(
+                            "return (() => { const root = document.getElementById('root'); const backdrop = document.querySelector('.lc-dialog-backdrop'); const dialog = document.querySelector('.lc-dialog'); return { dialog: Boolean(dialog), dialogInert: Boolean(dialog?.inert), backdropInert: Boolean(backdrop?.inert), rootInert: Boolean(root?.inert), rootHidden: root?.getAttribute('aria-hidden'), activeInside: Boolean(dialog?.contains(document.activeElement)) }; })();",
+                        )
+                        .expect("settings modal focus scope query must execute");
+                    assert_eq!(modal_state["dialog"].as_bool(), Some(true));
+                    assert_eq!(modal_state["dialogInert"].as_bool(), Some(false), "settings dialog must remain interactive");
+                    assert_eq!(modal_state["backdropInert"].as_bool(), Some(false), "settings backdrop must remain interactive");
+                    assert_eq!(modal_state["rootInert"].as_bool(), Some(true), "application background must be inert");
+                    assert_eq!(modal_state["rootHidden"].as_str(), Some("true"), "application background must be hidden from assistive technology");
+                    assert_eq!(modal_state["activeInside"].as_bool(), Some(true));
+
+                    // Settings contains a real select: changing it must retain focused control through React rerender.
+                    for _ in 0..5 {
+                        control.key("Tab").expect("native Tab must reach settings select");
+                    }
+                    assert_eq!(control.eval("return document.activeElement?.tagName;").expect("settings select focus query must execute").as_str(), Some("SELECT"));
+                    control.key("Down").expect("native select change must execute");
+                    assert_eq!(wait_for_dom(control, "return document.activeElement?.tagName === 'SELECT';").as_bool(), Some(true), "focused settings select must survive rerender");
+
+                    let focusable_count = control
+                        .eval("return Array.from(document.querySelectorAll('.lc-dialog button,.lc-dialog [href],.lc-dialog input,.lc-dialog select,.lc-dialog textarea,.lc-dialog [tabindex]:not([tabindex=\"-1\"])')).filter((node) => !node.disabled).length;")
+                        .expect("settings focusable count query must execute")
+                        .as_u64()
+                        .expect("settings modal must expose focusable controls");
+                    assert!(focusable_count > 5, "settings modal must expose native tab stops");
+                    for _ in 0..(focusable_count - 5) {
+                        control.key("Tab").expect("native Tab must reset settings focus cycle");
+                    }
+                    for _ in 0..focusable_count {
+                        control.key("Tab").expect("native Tab must execute in settings modal");
+                        let inside = control
+                            .eval("return document.querySelector('.lc-dialog')?.contains(document.activeElement) === true;")
+                            .expect("settings focus trap query must execute");
+                        assert_eq!(inside.as_bool(), Some(true), "native Tab must stay inside settings modal");
+                    }
+                    let wrapped = control
+                        .eval("return (() => { const dialog = document.querySelector('.lc-dialog'); const nodes = Array.from(dialog?.querySelectorAll('button,input,select,textarea,[href],[tabindex]:not([tabindex=\"-1\"])') || []).filter((node) => !node.disabled); return nodes.indexOf(document.activeElement); })();")
+                        .expect("settings focus wrap query must execute");
+                    assert_eq!(wrapped.as_i64(), Some(0), "native Tab must wrap to first settings control");
+
+                    control.key("Escape").expect("native Escape must close settings modal");
+                    assert_eq!(wait_for_dom(control, "return document.querySelector('.lc-dialog') === null;").as_bool(), Some(true));
+                    let restored = control
+                        .eval("return (() => { const root = document.getElementById('root'); const node = document.activeElement; return { rootInert: Boolean(root?.inert), rootHidden: root?.getAttribute('aria-hidden'), focus: { tag: node?.tagName, id: node?.id, className: node?.className, aria: node?.getAttribute('aria-label') } }; })();")
+                        .expect("settings focus restoration query must execute");
+                    assert_eq!(restored["rootInert"].as_bool(), Some(false), "background inert state must be restored");
+                    assert_eq!(restored["rootHidden"], Value::Null, "background aria-hidden state must be restored");
+                    assert_eq!(restored["focus"], pre_modal_focus, "focus must return to actual pre-modal target");
                 });
             } else if name == "catalogRecovery" {
                 run_catalog_recovery(&binary, scenario, &inputs.catalog, &inputs.png, &baseline_capture, &revision, &installed_hash);

@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useDesktop } from '../desktop';
 import type { DesktopContextValue, DialogState, JsonObject, UiState } from '../types';
 import './dialogs.css';
@@ -14,6 +15,10 @@ const errorText = (reason: unknown) => reason instanceof Error ? reason.message 
 
 function useModalScope(open: boolean, onClose: () => void, dismissible = true) {
   const ref = useRef<HTMLDivElement>(null);
+  const closeRef = useRef(onClose);
+  const dismissibleRef = useRef(dismissible);
+  closeRef.current = onClose;
+  dismissibleRef.current = dismissible;
   useEffect(() => {
     if (!open) return;
     const active = document.activeElement as HTMLElement | null;
@@ -24,7 +29,7 @@ function useModalScope(open: boolean, onClose: () => void, dismissible = true) {
     const focusables = () => root ? Array.from(root.querySelectorAll<HTMLElement>('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])')).filter((el) => !el.hasAttribute('disabled')) : [];
     focusables()[0]?.focus();
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && dismissible) { event.preventDefault(); onClose(); return; }
+      if (event.key === 'Escape' && dismissibleRef.current) { event.preventDefault(); closeRef.current(); return; }
       if (event.key !== 'Tab') return;
       const fields = focusables();
       if (!fields.length) return;
@@ -34,19 +39,21 @@ function useModalScope(open: boolean, onClose: () => void, dismissible = true) {
     };
     document.addEventListener('keydown', keydown);
     return () => { document.removeEventListener('keydown', keydown); previous.forEach(({ node, inert, hidden }) => { (node as HTMLElement).inert = inert; if (hidden === null) node.removeAttribute('aria-hidden'); else node.setAttribute('aria-hidden', hidden); }); active?.focus?.(); };
-  }, [open, onClose, dismissible]);
+  // onClose & dismissible are interaction policy, not scope lifecycle; refs prevent input rerenders from resetting focus.
+  }, [open]);
   return ref;
 }
 
 function Frame({ title, children, actions, onClose, wide = false, busy = false, dismissible = true }: { title: string; children: React.ReactNode; actions?: React.ReactNode; onClose: () => void; wide?: boolean; busy?: boolean; dismissible?: boolean }) {
   const ref = useModalScope(true, onClose, dismissible);
-  return <div className="lc-dialog-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget && dismissible) onClose(); }}>
+  const frame = <div className="lc-dialog-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget && dismissible) onClose(); }}>
     <section ref={ref} className={`lc-dialog ${wide ? 'lc-dialog-wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby="lc-dialog-title">
       <header className="lc-dialog-header"><h2 id="lc-dialog-title">{title}</h2>{dismissible && <button className="lc-icon-button" aria-label="Close" onClick={onClose}>×</button>}</header>
       <div className="lc-dialog-body">{children}</div>
       {actions && <footer className="lc-dialog-actions">{busy && <span className="lc-dialog-busy" aria-live="polite">Working…</span>}<span className="lc-dialog-action-group">{actions}</span></footer>}
     </section>
   </div>;
+  return typeof document === 'undefined' ? frame : createPortal(frame, document.body);
 }
 
 function Button({ children, primary = false, disabled = false, onClick, type = 'button' }: { children: React.ReactNode; primary?: boolean; disabled?: boolean; onClick?: () => void; type?: 'button' | 'submit' }) { return <button type={type} disabled={disabled} className={primary ? 'lc-button lc-button-primary' : 'lc-button'} onClick={onClick}>{children}</button>; }
