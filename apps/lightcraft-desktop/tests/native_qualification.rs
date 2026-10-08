@@ -49,9 +49,13 @@ fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, _cata
         .env
         .iter()
         .filter(|(key, _)| {
+            // Launch owns this value on every platform; workspace's suite root is separate.
+            if key.as_str() == "RIGHTKIT_SUITE_ROOT" {
+                return false;
+            }
             #[cfg(target_os = "macos")]
             {
-                key.starts_with("RIGHTKIT_") && key != "RIGHTKIT_SUITE_ROOT"
+                key.starts_with("RIGHTKIT_")
             }
             #[cfg(not(target_os = "macos"))]
             {
