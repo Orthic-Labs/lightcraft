@@ -627,9 +627,9 @@ fn native_hidden_control_journeys() {
                         let second_src = second_grid["src"].as_str().expect("second grid preview must expose scoped source").to_string();
                         assert_ne!(first_src, second_src, "second import must replace active grid pixels");
                         let second_id = second["active"].as_u64().expect("second import must select active photo");
-                        let selected_first = run(control, "library.select", json!({"ids": [first_id], "active": first_id, "mode": "replace"}));
-                        assert_eq!(selected_first["active"].as_u64(), Some(first_id), "selection must return first active photo");
+                        let _selected_first = run(control, "library.select", json!({"ids": [first_id], "active": first_id, "mode": "replace"}));
                         let first_again = snapshot(control);
+                        assert_eq!(first_again["active"].as_u64(), Some(first_id), "selection snapshot must expose first active photo");
                         assert!(first_again["viewGeneration"].as_u64().is_some_and(|generation| generation > second_generation), "selection must advance view generation");
                         let first_again_grid = wait_for_rendered_preview(control, ".lc-photo-cell.is-active img.lc-photo-preview", Some(&second_src));
                         assert_active_grid_identity(control, "procedural-rgb-01.png");
@@ -691,8 +691,9 @@ fn native_hidden_control_journeys() {
                         assert_eq!(tail_page["offset"].as_u64(), Some(1536));
                         assert_eq!(tail_page["photos"].as_array().map(Vec::len), Some(512), "tail page must contain final 512 photos");
                         let first_id = first_page["photos"][0]["id"].as_u64().expect("first page must expose photo id");
-                        let selected = run(control, "library.select", json!({"ids": [first_id], "active": first_id, "mode": "replace"}));
-                        assert_eq!(selected["active"].as_u64(), Some(first_id), "scalability selection must identify first page photo");
+                        let _selected = run(control, "library.select", json!({"ids": [first_id], "active": first_id, "mode": "replace"}));
+                        let selected_snapshot = snapshot(control);
+                        assert_eq!(selected_snapshot["active"].as_u64(), Some(first_id), "scalability selection snapshot must identify first page photo");
                         control.key("G").expect("library route key must execute for scalability journey");
                         wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
                         assert_layout_settled(control, ".lc-grid-scroll");

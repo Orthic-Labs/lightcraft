@@ -129,13 +129,20 @@ function ControlRow({ spec, value, run }: { spec: ControlSpec; value: number; ru
   const [draft, setDraft] = useState(value);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const started = useRef(false);
+  const commandQueue = useRef(Promise.resolve());
   useEffect(() => setDraft(value), [value]);
-  const begin = () => { if (!started.current) { started.current = true; void run('develop.beginInteraction', { label: spec.label }); } };
-  const end = () => { if (started.current) { started.current = false; void run('develop.endInteraction', {}); } };
-  const set = (next: number) => { if (!Number.isFinite(next)) return; const clamped = Math.max(spec.min, Math.min(spec.max, next)); setDraft(clamped); void run('develop.set', { control: spec.id, value: clamped }); };
+  const enqueue = (id: string, params: JsonObject = {}) => {
+    const pending = commandQueue.current.then(() => run(id, params));
+    commandQueue.current = pending.then(() => undefined, () => undefined);
+    return pending;
+  };
+  const begin = () => { if (!started.current) { started.current = true; void enqueue('develop.beginInteraction', { label: spec.label }); } };
+  const end = () => { if (started.current) { started.current = false; void enqueue('develop.endInteraction', {}); } };
+  const cancel = () => { if (!started.current) return; started.current = false; void enqueue('develop.cancelInteraction', {}); };
+  const set = (next: number) => { if (!Number.isFinite(next)) return; const clamped = Math.max(spec.min, Math.min(spec.max, next)); setDraft(clamped); void enqueue('develop.set', { control: spec.id, value: clamped }); };
   const onKey = (next: number) => { begin(); set(next); if (timer.current) clearTimeout(timer.current); timer.current = setTimeout(end, 400); };
-  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); if (started.current) void run('develop.cancelInteraction', {}); }, [run]);
-  return <div className="lc-inspector__row"><label htmlFor={`ctl-${spec.id}`}>{spec.label}</label><input id={`ctl-${spec.id}`} type="range" min={spec.min} max={spec.max} step={spec.step} value={draft} aria-label={spec.label} onPointerDown={begin} onPointerUp={end} onPointerCancel={() => { started.current = false; void run('develop.cancelInteraction', {}); }} onChange={e => set(Number(e.target.value))} onKeyDown={e => { if (e.key === 'Escape') { started.current = false; void run('develop.cancelInteraction', {}); setDraft(value); } else if (e.key.startsWith('Arrow') || e.key === 'Home' || e.key === 'End') onKey(Number(e.currentTarget.value)); }} /><input type="number" min={spec.min} max={spec.max} step={spec.step} value={Number(draft.toFixed(spec.decimals))} aria-label={`${spec.label} value`} onFocus={begin} onChange={e => setDraft(Number(e.target.value))} onKeyDown={e => { if (e.key === 'Escape') { started.current = false; void run('develop.cancelInteraction', {}); setDraft(value); } }} onBlur={() => { set(draft); end(); }} /><button className="lc-inspector__reset" type="button" aria-label={`Reset ${spec.label}`} title={`Reset ${spec.label}`} onClick={() => { end(); void run('develop.resetControl', { control: spec.id }); setDraft(spec.default); }}>↺</button></div>;
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); if (started.current) cancel(); }, [run]);
+  return <div className="lc-inspector__row"><label htmlFor={`ctl-${spec.id}`}>{spec.label}</label><input id={`ctl-${spec.id}`} type="range" min={spec.min} max={spec.max} step={spec.step} value={draft} aria-label={spec.label} onPointerDown={begin} onPointerUp={end} onPointerCancel={cancel} onChange={e => { begin(); set(Number(e.target.value)); }} onKeyDown={e => { if (e.key === 'Escape') { cancel(); setDraft(value); } else if (e.key.startsWith('Arrow') || e.key === 'Home' || e.key === 'End') onKey(Number(e.currentTarget.value)); }} /><input type="number" min={spec.min} max={spec.max} step={spec.step} value={Number(draft.toFixed(spec.decimals))} aria-label={`${spec.label} value`} onFocus={begin} onChange={e => setDraft(Number(e.target.value))} onKeyDown={e => { if (e.key === 'Escape') { cancel(); setDraft(value); } }} onBlur={() => { set(draft); end(); }} /><button className="lc-inspector__reset" type="button" aria-label={`Reset ${spec.label}`} title={`Reset ${spec.label}`} onClick={() => { end(); void enqueue('develop.resetControl', { control: spec.id }); setDraft(spec.default); }}>↺</button></div>;
 }
 
 function MixerLegend({ settings }: { settings: Json }) { const mixer = object(settings.mixer); return <div className="lc-inspector__empty">{Object.keys(mixer).length ? 'H, S & L bands use engine mixer controls.' : 'Mixer values load from active photo.'}</div>; }
