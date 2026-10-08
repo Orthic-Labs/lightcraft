@@ -233,6 +233,64 @@ fn wait_for_rendered_preview(control: &rightkit_qa::control::Control, selector: 
     panic!("rendered preview did not become ready for selector {selector}: {expression}; last result={last}");
 }
 
+// Tool fixture has varied RGB pixels. A decoded DOM image can still be absent
+// from native compositor output; inspect actual PNG region before accepting it.
+fn capture_visible_tool_preview(control: &rightkit_qa::control::Control, path: &Path) {
+    let mut last = Value::Null;
+    for _ in 0..40 {
+        let geometry = control.eval("return (() => { const img = document.querySelector('img.stage-preview'); if (!img) return null; const r = img.getBoundingClientRect(); const css = getComputedStyle(img); const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); return {src: img.src, complete: img.complete, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight, rect: {x:r.x,y:r.y,width:r.width,height:r.height}, viewport:{width:innerWidth,height:innerHeight}, display:css.display, visibility:css.visibility, opacity:css.opacity, hit:hit?.tagName, hitClass:hit?.getAttribute('class')}; })();").expect("tool preview geometry must execute");
+        control.screenshot_to(path).expect("tool preview screenshot must be captured");
+        let mut decoder = png::Decoder::new(Cursor::new(fs::read(path).expect("tool PNG must be readable")));
+        decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+        let mut reader = decoder.read_info().expect("tool PNG must decode");
+        let mut pixels = vec![0; reader.output_buffer_size().expect("tool PNG size must exist")];
+        let info = reader.next_frame(&mut pixels).expect("tool PNG pixels must decode");
+        let channels = info.color_type.samples();
+        let viewport_width = geometry["viewport"]["width"].as_f64().unwrap_or(0.0);
+        let viewport_height = geometry["viewport"]["height"].as_f64().unwrap_or(0.0);
+        let rect = &geometry["rect"];
+        let mut colors = std::collections::BTreeSet::new();
+        if viewport_width > 0.0
+            && viewport_height > 0.0
+            && rect["width"].as_f64().unwrap_or(0.0) > 0.0
+            && rect["height"].as_f64().unwrap_or(0.0) > 0.0
+        {
+            for row in 0..25 {
+                for col in 0..25 {
+                    let x = rect["x"].as_f64().unwrap_or(0.0) + rect["width"].as_f64().unwrap_or(0.0) * (0.25 + f64::from(col) / 48.0);
+                    let y = rect["y"].as_f64().unwrap_or(0.0) + rect["height"].as_f64().unwrap_or(0.0) * (0.25 + f64::from(row) / 48.0);
+                    if !(0.0..viewport_width).contains(&x) || !(0.0..viewport_height).contains(&y) {
+                        continue;
+                    }
+                    let px = (x / viewport_width * f64::from(info.width)).floor() as usize;
+                    let py = (y / viewport_height * f64::from(info.height)).floor() as usize;
+                    let offset = (py * info.width as usize + px) * channels;
+                    let rgb = match info.color_type {
+                        png::ColorType::Rgb | png::ColorType::Rgba => [pixels[offset], pixels[offset + 1], pixels[offset + 2]],
+                        png::ColorType::Grayscale | png::ColorType::GrayscaleAlpha => [pixels[offset]; 3],
+                        png::ColorType::Indexed => panic!("expanded tool PNG must not be indexed"),
+                    };
+                    colors.insert(rgb);
+                }
+            }
+        }
+        let visible = geometry["complete"].as_bool() == Some(true)
+            && geometry["naturalWidth"].as_u64().is_some_and(|width| width > 0)
+            && geometry["visibility"].as_str() == Some("visible")
+            && geometry["display"].as_str() != Some("none")
+            && geometry["opacity"].as_str().and_then(|value| value.parse::<f64>().ok()).is_some_and(|opacity| opacity > 0.0)
+            && colors.len() >= 16;
+        last = json!({"dom": geometry, "sampledRgbColors": colors.len(), "visible": visible});
+        fs::write(path.with_extension("json"), serde_json::to_vec_pretty(&last).expect("tool receipt must serialize"))
+            .expect("tool receipt must save");
+        if visible {
+            return;
+        }
+        sleep(Duration::from_millis(100));
+    }
+    panic!("tool preview never became visible in actual native screenshot: {last}");
+}
+
 fn assert_active_grid_is_bounded(control: &rightkit_qa::control::Control) {
     let value = control
         .eval(
@@ -1063,7 +1121,7 @@ fn native_hidden_control_journeys() {
                         click_dom(control, ".stage-toolstrip button[aria-label='Crop']", "crop tool click must execute");
                         wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Crop']")?.classList.contains('selected') === true;"#);
                         wait_for_rendered_preview(control, "img.stage-preview", None);
-                        control.screenshot_to(&scenario.dir().join("tool-crop.png")).expect("crop tool screenshot must be captured");
+                        capture_visible_tool_preview(control, &scenario.dir().join("tool-crop.png"));
 
                         run(control, "mask.add", json!({"kind": "radial", "center": [0.5, 0.5], "rx": 0.2, "ry": 0.2}));
                         let masked = snapshot(control);
@@ -1071,8 +1129,8 @@ fn native_hidden_control_journeys() {
                         click_dom(control, ".stage-toolstrip button[aria-label='Masking']", "masking tool click must execute");
                         wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Masking']")?.classList.contains('selected') === true;"#);
                         wait_for_rendered_preview(control, "img.stage-preview", None);
-                        wait_for_dom(control, "return document.querySelector('.lc-inspector__header small')?.textContent === '1 masks';");
-                        control.screenshot_to(&scenario.dir().join("tool-masking.png")).expect("masking tool screenshot must be captured");
+                        wait_for_dom(control, "return document.querySelector('.lc-inspector__header small')?.textContent === '1 mask';");
+                        capture_visible_tool_preview(control, &scenario.dir().join("tool-masking.png"));
 
                         run(control, "spot.add", json!({"mode": "remove", "points": [[0.5, 0.5]], "size": 0.05, "source": [0.1, 0.0]}));
                         let spotted = snapshot(control);
@@ -1080,7 +1138,7 @@ fn native_hidden_control_journeys() {
                         click_dom(control, ".stage-toolstrip button[aria-label='Remove']", "remove tool click must execute");
                         wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Remove']")?.classList.contains('selected') === true;"#);
                         wait_for_rendered_preview(control, "img.stage-preview", None);
-                        control.screenshot_to(&scenario.dir().join("tool-remove.png")).expect("remove tool screenshot must be captured");
+                        capture_visible_tool_preview(control, &scenario.dir().join("tool-remove.png"));
 
                         run(control, "redeye.add", json!({"center": [0.5, 0.5], "rx": 0.1, "ry": 0.1}));
                         let red_eye = snapshot(control);
@@ -1088,7 +1146,7 @@ fn native_hidden_control_journeys() {
                         click_dom(control, ".stage-toolstrip button[aria-label='Red Eye']", "red-eye tool click must execute");
                         wait_for_dom(control, r#"return document.querySelector(".stage-toolstrip button[aria-label='Red Eye']")?.classList.contains('selected') === true;"#);
                         wait_for_rendered_preview(control, "img.stage-preview", None);
-                        control.screenshot_to(&scenario.dir().join("tool-red-eye.png")).expect("red-eye tool screenshot must be captured");
+                        capture_visible_tool_preview(control, &scenario.dir().join("tool-red-eye.png"));
                         assert_eq!(red_eye["active"].as_u64(), Some(active));
                     }
                     "arwImport" => {

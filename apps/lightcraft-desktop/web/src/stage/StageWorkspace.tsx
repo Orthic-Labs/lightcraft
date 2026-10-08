@@ -201,6 +201,14 @@ function titleFor(photo: PhotoSummary | null): string {
   return photo?.title || photo?.fileName || "No photo selected";
 }
 
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.isContentEditable
+    || target.closest("[contenteditable='true']") !== null
+    || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)
+    || target.getAttribute("role") === "textbox";
+}
+
 function PreviewPane({
   photoId,
   photo,
@@ -475,6 +483,7 @@ export function StageWorkspace() {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape" && drag) { void send("develop.cancelInteraction", {}); setDrag(null); return; }
+      if (event.defaultPrevented || event.isComposing || isEditableTarget(event.target)) return;
       if (event.key === "Escape") { setUi({ infoOverlay: 0, slideshow: false }); return; }
       if (event.key === " ") { event.preventDefault(); setUi({ slideshow: !ui.slideshow }); return; }
       if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void send(event.key === "ArrowLeft" ? "library.previous" : "library.next", {}); }
