@@ -1,7 +1,7 @@
 import { convertFileSrc as tauriConvertFileSrc } from '@tauri-apps/api/core';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import type { DesktopSnapshot, JsonObject, PreviewDescriptor, PreviewRequest, ViewMode, ViewSlice } from './types';
+import type { DesktopSnapshot, JsonObject, MergePreviewCancelRequest, MergePreviewDescriptor, MergePreviewRequest, PreviewDescriptor, PreviewRequest, ViewMode, ViewSlice } from './types';
 
 /** Thin typed IPC boundary. Rust remains source of truth for catalog, edits, jobs & preferences. */
 export function getSnapshot(): Promise<DesktopSnapshot> {
@@ -25,7 +25,10 @@ function scopedPreviewSlot(slot: string): string {
   }
   label = label === 'second-main' ? 'second-main' : 'main';
   const suffix = `__${label}`;
-  return `${slot.slice(0, 96 - suffix.length)}${suffix}`;
+  if (!slot || slot.length > 96 - suffix.length || !/^[\x00-\x7f]+$/.test(slot) || /[\\/]/.test(slot)) {
+    throw new Error('Preview slot must be non-empty ASCII without path separators and fit transport limit');
+  }
+  return `${slot}${suffix}`;
 }
 
 export async function requestPreview(request: PreviewRequest): Promise<PreviewDescriptor> {
@@ -35,6 +38,24 @@ export async function requestPreview(request: PreviewRequest): Promise<PreviewDe
   const descriptor = await invoke<PreviewDescriptor>('lc_preview', { request: { ...request, slot: scopedSlot } });
   if (descriptor.slot !== scopedSlot) throw new Error('Preview response slot did not match request');
   return { ...descriptor, slot: request.slot };
+}
+
+/** Run a cancellable, opaque merge preview; newer requests supersede same-slot work. */
+export function requestMergePreview(request: MergePreviewRequest): Promise<MergePreviewDescriptor> {
+  if (!Number.isSafeInteger(request.sequence) || request.sequence < 0) throw new Error('Merge preview sequence is outside safe integer range');
+  if (!Number.isSafeInteger(request.viewGeneration) || request.viewGeneration < 0) throw new Error('Merge preview view generation is outside safe integer range');
+  const scopedSlot = scopedPreviewSlot(request.slot);
+  return invoke<MergePreviewDescriptor>('lc_merge_preview', { request: { ...request, slot: scopedSlot } }).then((descriptor) => {
+    if (descriptor.slot !== scopedSlot) throw new Error('Merge preview response slot did not match request');
+    return { ...descriptor, slot: request.slot };
+  });
+}
+
+/** Cancel current merge preview for slot; completion is never published after cancellation. */
+export function cancelMergePreview(request: MergePreviewCancelRequest): Promise<boolean> {
+  if (!Number.isSafeInteger(request.sequence) || request.sequence < 0) throw new Error('Merge preview sequence is outside safe integer range');
+  const scopedSlot = scopedPreviewSlot(request.slot);
+  return invoke<boolean>('lc_merge_preview_cancel', { request: { ...request, slot: scopedSlot } });
 }
 
 export function acknowledgePreview(handle: string): Promise<unknown> {

@@ -366,18 +366,19 @@ fn assert_active_grid_identity(control: &rightkit_qa::control::Control, file_nam
 fn wait_task(control: &rightkit_qa::control::Control, task_id: &str) -> Value {
     for _ in 0..900 {
         let value = snapshot(control);
-        let running = value["status"]["jobs"].as_array().is_some_and(|jobs| jobs.iter().any(|job| job["id"].as_str() == Some(task_id)));
-        if !running {
-            let notices = value["status"]["notices"].as_array().cloned().unwrap_or_default();
-            assert!(
-                !notices.iter().any(|notice| notice.as_str().is_some_and(|text| text.contains("failed"))),
-                "native task {task_id} failed: {notices:?}"
-            );
-            return value;
+        if let Some(completed) =
+            value["status"]["completedJobs"].as_array().and_then(|jobs| jobs.iter().find(|job| job["id"].as_str() == Some(task_id)))
+        {
+            match completed["state"].as_str() {
+                Some("done") => return value,
+                Some("cancelled") => panic!("native task {task_id} was cancelled: {completed}"),
+                Some("failed") => panic!("native task {task_id} failed: {completed}"),
+                state => panic!("native task {task_id} has unknown terminal state {state:?}: {completed}"),
+            }
         }
         sleep(Duration::from_millis(100));
     }
-    panic!("native task {task_id} did not finish within 90 seconds");
+    panic!("native task {task_id} did not publish exact completedJobs receipt within 90 seconds");
 }
 
 fn import_file(control: &rightkit_qa::control::Control, path: &Path) -> Value {
@@ -388,6 +389,40 @@ fn import_file(control: &rightkit_qa::control::Control, path: &Path) -> Value {
     let snapshot = wait_task(control, &task_id);
     assert!(snapshot["counts"]["catalog"].as_u64().is_some_and(|count| count > 0), "import must add catalog photo: {snapshot}");
     snapshot
+}
+
+fn write_merge_fixture_copies(root: &Path, source: &Path) -> [PathBuf; 2] {
+    let first = root.join("merge-procedural-a.png");
+    let second = root.join("merge-procedural-b.png");
+    fs::copy(source, &first).unwrap_or_else(|error| panic!("copy first procedural merge PNG: {error}"));
+
+    let mut decoder = png::Decoder::new(Cursor::new(fs::read(source).expect("procedural PNG must be readable")));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info().expect("procedural PNG must decode");
+    let mut pixels = vec![0; reader.output_buffer_size().expect("procedural PNG buffer must exist")];
+    let info = reader.next_frame(&mut pixels).expect("procedural PNG pixels must decode");
+    assert_eq!(info.color_type, png::ColorType::Rgba, "procedural merge source must decode to RGBA");
+    for pixel in pixels[..info.buffer_size()].chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    let mut encoded = Vec::new();
+    let mut encoder = png::Encoder::new(&mut encoded, info.width, info.height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+    let mut writer = encoder.write_header().expect("second merge PNG header must encode");
+    writer.write_image_data(&pixels[..info.buffer_size()]).expect("second merge PNG pixels must encode");
+    drop(writer);
+    fs::write(&second, encoded).expect("second procedural merge PNG must be writable");
+    assert_ne!(source_hash(&first), source_hash(&second), "merge inputs must be distinct procedural PNG content");
+    [first, second]
+}
+
+fn completed_task<'a>(snapshot: &'a Value, task_id: &str) -> &'a Value {
+    snapshot["status"]["completedJobs"]
+        .as_array()
+        .and_then(|jobs| jobs.iter().find(|job| job["id"].as_str() == Some(task_id)))
+        .unwrap_or_else(|| panic!("completedJobs must contain exact task {task_id}: {snapshot}"))
 }
 
 fn preview_imported(control: &rightkit_qa::control::Control, snapshot: &Value) -> Value {
@@ -658,11 +693,14 @@ fn native_hidden_control_journeys() {
     let input_dir = evidence.join("fixture-inputs");
     fs::create_dir_all(&input_dir).expect("fixture input directory must exist");
     let inputs = fixture_inputs::write_fixture_inputs(&input_dir).expect("real ARW/PNG/Lightroom fixtures must be generated");
+    let merge_inputs = write_merge_fixture_copies(&input_dir, &inputs.png);
     let source_paths = [
         ("arw", inputs.arw.as_path()),
         ("png", inputs.png.as_path()),
         ("catalog", inputs.catalog.as_path()),
         ("scalabilitySources", inputs.scalability_sources.as_path()),
+        ("mergePngA", merge_inputs[0].as_path()),
+        ("mergePngB", merge_inputs[1].as_path()),
     ];
     let source_hashes = source_paths.map(|(label, path)| (label, source_fingerprint(path)));
     let source_manifest = input_dir.join("manifest.json");
@@ -685,6 +723,7 @@ fn native_hidden_control_journeys() {
     let scenario_names = [
         // Capture core import/edit/undo/export proof before broader parity journeys.
         "engineExport",
+        "mergeHdr",
         "ipc",
         "stalePreview",
         "cache",
@@ -800,6 +839,159 @@ fn native_hidden_control_journeys() {
                     assert_eq!(restored["rootInert"].as_bool(), Some(false), "background inert state must be restored");
                     assert_eq!(restored["rootHidden"], Value::Null, "background aria-hidden state must be restored");
                     assert_eq!(restored["focus"], pre_modal_focus, "focus must return to actual pre-modal target");
+                });
+                with_control(&binary, scenario, &inputs.catalog, |control, _data| {
+                    let metadata_name = "QA Settings Metadata";
+                    run(control, "metadata.savePreset", json!({"name": metadata_name, "fields": {"copyright": "© QA Copyright", "creator": "QA Creator", "title": "QA Settings"}}));
+                    run(control, "library.preferences", json!({"import": {"copyright": "Fixture Copyright", "creator": "Fixture Creator", "metadataPreset": metadata_name}, "cacheMb": 0}));
+                    let before_library = run(control, "library.preferences", json!({}));
+                    click_dom(control, ".rk-search--trigger", "settings hydration palette trigger must execute");
+                    wait_for_dom(control, "return document.querySelector('.rk-palette') !== null;");
+                    for key in ["s", "e", "t", "t", "i", "n", "g", "s"] {
+                        control.key(key).expect("settings hydration search must execute");
+                    }
+                    click_dom(control, "[data-command=\"app.settings\"]", "settings hydration command must open");
+                    wait_for_dom(control, "return document.querySelector('.lc-dialog h2')?.textContent === 'Settings';");
+                    click_dom(control, ".lc-settings-tab:nth-child(2)", "settings Import tab must open");
+                    wait_for_dom(control, "return ['Raw photos','Default copyright','Default creator','Metadata preset'].every((label) => [...document.querySelectorAll('.lc-settings-panel .lc-field span')].some((node) => node.textContent === label)) && document.querySelector('.lc-dialog-actions .lc-button-primary')?.disabled === false;");
+                    let hydrated = control
+                        .eval("return Object.fromEntries([...document.querySelectorAll('.lc-settings-panel .lc-field')].map((field) => [field.querySelector('span')?.textContent, field.querySelector('input,select')?.value]));")
+                        .expect("settings hydration fields must be readable");
+                    let raw_expected = before_library["import"]["rawPreset"].as_str().unwrap_or("default");
+                    let other_expected = before_library["import"]["otherPreset"].as_str().unwrap_or("default");
+                    let metadata_expected = before_library["import"]["metadataPreset"].as_str().unwrap_or("none");
+                    assert_eq!(hydrated["Raw photos"].as_str(), Some(raw_expected), "saved raw import default must hydrate");
+                    assert_eq!(hydrated["Non-raw photos"].as_str(), Some(other_expected), "saved non-raw import default must hydrate");
+                    assert_eq!(hydrated["Metadata preset"].as_str(), Some(metadata_expected), "saved metadata preset must hydrate");
+                    assert_eq!(hydrated["Default copyright"].as_str(), Some("Fixture Copyright"), "saved copyright default must hydrate");
+                    assert_eq!(hydrated["Default creator"].as_str(), Some("Fixture Creator"), "saved creator default must hydrate");
+                    click_dom(control, ".lc-settings-tab:nth-child(3)", "settings Performance tab must open");
+                    wait_for_dom(control, "return [...document.querySelectorAll('.lc-settings-panel .lc-field span')].some((node) => node.textContent === 'Memory budget (MB; 0 = automatic)');");
+                    let memory = control
+                        .eval("return [...document.querySelectorAll('.lc-settings-panel .lc-field')].find((field) => field.querySelector('span')?.textContent === 'Memory budget (MB; 0 = automatic)')?.querySelector('input')?.value || ''; ")
+                        .expect("automatic memory setting must be readable");
+                    assert_eq!(memory.as_str(), Some("0"), "fresh settings must expose automatic memory budget");
+                    click_dom(control, ".lc-settings-tab:nth-child(1)", "settings General tab must open");
+                    set_dialog_field(control, "Theme", "dark");
+                    click_dom(control, ".lc-dialog-actions .lc-button-primary", "settings field-only save must execute");
+                    assert_eq!(wait_for_dom(control, "return document.querySelector('.lc-dialog') === null;").as_bool(), Some(true));
+                    let after_library = run(control, "library.preferences", json!({}));
+                    assert_eq!(after_library["import"], before_library["import"], "theme-only Settings save must preserve import defaults & metadata preset");
+                    let persisted = control.command("lc_preferences", &Value::Null).expect("theme preference must reopen after field-only save");
+                    assert_eq!(persisted["ui"]["theme"].as_str(), Some("dark"));
+                    control.command("lc_preferences", &json!({"ui": {"theme": "light"}})).expect("settings journey must restore light theme");
+                });
+            } else if name == "mergeHdr" {
+                with_control(&binary, scenario, &inputs.catalog, |control, _data| {
+                    let paths = merge_inputs.iter().map(|path| path.to_string_lossy().to_string()).collect::<Vec<_>>();
+                    let review = run(control, "library.importPreview", json!({"paths": paths}));
+                    let candidates = review["candidates"].as_array().expect("HDR merge fixture review must return candidates");
+                    assert_eq!(candidates.len(), 2, "HDR merge review must expose two procedural PNGs: {review}");
+                    assert!(candidates.iter().all(|candidate| candidate["duplicate"].is_null()), "HDR merge fixtures must be distinct import candidates: {review}");
+                    let started = run(control, "library.import", json!({"paths": paths, "mode": "add"}));
+                    let import_task = started["taskId"].as_str().expect("HDR fixture import must return task id").to_string();
+                    let imported_snapshot = wait_task(control, &import_task);
+                    let imported_receipt = completed_task(&imported_snapshot, &import_task);
+                    assert_eq!(imported_receipt["state"].as_str(), Some("done"), "HDR fixture import must complete: {imported_receipt}");
+                    let ids = imported_receipt["result"]["imported"]
+                        .as_array()
+                        .expect("HDR fixture import receipt must list imported ids")
+                        .iter()
+                        .map(|id| id.as_u64().expect("HDR fixture photo id must be numeric"))
+                        .collect::<Vec<_>>();
+                    assert_eq!(ids.len(), 2, "HDR fixture import must add both procedural PNGs: {imported_receipt}");
+                    run(control, "library.select", json!({"ids": ids, "active": ids[0], "mode": "replace"}));
+
+                    click_dom(control, ".rk-search--trigger", "merge command palette trigger must execute");
+                    wait_for_dom(control, "return document.querySelector('.rk-palette') !== null;");
+                    for key in ["h", "d", "r"] {
+                        control.key(key).expect("HDR command palette search must execute");
+                    }
+                    wait_for_dom(control, "return document.querySelector('[data-command=\"dialog.mergeHdr\"]') !== null;");
+                    click_dom(control, "[data-command=\"dialog.mergeHdr\"]", "HDR merge command must open React dialog");
+                    wait_for_dom(control, "return document.querySelector('.lc-dialog h2')?.textContent === 'HDR Merge Preview';");
+                    let first_preview = wait_for_rendered_preview(control, ".lc-merge-preview img", None);
+                    let first_src = first_preview["src"].as_str().expect("HDR preview must expose scoped source handle").to_string();
+                    assert!(first_preview["naturalWidth"].as_u64().is_some_and(|width| width > 0));
+                    assert!(first_preview["naturalHeight"].as_u64().is_some_and(|height| height > 0));
+                    let summary = control
+                        .eval("return document.querySelector('.lc-merge-preview-info')?.textContent?.trim() || '';" )
+                        .expect("HDR preview summary query must execute");
+                    assert!(summary.as_str().is_some_and(|text| text.contains("2 photos")), "HDR preview must summarize both selected photos: {summary}");
+                    let first_screenshot = scenario.dir().join("merge-hdr-preview-initial.png");
+                    control.screenshot_to(&first_screenshot).expect("initial HDR preview screenshot must save");
+
+                    set_dialog_field(control, "Deghost amount", "medium");
+                    let second_preview = wait_for_rendered_preview(control, ".lc-merge-preview img", Some(&first_src));
+                    let second_src = second_preview["src"].as_str().expect("updated HDR preview must expose scoped source handle");
+                    assert_ne!(second_src, first_src, "HDR option update must publish a fresh preview handle");
+                    assert!(second_preview["naturalWidth"].as_u64().is_some_and(|width| width > 0));
+                    assert!(second_preview["naturalHeight"].as_u64().is_some_and(|height| height > 0));
+                    let second_screenshot = scenario.dir().join("merge-hdr-preview-deghost.png");
+                    control.screenshot_to(&second_screenshot).expect("updated HDR preview screenshot must save");
+
+                    click_dom(control, ".lc-dialog-actions .lc-button-primary", "HDR merge submit must execute");
+                    wait_for_dom(control, "return document.querySelector('.lc-dialog h2')?.textContent === 'Merging Photos';");
+                    let mut merge_task = None;
+                    for _ in 0..200 {
+                        let current = snapshot(control);
+                        merge_task = current["status"]["jobs"]
+                            .as_array()
+                            .and_then(|jobs| jobs.iter().find(|job| job["kind"].as_str() == Some("merge")))
+                            .and_then(|job| job["id"].as_str())
+                            .map(str::to_string)
+                            .or_else(|| current["status"]["completedJobs"].as_array().and_then(|jobs| jobs.iter().find(|job| job["kind"].as_str() == Some("merge"))).and_then(|job| job["id"].as_str()).map(str::to_string));
+                        if merge_task.is_some() { break; }
+                        sleep(Duration::from_millis(50));
+                    }
+                    let merge_task = merge_task.expect("React HDR submit must expose merge task id through native snapshot");
+                    let finished = wait_task(control, &merge_task);
+                    let receipt = completed_task(&finished, &merge_task);
+                    assert_eq!(receipt["state"].as_str(), Some("done"), "HDR merge task must complete: {receipt}");
+                    let result = &receipt["result"];
+                    let output_path = result["path"].as_str().expect("HDR merge receipt must expose output path");
+                    assert!(output_path.ends_with(".dng"), "HDR merge output must be DNG: {result}");
+                    let output = PathBuf::from(output_path);
+                    let bytes = fs::read(&output).expect("HDR merge DNG output must be readable");
+                    assert!(bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*"), "HDR merge output must contain TIFF/DNG bytes");
+                    assert!(bytes.len() > 1024, "HDR merge DNG output must contain image data");
+                    assert!(finished["counts"]["catalog"].as_u64().is_some_and(|count| count >= 3), "HDR merge must import merged output into catalog: {finished}");
+                    let merged_id = result["id"].as_u64().expect("HDR merge receipt must expose merged photo id");
+                    assert_eq!(finished["active"].as_u64(), Some(merged_id), "completed HDR merge must select merged photo");
+                    let merged_generation = finished["viewGeneration"].as_u64().expect("merged photo view generation must be numeric");
+                    let decoded = control
+                        .command("lc_preview", &json!({"request": {"photoId": merged_id, "slot": "merge-qualification", "viewGeneration": merged_generation, "width": 96, "height": 64, "quality": "draft", "before": false, "sequence": 1}}))
+                        .expect("merged DNG must decode through lc_preview");
+                    assert!(decoded["handle"].as_str().is_some_and(|handle| !handle.is_empty()), "merged DNG preview must return scoped handle: {decoded}");
+                    assert!(decoded["width"].as_u64().is_some_and(|width| width > 0));
+                    assert!(decoded["height"].as_u64().is_some_and(|height| height > 0));
+                    let decoded_handle = decoded["handle"].as_str().expect("merged preview handle must be text").to_string();
+                    control.command("lc_preview_ack", &json!({"handle": decoded_handle})).expect("merged preview handle must be acknowledged");
+                    click_dom(control, ".lc-dialog-actions .lc-button", "completed HDR dialog must close");
+                    wait_for_dom(control, "return document.querySelector('.lc-dialog') === null;");
+                    control.key("D").expect("merged DNG develop route must execute");
+                    wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
+                    let merged_dom = wait_for_rendered_preview(control, "img.stage-preview", None);
+                    assert!(merged_dom["naturalWidth"].as_u64().is_some_and(|width| width > 0), "merged DNG WebView preview must decode");
+                    assert!(merged_dom["naturalHeight"].as_u64().is_some_and(|height| height > 0), "merged DNG WebView preview must decode");
+                    let receipt_path = scenario.dir().join("merge-hdr.json");
+                    fs::write(&receipt_path, serde_json::to_vec_pretty(&json!({
+                        "schema": 1,
+                        "journey": "react-hdr-preview-option-update-completed-job",
+                        "sourcePaths": paths,
+                        "importTask": import_task,
+                        "importedIds": ids,
+                        "initialPreview": first_preview,
+                        "updatedPreview": second_preview,
+                        "mergeTask": merge_task,
+                        "completedJob": receipt,
+                        "outputDng": output,
+                        "decodedMergedPreview": decoded,
+                        "renderedMergedPreview": merged_dom,
+                    })).expect("HDR merge receipt must serialize")).expect("HDR merge receipt must write");
+                    scenario.keep("merge-hdr-preview-initial.png", &first_screenshot);
+                    scenario.keep("merge-hdr-preview-deghost.png", &second_screenshot);
+                    scenario.keep("merge-hdr.json", &receipt_path);
                 });
             } else if name == "catalogRecovery" {
                 run_catalog_recovery(&binary, scenario, &inputs.catalog, &inputs.png, &baseline_capture, &revision, &installed_hash);

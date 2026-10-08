@@ -13,7 +13,7 @@ use std::sync::{
 };
 use std::{fs, path::Path};
 
-use lightcraft_desktop_host::{DesktopHandle, HostOptions, PreviewRequest};
+use lightcraft_desktop_host::{DesktopHandle, HostOptions, MergePreviewCancelRequest, MergePreviewRequest, PreviewRequest};
 use serde_json::{Value, json};
 use tauri::WebviewWindow;
 use tauri::http::{Request, Response};
@@ -106,6 +106,31 @@ mod tauri_commands {
         blocking(move || {
             let host = host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into()))?;
             Ok(host.preview_store().acknowledge(&handle))
+        })
+        .await
+    }
+
+    #[tauri::command]
+    pub(super) async fn lc_merge_preview(
+        state: State<'_, AppState>,
+        request: MergePreviewRequest,
+    ) -> Result<lightcraft_desktop_host::MergePreviewDescriptor, String> {
+        let host = state.host.clone();
+        let error = state.startup_error.clone();
+        blocking(move || {
+            host.as_ref().ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into())).and_then(|host| host.merge_preview(request))
+        })
+        .await
+    }
+
+    #[tauri::command]
+    pub(super) async fn lc_merge_preview_cancel(state: State<'_, AppState>, request: MergePreviewCancelRequest) -> Result<bool, String> {
+        let host = state.host.clone();
+        let error = state.startup_error.clone();
+        blocking(move || {
+            host.as_ref()
+                .ok_or_else(|| error.unwrap_or_else(|| "desktop host is unavailable".into()))
+                .and_then(|host| host.cancel_merge_preview(request))
         })
         .await
     }
@@ -473,6 +498,18 @@ fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<Strin
                 .preview(serde_json::from_value(request).map_err(|error| format!("lc_preview args are invalid: {error}"))?)
                 .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))?
         }
+        "lc_merge_preview" => {
+            let request = args.get("request").cloned().unwrap_or(args);
+            control_host(app)?
+                .merge_preview(serde_json::from_value(request).map_err(|error| format!("lc_merge_preview args are invalid: {error}"))?)
+                .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))?
+        }
+        "lc_merge_preview_cancel" => {
+            let request = args.get("request").cloned().unwrap_or(args);
+            json!(control_host(app)?.cancel_merge_preview(
+                serde_json::from_value(request).map_err(|error| format!("lc_merge_preview_cancel args are invalid: {error}"))?
+            )?)
+        }
         "lc_preview_ack" => {
             let handle =
                 args.get("handle").and_then(Value::as_str).or_else(|| args.as_str()).ok_or_else(|| "lc_preview_ack requires handle".to_string())?;
@@ -544,6 +581,8 @@ fn qa_control_plugin() -> Option<TauriPlugin<Wry>> {
         .command("lc_snapshot", |app, args| control_dispatch(app, "lc_snapshot", args))
         .command("lc_view_slice", |app, args| control_dispatch(app, "lc_view_slice", args))
         .command("lc_preview", |app, args| control_dispatch(app, "lc_preview", args))
+        .command("lc_merge_preview", |app, args| control_dispatch(app, "lc_merge_preview", args))
+        .command("lc_merge_preview_cancel", |app, args| control_dispatch(app, "lc_merge_preview_cancel", args))
         .command("lc_preview_ack", |app, args| control_dispatch(app, "lc_preview_ack", args))
         .command("lc_qa_viewport", |app, args| control_dispatch(app, "lc_qa_viewport", args))
         .command("lc_native", |app, args| control_dispatch(app, "lc_native", args))
@@ -754,6 +793,8 @@ pub fn run() {
             tauri_commands::lc_snapshot,
             tauri_commands::lc_view_slice,
             tauri_commands::lc_preview,
+            tauri_commands::lc_merge_preview,
+            tauri_commands::lc_merge_preview_cancel,
             tauri_commands::lc_preview_ack,
             tauri_commands::lc_native,
             tauri_commands::lc_preferences

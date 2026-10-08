@@ -1,11 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { acknowledgePreview, cancelMergePreview, convertFileSrc, requestMergePreview } from '../api';
 import { useDesktop } from '../desktop';
-import type { DesktopContextValue, DialogState, JsonObject, UiState } from '../types';
+import type { DesktopContextValue, DialogState, JsonObject, MergePreviewDescriptor, UiState } from '../types';
 import './dialogs.css';
 
 type AnyRecord = Record<string, any>;
 type HostProps = { desktop?: DesktopContextValue };
+let mergePreviewSequence = 0;
+let settingsCameraSequence = 0;
 
 const text = (v: unknown, fallback = '') => typeof v === 'string' ? v : fallback;
 const bool = (v: unknown, fallback = false) => typeof v === 'boolean' ? v : fallback;
@@ -97,14 +100,69 @@ function TextArea({ label, value, onChange, placeholder }: { label: string; valu
 function Select({ label, value, options, onChange, disabled = false }: { label: string; value: string; options: [string, string][]; onChange: (v: string) => void; disabled?: boolean }) { return <label className="lc-field"><span>{label}</span><select value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled}>{options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>; }
 function Check({ children, checked, onChange, disabled = false }: { children: React.ReactNode; checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }) { return <label className="lc-check"><input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} disabled={disabled} /><span>{children}</span></label>; }
 function Note({ children, tone = 'normal' }: { children: React.ReactNode; tone?: 'normal' | 'warning' | 'error' }) { return <p className={`lc-note lc-note-${tone}`} role={tone === 'error' ? 'alert' : undefined}>{children}</p>; }
-function Progress({ snapshot, label, onCancel }: { snapshot: AnyRecord | null; label: string; onCancel?: () => void }) { const job = snapshot?.status?.jobs?.find((j: AnyRecord) => j.kind === 'import' || j.kind === 'export' || j.kind === 'merge'); const completed = num(job?.completed); const total = Math.max(1, num(job?.total, 1)); return <div className="lc-progress" aria-live="polite"><div className="lc-progress-label"><span>{job?.label || label}</span><span>{Math.min(100, Math.round(completed / total * 100))}%</span></div><progress max={total} value={completed} />{onCancel && job?.cancellable !== false && <Button onClick={onCancel}>Cancel</Button>}</div>; }
+type JobTerminal = 'done' | 'failed' | 'cancelled';
+function Progress({ job, label, onCancel, cancelling = false }: { job: AnyRecord | null; label: string; onCancel?: () => void; cancelling?: boolean }) {
+  const completed = num(job?.completed); const total = Math.max(1, num(job?.total, 1));
+  return <div className="lc-progress" aria-live="polite"><div className="lc-progress-label"><span>{text(job?.label, label)}</span><span>{Math.min(100, Math.round(completed / total * 100))}%</span></div><progress max={total} value={completed} />{onCancel && job && job.cancellable !== false && <Button disabled={cancelling} onClick={onCancel}>{cancelling ? 'Cancelling…' : 'Cancel'}</Button>}</div>;
+}
 
 function JobDialog({ kind, desktop, d }: { kind: string; desktop: DesktopContextValue; d: DialogState }) {
-  const [done, setDone] = useState(false); const jobKind = kind.includes('import') ? 'import' : kind.includes('merge') ? 'merge' : 'export';
-  useEffect(() => { let live = true; const poll = async () => { if (!live) return; await desktop.refresh(); const active = desktop.snapshot?.status?.jobs?.some((j) => j.kind === jobKind); if (!active) setDone(true); }; void poll(); const timer = window.setInterval(() => void poll(), 300); return () => { live = false; window.clearInterval(timer); }; }, [desktop, jobKind]);
-  const reveal = async () => { const files = arr(d.params?.files || d.params?.paths); const path = text(files[0] || d.params?.path || d.params?.dir); if (path) await desktop.native('reveal', { path }); };
-  const cancel = async () => { const job = desktop.snapshot?.status?.jobs?.find((j) => j.kind === jobKind); if (job) await desktop.run('task.cancel', { id: job.id }); };
-  return <Frame title={kind.includes('import') ? 'Importing Photos' : kind.includes('merge') ? 'Merging Photos' : 'Exporting Photos'} dismissible={done} onClose={() => done && desktop.setDialog(null)} actions={<><Button disabled={!done} onClick={() => desktop.setDialog(null)}>Close</Button>{(kind.includes('export') && done) && <Button primary onClick={() => void reveal()}>Show in Folder</Button>}</>}><Progress snapshot={desktop.snapshot} label={kind.includes('import') ? 'Importing photos' : kind.includes('merge') ? 'Building merged photo' : 'Exporting photos'} onCancel={done ? undefined : () => void cancel()} />{done && <Note>Operation complete. Changes are recorded in library history.</Note>}</Frame>;
+  const jobKind = kind.includes('import') ? 'import' : kind.includes('merge') ? 'merge' : 'export';
+  const taskId = text(d.params?.taskId);
+  const [job, setJob] = useState<AnyRecord | null>(null);
+  const [terminal, setTerminal] = useState<JobTerminal | null>(null);
+  const [completion, setCompletion] = useState<AnyRecord | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const [pollError, setPollError] = useState('');
+  const snapshotRef = useRef(desktop.snapshot);
+  const seenRef = useRef(false);
+  const terminalRef = useRef<JobTerminal | null>(null);
+  const cancelRequested = useRef(false);
+  snapshotRef.current = desktop.snapshot;
+  const label = kind.includes('import') ? 'Import photos' : kind.includes('merge') ? 'Build merged photo' : 'Export photos';
+  const markTerminal = (value: JobTerminal) => { if (!terminalRef.current) { terminalRef.current = value; setTerminal(value); } };
+  useEffect(() => {
+    let live = true;
+    const poll = async () => {
+      if (!live) return;
+      try { await desktop.refresh(); } catch (reason) { if (live) setPollError(errorText(reason)); return; }
+      if (!live) return;
+      const current = snapshotRef.current;
+      const found = taskId ? current?.status?.jobs?.find((candidate) => candidate.id === taskId) : undefined;
+      if (found) {
+        seenRef.current = true;
+        setJob(found);
+        if (found.error) markTerminal('failed');
+        return;
+      }
+      const completed = taskId ? current?.status?.completedJobs?.find((candidate) => candidate.id === taskId) : undefined;
+      if (completed) {
+        setCompletion(completed.result && typeof completed.result === 'object' ? completed.result as AnyRecord : null);
+        setJob({ id: completed.id, label: completed.label, completed: 1, total: 1, cancellable: false, ...(completed.error ? { error: completed.error } : {}) });
+        markTerminal(completed.state);
+        return;
+      }
+      if (seenRef.current && current?.status?.error) setPollError(text(current.status.error));
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 300);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [desktop.refresh, kind, label, taskId]);
+  const reveal = async () => { const paramsFiles = arr(d.params?.files); const paramsPaths = arr(d.params?.paths); const resultFiles = arr(completion?.files); const resultPaths = arr(completion?.paths); const files = paramsFiles.length ? paramsFiles : paramsPaths.length ? paramsPaths : resultFiles.length ? resultFiles : resultPaths; const path = text(files[0] || d.params?.path || d.params?.dir); if (path) await desktop.native('reveal', { path }); };
+  const cancel = async () => {
+    if (!taskId || cancelling || terminalRef.current) return;
+    cancelRequested.current = true;
+    setCancelling(true);
+    setPollError('');
+    try {
+      const result = await desktop.run('task.cancel', { id: taskId }) as AnyRecord;
+      if (num(result?.cancelled) < 1) setPollError('Operation is no longer running.');
+    } catch (reason) { cancelRequested.current = false; setPollError(errorText(reason)); }
+    finally { setCancelling(false); }
+  };
+  const successful = terminal === 'done';
+  const imported = completion ? (Array.isArray(completion.imported) ? completion.imported.length : num(completion.imported)) : 0;
+  return <Frame title={kind.includes('import') ? 'Importing Photos' : kind.includes('merge') ? 'Merging Photos' : 'Exporting Photos'} dismissible={terminal !== null} onClose={() => terminal && desktop.setDialog(null)} actions={<><Button disabled={!terminal} onClick={() => desktop.setDialog(null)}>Close</Button>{kind.includes('export') && successful && <Button primary onClick={() => void reveal()}>Show in Folder</Button>}</>}><Progress job={job} label={label} onCancel={terminal ? undefined : () => void cancel()} cancelling={cancelling} />{pollError && <Note tone="error">{pollError}</Note>}{terminal === 'done' && <Note>Operation complete. Changes are recorded in library history.{imported > 0 ? ` ${imported} photos imported.` : ''}</Note>}{terminal === 'cancelled' && <Note tone="warning">Operation cancelled.</Note>}{terminal === 'failed' && <Note tone="error">{text(job?.error, 'Operation failed.')}</Note>}</Frame>;
 }
 
 function UnsavedQuitDialog({ desktop, d }: { desktop: DesktopContextValue; d: DialogState }) {
@@ -164,7 +222,7 @@ function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
   const p = d.params || {}; const [source, setSource] = useState(text(p.source)); const [mode, setMode] = useState(text(p.mode, 'add')); const [album, setAlbum] = useState(text(p.album)); const [newAlbum, setNewAlbum] = useState(''); const [keywords, setKeywords] = useState(''); const [organize, setOrganize] = useState(text(p.organize, 'date')); const [folderTemplate, setFolderTemplate] = useState(text(p.folderTemplate, '{date:%Y}/{date:%Y%m%d}')); const [destination, setDestination] = useState(text(p.destination)); const [rename, setRename] = useState(''); const [renameStart, setRenameStart] = useState('1'); const [preset, setPreset] = useState(''); const [metadataPreset, setMetadataPreset] = useState(''); const [dng, setDng] = useState(false); const [candidates, setCandidates] = useState<AnyRecord[]>(arr(p.candidates)); const [checked, setChecked] = useState<boolean[]>(arr(p.checked).length ? arr(p.checked).map(Boolean) : arr(p.candidates).map((c) => !c.duplicate && !c.error)); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   const scan = async (paths: string[]) => { if (!paths.length) return; setSource(paths.join(', ')); setBusy(true); setError(''); try { const result = (await desktop.run('library.importPreview', { paths })) as AnyRecord; setCandidates(arr(result?.candidates)); setChecked(arr(result?.candidates).map((c) => !c.duplicate && !c.error)); } catch (e) { setError(String(e)); } finally { setBusy(false); } };
   const pick = async (kind: 'files' | 'folder' | 'device') => { const paths = await choose(desktop.native, kind === 'folder' ? 'chooseFolder' : kind === 'device' ? 'chooseDevice' : 'chooseFiles', { multiple: kind === 'files' }); await scan(paths); if (kind === 'device') setMode('copy'); };
-  const submit = async () => { const paths = candidates.filter((_, i) => checked[i]).map((c) => c.path).filter(Boolean); if (!paths.length) { setError('Choose at least one photo.'); return; } const custom = folderTemplate.trim(); const templateError = mode !== 'add' && organize === 'custom' ? folderTemplateError(custom) : null; if (templateError) { setError(templateError); return; } setBusy(true); setError(''); try { await desktop.run('library.import', { paths, mode, album: album ? Number(album) : undefined, albumName: newAlbum.trim() || undefined, keywords: keywords.split(',').map((v) => v.trim()).filter(Boolean), preset: preset || undefined, metadataPreset: metadataPreset || undefined, destination: destination || undefined, organize: mode === 'add' ? undefined : organize === 'custom' ? custom : organize || undefined, rename: rename || undefined, renameStart: renameStart ? Number(renameStart) : undefined, dng: dng && mode === 'copy' }); desktop.setDialog({ kind: 'importProgress', params: { paths } }); } catch (e) { setError(String(e)); } finally { setBusy(false); } };
+  const submit = async () => { const paths = candidates.filter((_, i) => checked[i]).map((c) => c.path).filter(Boolean); if (!paths.length) { setError('Choose at least one photo.'); return; } const custom = folderTemplate.trim(); const templateError = mode !== 'add' && organize === 'custom' ? folderTemplateError(custom) : null; if (templateError) { setError(templateError); return; } setBusy(true); setError(''); try { const result = await desktop.run('library.import', { paths, mode, album: album ? Number(album) : undefined, albumName: newAlbum.trim() || undefined, keywords: keywords.split(',').map((v) => v.trim()).filter(Boolean), preset: preset || undefined, metadataPreset: metadataPreset || undefined, destination: destination || undefined, organize: mode === 'add' ? undefined : organize === 'custom' ? custom : organize || undefined, rename: rename || undefined, renameStart: renameStart ? Number(renameStart) : undefined, dng: dng && mode === 'copy' }) as AnyRecord; const taskId = text(result?.taskId); if (!taskId) throw new Error('Import did not return a task ID.'); desktop.setDialog({ kind: 'importProgress', params: { taskId, paths } }); } catch (e) { setError(String(e)); } finally { setBusy(false); } };
   return <Frame title="Import Photos" wide busy={busy} onClose={() => desktop.setDialog(null)} actions={<><Button onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary disabled={busy || !candidates.length} onClick={() => void submit()}>Import {candidates.filter((_, i) => checked[i]).length || ''} Photos</Button></>}><div className="lc-dialog-toolbar"><Button onClick={() => void pick('files')}>Choose Photos…</Button><Button onClick={() => void pick('folder')}>Choose Folder…</Button><Button onClick={() => void pick('device')}>Camera or Card…</Button></div>{source && <Note>Source: {source}</Note>}{error && <Note tone="error">{error}</Note>}<div className="lc-import-layout"><div className="lc-candidate-list"><div className="lc-section-heading"><strong>Review</strong><span>{candidates.length} found</span></div>{candidates.length ? candidates.map((c, i) => <label className={`lc-candidate ${c.duplicate || c.error ? 'lc-candidate-muted' : ''}`} key={`${c.path || c.name || i}-${i}`}><input type="checkbox" checked={checked[i] ?? false} disabled={Boolean(c.duplicate || c.error)} onChange={(e) => setChecked((old) => old.map((v, n) => n === i ? e.target.checked : v))} /><span className="lc-thumb-placeholder" aria-hidden="true">{text(c.format, 'IMG').slice(0, 3).toUpperCase()}</span><span className="lc-candidate-copy"><strong>{text(c.name, text(c.path, 'Photo'))}</strong><small>{text(c.path)}{c.duplicate ? ` · Duplicate (${c.duplicate})` : c.error ? ` · ${c.error}` : ''}</small></span></label>) : <Note>Choose photos or a folder to review files before adding them.</Note>}</div><div className="lc-form-stack"><Select label="Add photos" value={mode} options={[["add", 'In place'], ['copy', 'Copy into library'], ['move', 'Move into library']]} onChange={setMode} /><Field label="Existing album ID" value={album} onChange={setAlbum} placeholder="Optional" /><Field label="New album" value={newAlbum} onChange={setNewAlbum} placeholder="Optional" /><Field label="Keywords" value={keywords} onChange={setKeywords} placeholder="Comma-separated" />{mode !== 'add' && <><Field label="Destination folder" value={destination} onChange={setDestination} placeholder="Library Originals by default" /><Select label="Organize copies" value={organize} options={[["date", 'By capture date'], ['month', 'By month'], ['flat', 'One folder'], ['custom', 'Custom template']]} onChange={setOrganize} />{organize === 'custom' && <><Field label="Folder template" value={folderTemplate} onChange={setFolderTemplate} placeholder="{date:%Y}/{date:%Y%m%d}" /><Note>Use relative folders & photo tags such as {`{date:%Y}`}; no drive or parent folders.</Note></>}<Field label="File naming" value={rename} onChange={setRename} placeholder="Keep original names" /><Check checked={dng} onChange={setDng} disabled={mode !== 'copy'}>Copy raw files as DNG</Check></>}<Field label="Develop preset ID" value={preset} onChange={setPreset} placeholder="Optional" /><Field label="Metadata preset" value={metadataPreset} onChange={setMetadataPreset} placeholder="Optional" /></div></div></Frame>;
 }
 
@@ -187,7 +245,7 @@ function exportPercent(value: string, fallback: number, min: number, max: number
 
 function ExportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextValue }) {
   const p = d.params || {}; const supplied = (p.opts as AnyRecord) || {}; const [opts, setOpts] = useState<AnyRecord>({ ...supplied }); const [dir, setDir] = useState(text(p.dir)); const [fullSize, setFullSize] = useState(bool(p.fullSize, false)); const [preset, setPreset] = useState(text(p.preset)); const [watermark, setWatermark] = useState<AnyRecord>(() => watermarkDefaults(supplied.watermark)); const [watermarkOn, setWatermarkOn] = useState(() => { const value = watermarkDefaults(supplied.watermark); return Boolean(text(value.text).trim() || text(value.image).trim()); }); const [watermarkStyle, setWatermarkStyle] = useState(() => text(watermarkDefaults(supplied.watermark).image) ? 'graphic' : 'text'); const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const set = (key: string, value: unknown) => setOpts((old) => ({ ...old, [key]: value })); const setWm = (key: string, value: unknown) => setWatermark((old) => ({ ...old, [key]: value })); const format = text(opts.format, 'jpeg'); const rendered = format !== 'dng' && format !== 'original';
-  const submit = async () => { if (!dir) { setError('Choose an export folder.'); return; } setBusy(true); setError(''); try { const payload: AnyRecord = { ...opts, dir, ids: p.ids }; delete payload.rename; delete payload.resizeMode; delete payload.resizeValue; delete payload.fullSize; if (opts.rename) payload.naming = opts.rename; if (preset.trim()) payload.preset = preset.trim(); ['resize', 'longEdge', 'shortEdge', 'width', 'height', 'megapixels', 'percent'].forEach((key) => { delete payload[key]; }); if (fullSize) payload.longEdge = 0; else { const mode = text(opts.resizeMode, 'longEdge'); const key = mode === 'dimensions' ? 'width' : mode; payload[key] = num(opts.resizeValue, 2048); if (mode === 'dimensions') payload.height = num(opts.resizeHeight, num(opts.resizeValue, 2048)); payload.dontEnlarge = bool(opts.dontEnlarge, true); } if (watermarkOn && rendered) payload.watermark = { ...watermark }; else delete payload.watermark; const result = await desktop.run('app.export', payload) as AnyRecord; desktop.setDialog({ kind: 'exportProgress', params: { dir, files: result?.files || [] } }); } catch (e) { setError(String(e)); setBusy(false); } };
+  const submit = async () => { if (!dir) { setError('Choose an export folder.'); return; } setBusy(true); setError(''); try { const payload: AnyRecord = { ...opts, dir, ids: p.ids }; delete payload.rename; delete payload.resizeMode; delete payload.resizeValue; delete payload.fullSize; if (opts.rename) payload.naming = opts.rename; if (preset.trim()) payload.preset = preset.trim(); ['resize', 'longEdge', 'shortEdge', 'width', 'height', 'megapixels', 'percent'].forEach((key) => { delete payload[key]; }); if (fullSize) payload.longEdge = 0; else { const mode = text(opts.resizeMode, 'longEdge'); const key = mode === 'dimensions' ? 'width' : mode; payload[key] = num(opts.resizeValue, 2048); if (mode === 'dimensions') payload.height = num(opts.resizeHeight, num(opts.resizeValue, 2048)); payload.dontEnlarge = bool(opts.dontEnlarge, true); } if (watermarkOn && rendered) payload.watermark = { ...watermark }; else delete payload.watermark; const result = await desktop.run('app.export', payload) as AnyRecord; const taskId = text(result?.taskId); if (!taskId) throw new Error('Export did not return a task ID.'); desktop.setDialog({ kind: 'exportProgress', params: { taskId, dir, files: result?.files || [] } }); } catch (e) { setError(String(e)); setBusy(false); } };
   return (
     <Frame title="Export" wide busy={busy} onClose={() => desktop.setDialog(null)} actions={<><Button onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary disabled={busy} onClick={() => void submit()}>Export</Button></>}>
       <div className="lc-dialog-toolbar">
@@ -229,7 +287,7 @@ function ExportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
                 <Field label="Graphic path" value={text(watermark.image)} onChange={(v) => setWm('image', v)} placeholder="logo.png" />
                 <Field label="Image width (%)" type="number" value={num(watermark.imageWidth, 0.2) * 100} min={2} max={100} step={1} onChange={(v) => setWm('imageWidth', exportPercent(v, 0.2, 2, 100))} />
               </> : <>
-                <TextArea label="Text" value={text(watermark.text)} onChange={(v) => setWm('text', v)} placeholder="© Your Name" />
+                <TextArea label="Watermark text" value={text(watermark.text)} onChange={(v) => setWm('text', v)} placeholder="© Your Name" />
                 <Check checked={bool(watermark.vertical)} onChange={(v) => setWm('vertical', v)}>Vertical text</Check>
                 <Field label="Size (%)" type="number" value={num(watermark.size, 0.035) * 100} min={1} max={15} step={0.5} onChange={(v) => setWm('size', exportPercent(v, 0.035, 1, 15))} />
                 <Field label="Colour" type="color" value={watermarkHex(watermark.color)} onChange={(v) => setWm('color', watermarkColor(v))} />
@@ -251,10 +309,107 @@ function ExportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
 }
 
 function MergeDialog({ kind, d, desktop }: { kind: string; d: DialogState; desktop: DesktopContextValue }) {
-  const [options, setOptions] = useState<AnyRecord>({ ...(d.params?.options as AnyRecord || {}) }); const [error, setError] = useState(''); const set = (key: string, value: unknown) => setOptions((old) => ({ ...old, [key]: value }));
-  const merge = async () => { try { await desktop.run(kind, options); desktop.setDialog({ kind: `${kind}Progress`, params: {} }); } catch (e) { setError(String(e)); } };
+  const defaults: AnyRecord = { align: true, deghost: 'none', showOverlay: false, autoSettings: true, stack: false, projection: 'auto', boundaryWarp: 0, autoCrop: true, fillEdges: false, bracket: 0 };
+  const suppliedOptions = d.params?.options && typeof d.params.options === 'object' && !Array.isArray(d.params.options) ? d.params.options as AnyRecord : {};
+  const [options, setOptions] = useState<AnyRecord>({ ...defaults, ...suppliedOptions });
+  const [error, setError] = useState('');
+  const [previewError, setPreviewError] = useState('');
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [mergeBusy, setMergeBusy] = useState(false);
+  const [preview, setPreview] = useState<{ descriptor: MergePreviewDescriptor; url: string } | null>(null);
+  const sequenceRef = useRef(0);
+  const currentPreview = useRef<{ descriptor: MergePreviewDescriptor; url: string } | null>(null);
+  const mounted = useRef(true);
+  const slot = 'main__merge';
+  const suppliedIds = arr(d.params?.ids ?? suppliedOptions.ids).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id));
+  const selectedIds = suppliedIds.length ? suppliedIds : (desktop.snapshot?.selection || []).filter((id): id is number => Number.isSafeInteger(id));
+  const selectionKey = selectedIds.join(',');
+  const set = (key: string, value: unknown) => setOptions((old) => ({ ...old, [key]: value }));
+  const params = () => {
+    const clean = Object.fromEntries(Object.entries(options).filter(([key]) => key !== 'preview' && key !== 'previewPath'));
+    return selectedIds.length ? { ...clean, ids: selectedIds } : clean;
+  };
+  const acknowledge = (handles: Iterable<string>) => {
+    const unique = [...new Set(handles)].filter(Boolean);
+    if (!unique.length) return;
+    void Promise.allSettled(unique.map((handle) => acknowledgePreview(handle)));
+  };
+  const cancelPreview = () => {
+    const sequence = sequenceRef.current;
+    if (!sequence) return;
+    sequenceRef.current += 1;
+    void cancelMergePreview({ slot, sequence }).catch(() => undefined);
+  };
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      cancelPreview();
+      const visible = currentPreview.current?.descriptor.handle;
+      acknowledge([visible || '']);
+      currentPreview.current = null;
+    };
+  }, []);
+  useEffect(() => {
+    if (!desktop.snapshot) return;
+    const sequence = ++mergePreviewSequence;
+    sequenceRef.current = sequence;
+    const viewGeneration = desktop.snapshot.viewGeneration;
+    let cancelled = false;
+    setPreviewBusy(true);
+    setPreviewError('');
+    const request = async () => {
+      let descriptor: MergePreviewDescriptor | null = null;
+      try {
+        descriptor = await requestMergePreview({ command: kind as 'merge.hdr' | 'merge.panorama' | 'merge.hdrPanorama', params: params(), slot, viewGeneration, sequence });
+        if (cancelled || !mounted.current || sequence !== sequenceRef.current || descriptor.sequence !== sequence || descriptor.viewGeneration !== viewGeneration) {
+          acknowledge([descriptor.handle]);
+          return;
+        }
+        const url = convertFileSrc(descriptor.handle);
+        const image = new Image();
+        await new Promise<void>((resolve, reject) => {
+          image.onload = () => { void (image.decode ? image.decode() : Promise.resolve()).then(() => resolve()).catch(reject); };
+          image.onerror = () => reject(new Error('Merge preview could not be decoded.'));
+          image.src = url;
+        });
+        if (cancelled || !mounted.current || sequence !== sequenceRef.current) {
+          acknowledge([descriptor.handle]);
+          return;
+        }
+        const previous = currentPreview.current?.descriptor.handle;
+        currentPreview.current = { descriptor, url };
+        const next = { descriptor, url };
+        descriptor = null;
+        setPreview(next);
+        setPreviewBusy(false);
+        setPreviewError('');
+        acknowledge([previous || '']);
+      } catch (reason) {
+        if (descriptor) acknowledge([descriptor.handle]);
+        if (cancelled || !mounted.current || sequence !== sequenceRef.current) return;
+        setPreviewBusy(false);
+        setPreviewError(errorText(reason));
+      }
+    };
+    void request();
+    return () => {
+      cancelled = true;
+      void cancelMergePreview({ slot, sequence }).catch(() => undefined);
+    };
+  }, [kind, options, desktop.snapshot?.viewGeneration, selectionKey]);
+  const merge = async () => {
+    if (mergeBusy) return;
+    setMergeBusy(true);
+    setError('');
+    try { const result = await desktop.run(kind, params()) as AnyRecord; const taskId = text(result?.taskId); if (!taskId) throw new Error('Merge did not return a task ID.'); desktop.setDialog({ kind: `${kind}Progress`, params: { taskId } }); } catch (e) { setMergeBusy(false); setError(errorText(e)); }
+  };
   const pano = kind !== 'merge.hdr'; const hdr = kind !== 'merge.panorama';
-  return <Frame title={kind === 'merge.panorama' ? 'Panorama Merge' : kind === 'merge.hdrPanorama' ? 'HDR Panorama Merge' : 'HDR Merge'} wide onClose={() => desktop.setDialog(null)} actions={<><Button onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary onClick={() => void merge()}>Merge</Button></>}><div className="lc-merge-layout"><div className="lc-merge-preview" aria-label="Merge preview"><span>Preview updates as options change</span></div><div className="lc-form-stack">{hdr && <><Check checked={bool(options.align, true)} onChange={(v) => set('align', v)}>Align photos</Check><Select label="Deghost" value={text(options.deghost, 'none')} options={[["none", 'None'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High']]} onChange={(v) => set('deghost', v)} /><Check checked={bool(options.autoSettings, true)} onChange={(v) => set('autoSettings', v)}>Auto settings</Check></>}{pano && <><Select label="Projection" value={text(options.projection, 'auto')} options={[["auto", 'Auto'], ['spherical', 'Spherical'], ['cylindrical', 'Cylindrical'], ['perspective', 'Perspective']]} onChange={(v) => set('projection', v)} /><Field label="Boundary warp" type="number" value={num(options.boundaryWarp, 0)} min={0} max={100} onChange={(v) => set('boundaryWarp', Number(v))} /><Check checked={bool(options.autoCrop, true)} onChange={(v) => set('autoCrop', v)}>Auto crop</Check><Check checked={bool(options.fillEdges)} onChange={(v) => set('fillEdges', v)}>Fill edges</Check></>}{error && <Note tone="error">{error}</Note>}<Check checked={bool(options.stack)} onChange={(v) => set('stack', v)}>Stack originals with result</Check></div></div></Frame>;
+  const info = preview?.descriptor.info || {};
+  const used = arr(info.used).length;
+  const ev = arr(info.ev).filter((value): value is number => typeof value === 'number').map((value) => `${value >= 0 ? '+' : ''}${value.toFixed(1)}`).join(' / ');
+  const summary = pano ? `${used} photos${text(info.projection) ? ` · ${text(info.projection)}` : ''}` : `${used || arr(info.ev).length} photos${ev ? ` · exposures ${ev} EV` : ''}`;
+  return <Frame title={kind === 'merge.panorama' ? 'Panorama Merge Preview' : kind === 'merge.hdrPanorama' ? 'HDR Panorama Merge Preview' : 'HDR Merge Preview'} wide busy={mergeBusy} onClose={() => { cancelPreview(); desktop.setDialog(null); }} actions={<><Button onClick={() => { cancelPreview(); desktop.setDialog(null); }}>Cancel</Button><Button primary disabled={mergeBusy} onClick={() => void merge()}>Merge</Button></>}><div className="lc-merge-layout"><div className="lc-merge-preview" aria-label="Merge preview">{preview ? <img src={preview.url} alt="Merge preview" /> : <span>{previewError || (previewBusy ? 'Building preview…' : 'Select photos to preview.')}</span>}{previewBusy && preview && <span className="lc-merge-preview-status" aria-live="polite">Updating preview…</span>}{previewError && preview && <span className="lc-merge-preview-status" role="alert">{previewError}</span>}{preview && <small className="lc-merge-preview-info">{summary} · {preview.descriptor.width} × {preview.descriptor.height}</small>}</div><div className="lc-form-stack">{pano && <><Select label="Projection" value={text(options.projection, 'auto')} options={[["auto", 'Auto Select'], ['spherical', 'Spherical'], ['cylindrical', 'Cylindrical'], ['perspective', 'Perspective']]} onChange={(v) => set('projection', v)} /><Field label="Boundary warp" type="number" value={num(options.boundaryWarp, 0)} min={0} max={100} onChange={(v) => set('boundaryWarp', Number(v))} /><Check checked={bool(options.fillEdges)} onChange={(v) => set('fillEdges', v)}>Fill edges</Check><Check checked={bool(options.autoCrop, true)} onChange={(v) => set('autoCrop', v)}>Auto crop</Check></>}{hdr && <><Check checked={bool(options.align, true)} onChange={(v) => set('align', v)}>Auto align</Check><Select label="Deghost amount" value={text(options.deghost, 'none')} options={[["none", 'None'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High']]} onChange={(v) => set('deghost', v)} />{kind === 'merge.hdr' && <Check checked={bool(options.showOverlay)} disabled={text(options.deghost, 'none') === 'none'} onChange={(v) => set('showOverlay', v)}>Show deghost overlay</Check>}{kind === 'merge.hdrPanorama' && <Field label="Photos per bracket (0 = auto)" type="number" value={num(options.bracket, 0)} min={0} max={9} step={1} onChange={(v) => set('bracket', Math.max(0, Math.min(9, Math.round(Number(v) || 0))))} />}</>}{error && <Note tone="error">{error}</Note>}{previewError && !preview && <Note tone="error">{previewError}</Note>}<Check checked={bool(options.autoSettings, true)} onChange={(v) => set('autoSettings', v)}>Auto settings</Check><Check checked={bool(options.stack)} onChange={(v) => set('stack', v)}>Create stack</Check></div></div></Frame>;
 }
 
 function AlbumDialog({ folder, desktop, d }: { folder: boolean; desktop: DesktopContextValue; d: DialogState }) { const [name, setName] = useState(text(d.params?.name)); const [error, setError] = useState(''); const save = async () => { if (!name.trim()) { setError(`Enter a ${folder ? 'folder' : 'album'} name.`); return; } try { await desktop.run(folder ? 'album.create' : 'album.create', { name: name.trim(), folder, addSelected: !folder }); desktop.setDialog(null); } catch (e) { setError(String(e)); } }; return <Frame title={folder ? 'New Folder' : 'New Album'} onClose={() => desktop.setDialog(null)} actions={<><Button onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary onClick={() => void save()}>Create</Button></>}><Field label="Name" value={name} onChange={setName} placeholder={folder ? 'Folder name' : 'Album name'} />{error && <Note tone="error">{error}</Note>}</Frame>; }
@@ -264,61 +419,72 @@ function SettingsDialog({ desktop, d }: { desktop: DesktopContextValue; d: Dialo
   const record = (value: unknown): AnyRecord => value && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : {};
   const persisted = record(desktop.snapshot?.preferences);
   const persistedUi = record(persisted.ui ?? persisted.layout ?? persisted);
-  const persistedGeneral = record(persistedUi.general);
-  const persistedPerformance = record(persistedUi.performance);
-  const legacy = record(persisted.settings);
   const supplied = record(d.params?.values);
   const initial: AnyRecord = {
-    ...legacy,
-    ...persistedUi,
-    ...persistedGeneral,
-    ...persistedPerformance,
-    ...supplied,
-    theme: text(supplied.theme, text(persistedUi.theme, text(persistedGeneral.theme, text(legacy.theme, desktop.ui.theme)))),
-    locale: text(supplied.locale, text(persistedUi.locale, text(persistedGeneral.locale, text(legacy.locale, desktop.ui.locale)))),
-    confirmDelete: typeof supplied.confirmDelete === 'boolean' ? supplied.confirmDelete : typeof persistedUi.confirmDelete === 'boolean' ? persistedUi.confirmDelete : typeof persistedGeneral.confirmDelete === 'boolean' ? persistedGeneral.confirmDelete : typeof legacy.confirmDelete === 'boolean' ? legacy.confirmDelete : desktop.ui.confirmDelete,
-    previewEdge: num(supplied.previewEdge, num(persistedUi.previewEdge, num(persistedPerformance.previewEdge, num(legacy.previewEdge, desktop.ui.previewEdge)))),
-    cacheMb: num(supplied.cacheMb, num(persistedUi.cacheMb, num(persistedPerformance.cacheMb, num(persisted.cacheMb, 0)))),
-    memoryMb: Number(supplied.memoryMb ?? supplied.memoryBudget ?? persistedUi.memoryMb ?? persistedUi.memoryBudget ?? persistedPerformance.memoryMb ?? persistedPerformance.memoryBudget ?? desktop.ui.memoryMb),
-    gpu: typeof supplied.gpu === 'boolean' ? supplied.gpu : typeof persistedUi.gpu === 'boolean' ? persistedUi.gpu : typeof persistedPerformance.gpu === 'boolean' ? persistedPerformance.gpu : desktop.ui.gpu,
+    ...record(persisted.settings), ...persistedUi, ...supplied,
+    theme: text(supplied.theme, text(persistedUi.theme, desktop.ui.theme)),
+    locale: text(supplied.locale, text(persistedUi.locale, desktop.ui.locale)),
+    confirmDelete: typeof supplied.confirmDelete === 'boolean' ? supplied.confirmDelete : typeof persistedUi.confirmDelete === 'boolean' ? persistedUi.confirmDelete : desktop.ui.confirmDelete,
+    previewEdge: num(supplied.previewEdge, num(persistedUi.previewEdge, desktop.ui.previewEdge)),
+    memoryMb: Number(supplied.memoryMb ?? supplied.memoryBudget ?? persistedUi.memoryMb ?? desktop.ui.memoryMb),
+    gpu: typeof supplied.gpu === 'boolean' ? supplied.gpu : typeof persistedUi.gpu === 'boolean' ? persistedUi.gpu : desktop.ui.gpu,
   };
   const requestedTab = text(d.params?.tab, 'general');
-  const [tab, setTab] = useState(['general', 'import', 'performance', 'language'].includes(requestedTab) ? requestedTab : 'general');
+  const tabs = ['general', 'import', 'performance', 'language'];
+  const [tab, setTab] = useState(tabs.includes(requestedTab) ? requestedTab : 'general');
   const [values, setValues] = useState<AnyRecord>(initial);
+  const [presets, setPresets] = useState<AnyRecord[]>([]);
+  const [metadataPresets, setMetadataPresets] = useState<AnyRecord[]>([]);
+  const [smartOriginalPath, setSmartOriginalPath] = useState('');
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [smartError, setSmartError] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const tabs = ['general', 'import', 'performance', 'language'];
-  const update = (key: string, value: unknown) => setValues((old) => ({ ...old, [key]: value }));
+  const dirty = useRef(new Set<string>());
+  const sectionFor = (key: string) => key === 'theme' || key === 'confirmDelete' ? 'general' : key === 'locale' ? 'language' : ['rawPreset', 'otherPreset', 'perCamera', 'cameras', 'copyright', 'creator', 'metadataPreset', 'xmpAutoWrite', 'xmpNaming', 'autoFolder', 'autoCopy', 'autoAlbum'].includes(key) ? 'import' : 'performance';
+  const sectionDirty = (section: string) => [...dirty.current].some((key) => sectionFor(key) === section);
+  const update = (key: string, value: unknown) => { dirty.current.add(key); setValues((old) => ({ ...old, [key]: value })); };
+  const cameraDefaults = arr(values.cameras).map((value) => record(value));
 
   useEffect(() => {
     let live = true;
     const load = async () => {
       try {
-        const [library, gpu, memory] = await Promise.all([
-          desktop.run('library.preferences', {}),
-          desktop.run('app.gpu', {}),
-          desktop.run('app.memoryBudget', {}),
+        const [libraryPrefs, xmpPrefs, gpu, memory, presetResult, metadataResult] = await Promise.all([
+          desktop.run('library.preferences', {}), desktop.run('library.xmpPreferences', {}), desktop.run('app.gpu', {}), desktop.run('app.memoryBudget', {}), desktop.run('presets.list', {}), desktop.run('metadata.presets', {}),
         ]);
+        let smart: AnyRecord = {};
+        try { smart = record(await desktop.run('library.smartPreviewsLocation', {})); } catch (reason) { if (live) setSmartError(errorText(reason)); }
         if (!live) return;
-        const libraryPrefs = record(library);
-        const importPrefs = record(libraryPrefs.import);
-        const gpuReport = record(gpu);
-        const memoryReport = record(memory);
-        setValues((old) => ({
-          ...old,
-          rawPreset: importPrefs.rawPreset == null ? old.rawPreset : text(importPrefs.rawPreset, 'default'),
-          otherPreset: importPrefs.otherPreset == null ? old.otherPreset : text(importPrefs.otherPreset, 'default'),
-          perCamera: typeof importPrefs.perCamera === 'boolean' ? importPrefs.perCamera : old.perCamera,
-          cameras: importPrefs.cameras ?? old.cameras,
-          copyright: text(importPrefs.copyright, text(old.copyright)),
-          creator: text(importPrefs.creator, text(old.creator)),
-          metadataPreset: importPrefs.metadataPreset == null ? '' : text(importPrefs.metadataPreset),
-          cacheMb: num(libraryPrefs.cacheMb, num(old.cacheMb)),
-          gpu: typeof gpuReport.enabled === 'boolean' ? gpuReport.enabled : old.gpu,
-          memoryMb: num(old.memoryMb) === 0 ? 0 : num(memoryReport.budget, num(old.memoryMb * 1048576)) / 1048576,
-        }));
+        const library = record(libraryPrefs); const imports = record(library.import); const xmp = record(xmpPrefs);
+        const smartPath = text(smart.path); setSmartOriginalPath(smartPath);
+        setPresets(arr(presetResult).map(record)); setMetadataPresets(arr(metadataResult).map(record));
+        setValues((old) => {
+          const next = { ...old };
+          if (!dirty.current.has('rawPreset')) next.rawPreset = imports.rawPreset == null ? old.rawPreset : text(imports.rawPreset, 'default');
+          if (!dirty.current.has('otherPreset')) next.otherPreset = imports.otherPreset == null ? old.otherPreset : text(imports.otherPreset, 'default');
+          if (!dirty.current.has('perCamera') && typeof imports.perCamera === 'boolean') next.perCamera = imports.perCamera;
+          if (!dirty.current.has('cameras') && Array.isArray(imports.cameras)) next.cameras = imports.cameras.map((camera: unknown) => ({ ...record(camera), _settingsKey: `camera-${settingsCameraSequence++}` }));
+          if (!dirty.current.has('copyright')) next.copyright = text(imports.copyright, text(old.copyright));
+          if (!dirty.current.has('creator')) next.creator = text(imports.creator, text(old.creator));
+          if (!dirty.current.has('metadataPreset')) next.metadataPreset = imports.metadataPreset == null ? 'none' : text(imports.metadataPreset);
+          if (!dirty.current.has('autoFolder')) next.autoFolder = imports.autoFolder == null ? '' : text(imports.autoFolder);
+          if (!dirty.current.has('autoCopy') && typeof imports.autoCopy === 'boolean') next.autoCopy = imports.autoCopy;
+          if (!dirty.current.has('autoAlbum')) next.autoAlbum = imports.autoAlbum == null ? '' : text(imports.autoAlbum);
+          if (!dirty.current.has('xmpAutoWrite') && typeof xmp.autoWrite === 'boolean') next.xmpAutoWrite = xmp.autoWrite;
+          if (!dirty.current.has('xmpNaming')) next.xmpNaming = text(xmp.naming, text(old.xmpNaming, 'stem'));
+          if (!dirty.current.has('cacheMb')) next.cacheMb = num(library.cacheMb, num(old.cacheMb));
+          if (!dirty.current.has('forgetLocalDays')) next.forgetLocalDays = num(library.forgetLocalDays, num(old.forgetLocalDays));
+          if (!dirty.current.has('smartPath')) next.smartPath = smartPath;
+          next.smartAvailable = Boolean(smartPath); next.smartCount = num(smart.count); next.smartBytes = num(smart.bytes);
+          if (!dirty.current.has('gpu') && typeof record(gpu).enabled === 'boolean') next.gpu = record(gpu).enabled;
+          if (!dirty.current.has('memoryMb')) next.memoryMb = num(old.memoryMb) === 0 ? 0 : num(record(memory).budget, num(old.memoryMb * 1048576)) / 1048576;
+          return next;
+        });
+        setLoaded(true);
       } catch (reason) {
-        if (live) setError(errorText(reason));
+        if (live) { setLoadError(errorText(reason)); setLoaded(true); }
       }
     };
     void load();
@@ -326,42 +492,77 @@ function SettingsDialog({ desktop, d }: { desktop: DesktopContextValue; d: Dialo
   }, []);
 
   const save = async () => {
-    setBusy(true);
-    setError('');
-    try {
-      if (tab === 'import') {
-        const allowed = ['rawPreset', 'otherPreset', 'perCamera', 'cameras', 'copyright', 'creator', 'metadataPreset'];
-        const settings = Object.fromEntries(allowed.filter((key) => values[key] !== undefined).map((key) => [key, values[key]]));
-        await desktop.run('library.preferences', { import: settings });
-      }
-      if (values.cacheMb != null) await desktop.run('library.preferences', { cacheMb: Math.max(0, Math.round(num(values.cacheMb))) });
-      if (typeof values.gpu === 'boolean') await desktop.run('app.gpu', { enabled: values.gpu });
-      const memoryMb = num(values.memoryMb, num(values.memoryBudget));
-      if (memoryMb >= 64) await desktop.run('app.memoryBudget', { mb: Math.round(memoryMb) });
-      const memoryChoice = memoryMb >= 0 ? Math.round(memoryMb) : desktop.ui.memoryMb;
-      const edge = Math.max(256, Math.min(8192, Math.round(num(values.previewEdge, desktop.ui.previewEdge))));
-      if (tab === 'performance' && edge !== desktop.ui.previewEdge) {
-        await desktop.run('library.buildPreviews', { size: 'standard', edge });
-      }
-      const uiPatch: AnyRecord = {
-        theme: values.theme,
-        locale: values.locale,
-        confirmDelete: values.confirmDelete,
-        previewEdge: edge,
-        gpu: values.gpu,
-        memoryMb: memoryChoice,
-      };
-      await desktop.native('preferences.patch', { ui: Object.fromEntries(Object.entries(uiPatch).filter(([, value]) => value !== undefined)) });
-      desktop.setUi(uiPatch as Partial<UiState>);
-      desktop.setDialog(null);
-    } catch (reason) {
-      setError(errorText(reason));
-    } finally {
+    if (!loaded) return;
+    setBusy(true); setError('');
+    const fields = dirty.current;
+    const requestedMemoryMb = num(values.memoryMb, num(values.memoryBudget));
+    if (fields.has('memoryMb') && requestedMemoryMb !== 0 && requestedMemoryMb < 64) {
+      setError('Memory budget must be 0 (automatic) or at least 64 MB.');
       setBusy(false);
+      return;
     }
+    try {
+      if (sectionDirty('import')) {
+        const importPatch: AnyRecord = {};
+        if (fields.has('rawPreset')) importPatch.rawPreset = text(values.rawPreset).trim() || 'default';
+        if (fields.has('otherPreset')) importPatch.otherPreset = text(values.otherPreset).trim() || 'default';
+        if (fields.has('perCamera')) importPatch.perCamera = bool(values.perCamera);
+        if (fields.has('cameras')) importPatch.cameras = arr(values.cameras).map((value: unknown): AnyRecord => record(value)).map((camera: AnyRecord): AnyRecord => ({ camera: text(camera.camera).trim(), preset: text(camera.preset).trim() || null })).filter((camera: AnyRecord) => camera.camera);
+        if (fields.has('copyright')) importPatch.copyright = text(values.copyright).trim();
+        if (fields.has('creator')) importPatch.creator = text(values.creator).trim();
+        if (fields.has('metadataPreset')) importPatch.metadataPreset = text(values.metadataPreset).trim() || null;
+        if (Object.keys(importPatch).length) await desktop.run('library.preferences', { import: importPatch });
+        if (fields.has('xmpAutoWrite') || fields.has('xmpNaming')) await desktop.run('library.xmpPreferences', { ...(fields.has('xmpAutoWrite') ? { autoWrite: bool(values.xmpAutoWrite) } : {}), ...(fields.has('xmpNaming') ? { naming: text(values.xmpNaming, 'stem') } : {}) });
+        if (fields.has('autoFolder') || fields.has('autoCopy') || fields.has('autoAlbum')) await desktop.run('library.autoImport', { ...(fields.has('autoFolder') ? { folder: text(values.autoFolder).trim() || null } : {}), ...(fields.has('autoCopy') ? { copy: bool(values.autoCopy) } : {}), ...(fields.has('autoAlbum') ? { album: text(values.autoAlbum).trim() || null } : {}) });
+      }
+      if (sectionDirty('performance')) {
+        if (fields.has('cacheMb')) await desktop.run('library.preferences', { cacheMb: Math.max(0, Math.round(num(values.cacheMb))) });
+        if (fields.has('forgetLocalDays')) await desktop.run('library.preferences', { forgetLocalDays: Math.max(0, Math.round(num(values.forgetLocalDays))) });
+        if (fields.has('clearCache') && values.clearCache) await desktop.run('library.clearPreviews', {});
+        const existing = text(values.smartExisting, 'move');
+        if (fields.has('smartReset') && bool(values.smartReset)) await desktop.run('library.smartPreviewsLocation', { reset: true, existing });
+        else if (fields.has('smartPath') && text(values.smartPath) && text(values.smartPath) !== smartOriginalPath) await desktop.run('library.smartPreviewsLocation', { path: text(values.smartPath), existing });
+        if (fields.has('gpu') && typeof values.gpu === 'boolean') await desktop.run('app.gpu', { enabled: values.gpu });
+        if (fields.has('memoryMb') && requestedMemoryMb >= 64) await desktop.run('app.memoryBudget', { mb: Math.round(requestedMemoryMb) });
+        const edge = Math.max(256, Math.min(8192, Math.round(num(values.previewEdge, desktop.ui.previewEdge))));
+        if (fields.has('previewEdge') && edge !== desktop.ui.previewEdge) await desktop.run('library.buildPreviews', { size: 'standard', edge });
+      }
+      const uiPatch: AnyRecord = {};
+      if (fields.has('theme')) uiPatch.theme = values.theme;
+      if (fields.has('confirmDelete')) uiPatch.confirmDelete = values.confirmDelete;
+      if (fields.has('locale')) uiPatch.locale = values.locale;
+      if (fields.has('previewEdge')) uiPatch.previewEdge = Math.max(256, Math.min(8192, Math.round(num(values.previewEdge, desktop.ui.previewEdge))));
+      if (fields.has('gpu')) uiPatch.gpu = values.gpu;
+      if (fields.has('memoryMb')) uiPatch.memoryMb = num(values.memoryMb, desktop.ui.memoryMb);
+      if (Object.keys(uiPatch).length) { await desktop.native('preferences.patch', { ui: uiPatch }); desktop.setUi(uiPatch as Partial<UiState>); }
+      desktop.setDialog(null);
+    } catch (reason) { setError(errorText(reason)); } finally { setBusy(false); }
   };
 
-  return <Frame title="Settings" wide busy={busy} onClose={() => desktop.setDialog(null)} actions={<><Button disabled={busy} onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary disabled={busy} onClick={() => void save()}>Save</Button></>}><div className="lc-settings"><nav aria-label="Settings sections">{tabs.map((item) => <button key={item} className={tab === item ? 'lc-settings-tab active' : 'lc-settings-tab'} onClick={() => setTab(item)}>{item[0].toUpperCase() + item.slice(1)}</button>)}</nav><div className="lc-settings-panel">{tab === 'general' && <><Select label="Theme" value={text(values.theme, desktop.ui.theme)} options={[["system", 'System'], ['light', 'Light'], ['dark', 'Dark']]} onChange={(v) => update('theme', v)} /><Check checked={bool(values.confirmDelete, desktop.ui.confirmDelete)} onChange={(v) => update('confirmDelete', v)}>Confirm photo deletion</Check></>}{tab === 'import' && <><Field label="Raw develop preset ID" value={text(values.rawPreset, 'default')} onChange={(v) => update('rawPreset', v)} placeholder="default" /><Field label="Other photo preset ID" value={text(values.otherPreset, 'default')} onChange={(v) => update('otherPreset', v)} placeholder="default" /><Check checked={bool(values.perCamera)} onChange={(v) => update('perCamera', v)}>Use per-camera defaults</Check><Field label="Default copyright" value={text(values.copyright)} onChange={(v) => update('copyright', v)} /><Field label="Default creator" value={text(values.creator)} onChange={(v) => update('creator', v)} /><Field label="Metadata preset" value={text(values.metadataPreset)} onChange={(v) => update('metadataPreset', v)} /></>}{tab === 'performance' && <><Field label="Preview edge" type="number" value={num(values.previewEdge, desktop.ui.previewEdge)} min={256} max={8192} step={128} onChange={(v) => update('previewEdge', Number(v))} /><Field label="Cache size (MB)" type="number" value={num(values.cacheMb, 0)} min={0} onChange={(v) => update('cacheMb', Number(v))} /><Field label="Memory budget (MB; 0 = automatic)" type="number" value={num(values.memoryMb, desktop.ui.memoryMb)} min={0} onChange={(v) => update('memoryMb', Number(v))} /><Check checked={bool(values.gpu, desktop.ui.gpu)} onChange={(v) => update('gpu', v)}>Use GPU rendering when available</Check></>}{tab === 'language' && <Select label="Language" value={text(values.locale, desktop.ui.locale)} options={[["en", 'English'], ['zh-hans', '简体中文'], ['zh-hant', '繁體中文'], ['ja', '日本語']]} onChange={(v) => update('locale', v)} />}</div></div></Frame>;
+  const addCamera = () => update('cameras', [...cameraDefaults, { _settingsKey: `camera-${settingsCameraSequence++}`, camera: '', preset: '' }]);
+  const removeCamera = (index: number) => update('cameras', cameraDefaults.filter((_, i) => i !== index));
+  const updateCamera = (index: number, key: string, value: string) => update('cameras', cameraDefaults.map((camera, i) => i === index ? { ...camera, [key]: value } : camera));
+  const chooseAutoFolder = async () => { const paths = await choose(desktop.native, 'chooseFolder'); if (paths[0]) update('autoFolder', paths[0]); };
+  const chooseSmartFolder = async () => { const paths = await choose(desktop.native, 'chooseFolder'); if (paths[0]) { update('smartPath', paths[0]); update('smartReset', false); } };
+  const presetChoices = (noneLabel: string, current = ''): [string, string][] => { const options: [string, string][] = [['default', noneLabel], ...presets.filter((preset) => text(preset.id)).map((preset): [string, string] => [text(preset.id), text(preset.name, text(preset.id))])]; if (current && current !== 'default' && !options.some(([id]) => id === current)) options.push([current, `${current} (missing)`]); return options; };
+  const metadataValue = text(values.metadataPreset, 'none');
+  const metadataChoices: [string, string][] = [['none', 'None'], ...metadataPresets.filter((preset) => text(preset.name)).map((preset): [string, string] => [text(preset.name), text(preset.name)])];
+  if (metadataValue !== 'none' && !metadataChoices.some(([name]) => name === metadataValue)) metadataChoices.push([metadataValue, `${metadataValue} (missing)`]);
+  const importTab = <>
+    <Select label="Raw photos" value={text(values.rawPreset, 'default')} options={presetChoices('LightCraft Default', text(values.rawPreset))} onChange={(v) => update('rawPreset', v)} />
+    <Select label="Non-raw photos" value={text(values.otherPreset, 'default')} options={presetChoices('None', text(values.otherPreset))} onChange={(v) => update('otherPreset', v)} />
+    <Check checked={bool(values.perCamera)} onChange={(v) => update('perCamera', v)}>Use camera-specific defaults</Check>
+    {bool(values.perCamera) && <div className="lc-form-stack">{cameraDefaults.map((camera, index) => <div key={text(camera._settingsKey, `camera-${index}`)} className="lc-dialog-toolbar"><Field label="Camera" value={text(camera.camera)} onChange={(v) => updateCamera(index, 'camera', v)} placeholder="Make Model" /><Select label="Preset" value={text(camera.preset, 'default')} options={presetChoices('LightCraft Default', text(camera.preset))} onChange={(v) => updateCamera(index, 'preset', v)} /><Button onClick={() => removeCamera(index)}>Remove</Button></div>)}<Button onClick={addCamera}>Add camera default</Button></div>}
+    <Field label="Default copyright" value={text(values.copyright)} onChange={(v) => update('copyright', v)} /><Field label="Default creator" value={text(values.creator)} onChange={(v) => update('creator', v)} />
+    <Select label="Metadata preset" value={metadataValue} options={metadataChoices} onChange={(v) => update('metadataPreset', v)} />
+    <h3 className="lc-section-heading">XMP sidecars</h3><Check checked={bool(values.xmpAutoWrite)} onChange={(v) => update('xmpAutoWrite', v)}>Automatically write changes into XMP sidecars</Check><Select label="Sidecar names" value={text(values.xmpNaming, 'stem')} options={[['stem', 'IMG_1.xmp'], ['full', 'IMG_1.CR3.xmp']]} onChange={(v) => update('xmpNaming', v)} />
+    <h3 className="lc-section-heading">Auto Import</h3><Note>Watched folder is scanned every few seconds while desktop is open.</Note><Field label="Watched folder" value={text(values.autoFolder)} onChange={(v) => update('autoFolder', v)} placeholder="Off" /><div className="lc-dialog-toolbar"><Button onClick={() => void chooseAutoFolder()}>Choose Folder…</Button><Button onClick={() => update('autoFolder', '')}>Turn Off</Button></div><Check checked={bool(values.autoCopy)} onChange={(v) => update('autoCopy', v)}>Copy into library</Check><Field label="Auto-import album" value={text(values.autoAlbum)} onChange={(v) => update('autoAlbum', v)} placeholder="None" />
+  </>;
+  const performanceTab = <>
+    <Field label="Preview edge" type="number" value={num(values.previewEdge, desktop.ui.previewEdge)} min={256} max={8192} step={128} onChange={(v) => update('previewEdge', Number(v))} /><Field label="Cache size (MB)" type="number" value={num(values.cacheMb, 0)} min={0} onChange={(v) => update('cacheMb', Number(v))} /><Field label="Forget unchanged photos after (days)" type="number" value={num(values.forgetLocalDays, 0)} min={0} onChange={(v) => update('forgetLocalDays', Number(v))} /><Button onClick={() => update('clearCache', true)}>Clear thumbnail cache</Button><Field label="Memory budget (MB; 0 = automatic)" type="number" value={num(values.memoryMb, desktop.ui.memoryMb)} min={0} onChange={(v) => update('memoryMb', Number(v))} /><Check checked={bool(values.gpu, desktop.ui.gpu)} onChange={(v) => update('gpu', v)}>Use GPU rendering when available</Check>
+    <h3 className="lc-section-heading">Smart previews</h3>{bool(values.smartAvailable) ? <><Field label="Folder" value={text(values.smartPath)} onChange={(v) => { update('smartPath', v); update('smartReset', false); }} /><Select label="Existing previews" value={text(values.smartExisting, 'move')} options={[['move', 'Move them'], ['leave', 'Leave them'], ['discard', 'Delete them']]} onChange={(v) => update('smartExisting', v)} /><div className="lc-dialog-toolbar"><Button onClick={() => void chooseSmartFolder()}>Choose Folder…</Button><Button onClick={() => update('smartReset', true)}>Use library folder</Button></div><Note>{num(values.smartCount)} smart previews · {Math.round(num(values.smartBytes) / 1048576)} MB</Note></> : <Note>Smart previews require an on-disk library.</Note>}
+  </>;
+  return <Frame title="Settings" wide busy={busy} onClose={() => desktop.setDialog(null)} actions={<><Button disabled={busy} onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary disabled={busy || !loaded || Boolean(loadError)} onClick={() => void save()}>Save</Button></>}><div className="lc-settings"><nav aria-label="Settings sections">{tabs.map((item) => <button key={item} className={tab === item ? 'lc-settings-tab active' : 'lc-settings-tab'} onClick={() => setTab(item)}>{item[0].toUpperCase() + item.slice(1)}</button>)}</nav><div className="lc-settings-panel">{!loaded && <Note>Loading saved settings…</Note>}{loadError && <Note tone="error">Could not load saved settings: {loadError}</Note>}{tab === 'general' && <><Select label="Theme" value={text(values.theme, desktop.ui.theme)} options={[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']]} onChange={(v) => update('theme', v)} /><Check checked={bool(values.confirmDelete, desktop.ui.confirmDelete)} onChange={(v) => update('confirmDelete', v)}>Confirm photo deletion</Check></>}{tab === 'import' && importTab}{tab === 'performance' && performanceTab}{tab === 'language' && <><Select label="Language" value={text(values.locale, desktop.ui.locale)} options={[['en', 'English'], ['zh-hans', '简体中文'], ['zh-hant', '繁體中文'], ['ja', '日本語']]} onChange={(v) => update('locale', v)} /><Note>Language selection is saved & applied to shell and command labels.</Note></>}{smartError && <Note tone="error">Smart preview settings unavailable: {smartError}</Note>}{error && <Note tone="error">{error}</Note>}</div></div></Frame>;
 }
 
 const SETTINGS_GROUPS = ['basic', 'tone', 'curve', 'color', 'effects', 'detail', 'optics', 'geometry', 'masks', 'spotRemoval', 'redEye'];

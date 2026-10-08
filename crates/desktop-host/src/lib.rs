@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod auto_import;
 mod controller;
+mod merge;
 mod preview;
 mod render;
 mod snapshot;
@@ -13,9 +15,10 @@ use std::sync::mpsc::{Sender, SyncSender, channel, sync_channel};
 use serde_json::Value;
 
 pub use controller::Controller;
+pub use merge::{MergePreviewCancelRequest, MergePreviewDescriptor, MergePreviewRequest};
 pub use preview::{PreviewBytes, PreviewStore};
 pub use render::{PreviewDescriptor, PreviewQuality, PreviewRequest, Renderer};
-pub use snapshot::{AlbumSummary, CommandInfo, ControlSpec, HostStatus, JobStatus, PhotoSummary, ViewSlice};
+pub use snapshot::{AlbumSummary, CommandInfo, ControlSpec, HostStatus, JobStatus, PhotoSummary, TerminalTask, ViewSlice};
 
 const IPC_CAPACITY: usize = 64;
 const MAX_JS_SAFE_ID: u64 = 9_007_199_254_740_991;
@@ -36,6 +39,8 @@ enum Request {
     Snapshot { reply: SyncSender<Result<Value, String>> },
     ViewSlice { generation: Option<u64>, offset: usize, limit: usize, reply: SyncSender<Result<Value, String>> },
     Preview { request: PreviewRequest, reply: Sender<Result<PreviewDescriptor, String>> },
+    MergePreview { request: MergePreviewRequest, reply: Sender<Result<MergePreviewDescriptor, String>> },
+    MergePreviewCancel { request: MergePreviewCancelRequest, reply: SyncSender<Result<bool, String>> },
     Preferences { patch: Option<Value>, reply: SyncSender<Result<Value, String>> },
     Persist { reply: SyncSender<Result<(), String>> },
     Shutdown { reply: SyncSender<Result<(), String>> },
@@ -88,6 +93,14 @@ impl DesktopHandle {
         let (reply_tx, reply_rx) = channel();
         self.tx.send(Request::Preview { request, reply: reply_tx }).map_err(|_| "session owner is closed".to_string())?;
         reply_rx.recv().map_err(|_| "session owner stopped before replying".to_string())?
+    }
+    pub fn merge_preview(&self, request: MergePreviewRequest) -> Result<MergePreviewDescriptor, String> {
+        let (reply_tx, reply_rx) = channel();
+        self.tx.send(Request::MergePreview { request, reply: reply_tx }).map_err(|_| "session owner is closed".to_string())?;
+        reply_rx.recv().map_err(|_| "session owner stopped before replying".to_string())?
+    }
+    pub fn cancel_merge_preview(&self, request: MergePreviewCancelRequest) -> Result<bool, String> {
+        self.call(|reply| Request::MergePreviewCancel { request, reply })
     }
     pub fn preferences(&self, patch: Option<Value>) -> Result<Value, String> {
         self.call(|reply| Request::Preferences { patch, reply })

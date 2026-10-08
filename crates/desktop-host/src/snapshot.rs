@@ -115,12 +115,26 @@ pub struct JobStatus {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TerminalTask {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HostStatus {
     pub unsaved: bool,
     pub importing: bool,
     pub exporting: bool,
     pub preview_build: bool,
     pub jobs: Vec<JobStatus>,
+    pub completed_jobs: Vec<TerminalTask>,
     pub notices: Vec<String>,
     pub error: Option<String>,
 }
@@ -235,12 +249,21 @@ pub fn snapshot(
         .map(|photo| photo.history.iter().map(|step| json!({"label": step.label})).collect::<Vec<_>>())
         .unwrap_or_default();
     let status_jobs = tasks.statuses();
+    let completed_jobs = tasks.completed_jobs();
     let importing = tasks.running_kind("import");
     let exporting = tasks.running_kind("export");
     let preview_build = session.preview_build.as_ref().is_some_and(|build| !build.finished.load(Ordering::Relaxed)) || tasks.running_kind("preview");
     let selection = session.selection.ids.iter().map(|id| crate::validate_id(id.0).map(|_| id.0)).collect::<Result<Vec<_>, _>>()?;
-    let status =
-        HostStatus { unsaved: session.unsaved().is_some(), importing, exporting, preview_build, jobs: status_jobs, notices: notices.to_vec(), error };
+    let status = HostStatus {
+        unsaved: session.unsaved().is_some(),
+        importing,
+        exporting,
+        preview_build,
+        jobs: status_jobs,
+        completed_jobs,
+        notices: notices.to_vec(),
+        error,
+    };
     let value = json!({
         "version": 1,
         "revision": session.catalog.revision,

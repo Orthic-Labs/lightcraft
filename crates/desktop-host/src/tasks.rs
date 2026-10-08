@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
@@ -7,12 +7,15 @@ use serde_json::{Value, json};
 
 use lightcraft_catalog::PhotoId;
 use lightcraft_engine::import::{ImportJob, ImportOptions, Prepared};
+use lightcraft_engine::merge::{MergeJob, MergeOutput};
 use lightcraft_engine::{Selection, Session};
 
-use crate::snapshot::JobStatus;
+use crate::snapshot::{JobStatus, TerminalTask};
 
 const EVENT_CAPACITY: usize = 64;
 const MAX_TASKS: usize = 128;
+const MAX_MERGE_IDS: usize = 256;
+const MAX_COMPLETED_TASKS: usize = 64;
 
 struct Task {
     id: String,
@@ -30,6 +33,12 @@ enum Event {
         result: Result<Vec<Value>, String>,
         cancelled: bool,
     },
+    Merge {
+        id: String,
+        job: MergeJob,
+        result: Result<MergeOutput, String>,
+        cancelled: bool,
+    },
     Import {
         id: String,
         prepared: Prepared,
@@ -39,6 +48,7 @@ enum Event {
         album_name: Option<String>,
         undo_before: usize,
         cancelled: bool,
+        preserve_selection: bool,
     },
 }
 
@@ -48,12 +58,13 @@ pub(crate) struct Tasks {
     rx: Receiver<Event>,
     next: u64,
     notices: Vec<String>,
+    completed: VecDeque<TerminalTask>,
 }
 
 impl Tasks {
     pub(crate) fn new() -> Self {
         let (tx, rx) = sync_channel(EVENT_CAPACITY);
-        Self { jobs: BTreeMap::new(), tx, rx, next: 1, notices: Vec::new() }
+        Self { jobs: BTreeMap::new(), tx, rx, next: 1, notices: Vec::new(), completed: VecDeque::new() }
     }
 
     pub(crate) fn start_export(&mut self, session: &mut Session, params: &Value) -> Result<Value, String> {
@@ -137,6 +148,14 @@ impl Tasks {
     }
 
     pub(crate) fn start_import(&mut self, session: &mut Session, params: &Value) -> Result<Value, String> {
+        self.start_import_with_selection(session, params, false)
+    }
+
+    pub(crate) fn start_auto_import(&mut self, session: &mut Session, params: &Value) -> Result<Value, String> {
+        self.start_import_with_selection(session, params, true)
+    }
+
+    fn start_import_with_selection(&mut self, session: &mut Session, params: &Value, preserve_selection: bool) -> Result<Value, String> {
         if self.running_kind("import") {
             return Err("an import is already running".into());
         }
@@ -185,6 +204,7 @@ impl Tasks {
                             album_name,
                             undo_before,
                             cancelled,
+                            preserve_selection,
                         });
                     }
                     Err(error) => {
@@ -198,6 +218,7 @@ impl Tasks {
                             album_name,
                             undo_before,
                             cancelled: worker_cancel.load(Ordering::Relaxed),
+                            preserve_selection,
                         });
                         log::error!("import task failed: {error}");
                     }
@@ -208,12 +229,77 @@ impl Tasks {
         Ok(json!({"taskId": task_id, "total": 0}))
     }
 
+    pub(crate) fn start_merge(&mut self, session: &mut Session, command: &str, params: &Value) -> Result<Value, String> {
+        if self.running_kind("merge") {
+            return Err("a merge is already running".into());
+        }
+        if self.jobs.len() >= MAX_TASKS {
+            return Err("too many background tasks".into());
+        }
+        if let Some(raw_ids) = params.get("ids") {
+            let ids = raw_ids.as_array().ok_or_else(|| "merge ids must be an array".to_string())?;
+            if ids.len() > MAX_MERGE_IDS {
+                return Err(format!("merge accepts at most {MAX_MERGE_IDS} photos"));
+            }
+        }
+        let (kind, finish) = lightcraft_engine::merge::parse(command, params).map_err(|error| error.to_string())?;
+        let ids = session.targets(params);
+        for id in &ids {
+            crate::validate_id(id.0)?;
+        }
+        let job = session.plan_merge(kind, finish, &ids, false).map_err(|error| error.to_string())?;
+        let task_id = self.new_id("merge");
+        let completed = Arc::new(AtomicUsize::new(0));
+        let total = Arc::new(AtomicUsize::new(100));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let task = Task {
+            id: task_id.clone(),
+            kind: "merge".into(),
+            label: merge_label(command),
+            total: total.clone(),
+            completed: completed.clone(),
+            cancel: cancel.clone(),
+            worker: None,
+        };
+        let tx = self.tx.clone();
+        let id_for_worker = task_id.clone();
+        let worker_cancel = cancel.clone();
+        let worker = std::thread::Builder::new()
+            .name("lightcraft-merge".into())
+            .spawn(move || {
+                let result = lightcraft_engine::guard::catch("merge", || {
+                    job.run(&|fraction, _stage| {
+                        let progress = (fraction.clamp(0.0, 1.0) * 100.0).round() as usize;
+                        completed.store(progress, Ordering::Relaxed);
+                        !worker_cancel.load(Ordering::Relaxed)
+                    })
+                })
+                .unwrap_or_else(Err);
+                let cancelled = worker_cancel.load(Ordering::Relaxed);
+                let _ = tx.send(Event::Merge { id: id_for_worker, job, result, cancelled });
+            })
+            .map_err(|error| format!("could not start merge: {error}"))?;
+        self.insert(Task { worker: Some(worker), ..task })?;
+        Ok(json!({"taskId": task_id, "total": 100}))
+    }
+
     pub(crate) fn poll(&mut self, session: &mut Session) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
                 Event::Export { id, result, cancelled } => self.finish(id, result.map(|files| json!({"files": files})), "export", cancelled),
-                Event::Import { id, prepared, opts, now, album, album_name, undo_before, cancelled } => {
-                    let result = if now.is_empty() {
+                Event::Merge { id, job, result, cancelled } => {
+                    let cancelled = merge_cancelled(cancelled, self.jobs.get(&id));
+                    let result = if cancelled {
+                        Err("cancelled".into())
+                    } else {
+                        result.and_then(|output| session.finish_merge(&job, output).map_err(|error| error.to_string()))
+                    };
+                    self.finish(id, result, "merge", cancelled);
+                }
+                Event::Import { id, prepared, opts, now, album, album_name, undo_before, cancelled, preserve_selection } => {
+                    let cancelled = cancelled || self.jobs.get(&id).is_some_and(|task| task.cancel.load(Ordering::Relaxed));
+                    let selection_before = preserve_selection.then(|| session.selection.clone());
+                    let result = if cancelled || now.is_empty() {
                         Err("import worker failed".into())
                     } else {
                         lightcraft_engine::import::commit_prepared(session, &opts, &now, prepared)
@@ -225,13 +311,17 @@ impl Tasks {
                             .inspect(|report| {
                                 let n = session.undo.len().saturating_sub(undo_before);
                                 session.merge_undo(n, "Import Photos");
-                                if let Some(first) =
-                                    report.get("imported").and_then(Value::as_array).and_then(|ids| ids.first()).and_then(Value::as_u64)
+                                if !preserve_selection
+                                    && let Some(first) =
+                                        report.get("imported").and_then(Value::as_array).and_then(|ids| ids.first()).and_then(Value::as_u64)
                                 {
                                     session.selection = Selection::single(PhotoId(first));
                                 }
                             })
                     };
+                    if let Some(selection) = selection_before {
+                        session.selection = selection;
+                    }
                     self.finish(id, result, "import", cancelled);
                 }
             }
@@ -262,6 +352,10 @@ impl Tasks {
                 error: None,
             })
             .collect()
+    }
+
+    pub(crate) fn completed_jobs(&self) -> Vec<TerminalTask> {
+        self.completed.iter().cloned().collect()
     }
 
     pub(crate) fn running_kind(&self, kind: &str) -> bool {
@@ -298,13 +392,19 @@ impl Tasks {
                 let _ = worker.join();
             }
             job.completed.store(job.total.load(Ordering::Relaxed), Ordering::Relaxed);
-            if cancelled {
-                self.notices.push(format!("{} cancelled", job.label));
-            } else if let Err(error) = result {
-                self.notices.push(format!("{} failed: {error}", job.label));
+            let (state, result, error, notice) = if cancelled {
+                ("cancelled", None, None, format!("{} cancelled", job.label))
             } else {
-                self.notices.push(format!("{} finished", job.label));
+                match result {
+                    Ok(result) => ("done", Some(result), None, format!("{} finished", job.label)),
+                    Err(error) => ("failed", None, Some(error.clone()), format!("{} failed: {error}", job.label)),
+                }
+            };
+            self.completed.push_back(TerminalTask { id: job.id, kind: job.kind, label: job.label, state: state.into(), result, error });
+            while self.completed.len() > MAX_COMPLETED_TASKS {
+                self.completed.pop_front();
             }
+            self.notices.push(notice);
         } else {
             self.notices.push(format!("unknown {kind} task completed"));
         }
@@ -337,6 +437,19 @@ fn default_export_dir() -> String {
     std::env::var_os("HOME")
         .map(|home| std::path::PathBuf::from(home).join("Pictures/LightCraft Exports").to_string_lossy().to_string())
         .unwrap_or_else(|| ".".to_string())
+}
+
+fn merge_label(command: &str) -> String {
+    match command {
+        "merge.hdr" => "HDR Merge".into(),
+        "merge.panorama" => "Panorama Merge".into(),
+        "merge.hdrPanorama" => "HDR Panorama Merge".into(),
+        _ => "Photo Merge".into(),
+    }
+}
+
+fn merge_cancelled(worker_cancelled: bool, task: Option<&Task>) -> bool {
+    worker_cancelled || task.is_some_and(|task| task.cancel.load(Ordering::Relaxed))
 }
 
 fn normalize_export_params(params: &mut Value) {
@@ -419,5 +532,70 @@ impl Tasks {
         };
         self.jobs.insert(id, task);
         (started, release)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn finished_task(tasks: &mut Tasks, id: &str, result: Result<Value, String>) {
+        tasks.jobs.insert(
+            id.into(),
+            Task {
+                id: id.into(),
+                kind: "merge".into(),
+                label: "Merge Photos".into(),
+                total: Arc::new(AtomicUsize::new(1)),
+                completed: Arc::new(AtomicUsize::new(0)),
+                cancel: Arc::new(AtomicBool::new(false)),
+                worker: None,
+            },
+        );
+        tasks.finish(id.into(), result, "merge", false);
+    }
+
+    fn task_with_cancel(cancelled: bool) -> Task {
+        Task {
+            id: "merge-test-1".into(),
+            kind: "merge".into(),
+            label: "Merge test".into(),
+            total: Arc::new(AtomicUsize::new(100)),
+            completed: Arc::new(AtomicUsize::new(100)),
+            cancel: Arc::new(AtomicBool::new(cancelled)),
+            worker: None,
+        }
+    }
+
+    #[test]
+    fn merge_completion_cancel_wins_worker_success_race() {
+        let task = task_with_cancel(true);
+        assert!(merge_cancelled(false, Some(&task)));
+        assert!(merge_cancelled(true, Some(&task_with_cancel(false))));
+        assert!(!merge_cancelled(false, Some(&task_with_cancel(false))));
+    }
+
+    #[test]
+    fn terminal_record_survives_completion_before_first_snapshot() {
+        let mut tasks = Tasks::new();
+        finished_task(&mut tasks, "merge-early", Ok(json!({"id": 41, "path": "merged.dng"})));
+        let completed = tasks.completed_jobs();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].id, "merge-early");
+        assert_eq!(completed[0].state, "done");
+        assert_eq!(completed[0].result.as_ref().and_then(|value| value.get("id")).and_then(Value::as_u64), Some(41));
+    }
+
+    #[test]
+    fn terminal_records_keep_bounded_recent_history() {
+        let mut tasks = Tasks::new();
+        for index in 0..(MAX_COMPLETED_TASKS + 3) {
+            finished_task(&mut tasks, &format!("merge-{index}"), Ok(Value::Null));
+        }
+        let completed = tasks.completed_jobs();
+        assert_eq!(completed.len(), MAX_COMPLETED_TASKS);
+        assert_eq!(completed.first().map(|task| task.id.as_str()), Some("merge-3"));
+        assert_eq!(completed.last().map(|task| task.id.as_str()), Some("merge-66"));
     }
 }

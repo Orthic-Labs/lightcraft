@@ -37,6 +37,8 @@ Hidden `rightkit-qa` journeys target actual WKWebView & WebView2 through embedde
 
 React Export exposes existing engine sharpening, TIFF/DNG compression & text/graphic watermark options. Multiline text, editable destination/graphic paths & the native graphic picker retain baseline behavior. The native `engineExport` journey also opens the actual dialog, edits fields, submits through IPC & checks named PNG dimensions plus visible top-left watermark pixels. This coverage supplements the engine edit/undo/export receipt.
 
+Merge dialogs request generation-aware, cancellable decoded previews through opaque handles; full merge runs as a background task before owner-thread catalog commit. Import, merge & export progress consume exact task IDs, including bounded terminal records when work finishes before the first UI poll. Settings hydrate shared engine preferences & write only changed fields. Memory budgets reapply after catalog changes; automatic import scans run off the owner thread & preserve current selection at commit. Shell & command labels reuse existing Chinese/Japanese catalogs, with English fallback for unmapped labels. These additions require target-native qualification before parity is claimed.
+
 QA startup uses isolated data directories & empty catalogs unless demo is explicitly requested. `qa-native` gates automation. Normal startup preserves native data paths; candidate app identifier `ai.storyteller.lightcraft.preview` keeps preview preferences isolated during coexistence.
 
 ## Cutover

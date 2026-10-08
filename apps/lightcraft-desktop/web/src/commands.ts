@@ -1,5 +1,6 @@
 import type { Command } from '@rightkit/app-shell';
 import type { CommandInfo, JsonObject, UiState } from './types';
+import { translate, type LocaleCode } from './i18n';
 
 export interface UiCommandMeta { id: string; label: string; shortcut: string | null; menu: string[] }
 
@@ -28,18 +29,18 @@ function labelFor(id: string): string {
   return uiLabels[id] ?? id.split('.').pop()?.replace(/([A-Z])/g, ' $1').replace(/^./, (v) => v.toUpperCase()) ?? id;
 }
 
-export function uiMetadata(id: string): UiCommandMeta {
+export function uiMetadata(id: string, locale: LocaleCode = 'en'): UiCommandMeta {
   const raw = shortcutById[id];
   const menu = id.startsWith('view.') ? ['View'] : id.startsWith('panel.') || id.startsWith('section.') || id.startsWith('tool.') ? ['Window'] : id.startsWith('dialog.') || id.startsWith('file.') ? ['File'] : id.startsWith('app.') ? ['Help'] : [];
-  return { id, label: labelFor(id), shortcut: raw ?? null, menu };
+  return { id, label: translate(locale, labelFor(id)), shortcut: raw ?? null, menu };
 }
 
-export function allUiMetadata(): UiCommandMeta[] { return UI_COMMAND_IDS.map(uiMetadata); }
+export function allUiMetadata(locale: LocaleCode = 'en'): UiCommandMeta[] { return UI_COMMAND_IDS.map((id) => uiMetadata(id, locale)); }
 
-export function paletteCommands(snapshot: { commands?: CommandInfo[] } | null, run: (id: string) => Promise<unknown>): Command[] {
-  const generated = allUiMetadata().map((entry) => ({ ...entry, params: '{}', enabled: true }));
+export function paletteCommands(snapshot: { commands?: CommandInfo[] } | null, run: (id: string) => Promise<unknown>, locale: LocaleCode = 'en'): Command[] {
+  const generated = allUiMetadata(locale).map((entry) => ({ ...entry, params: '{}', enabled: true }));
   const source = [...(snapshot?.commands ?? []), ...generated].filter((entry, index, all) => all.findIndex((candidate) => candidate.id === entry.id) === index);
-  return source.map((entry) => ({ id: entry.id, label: entry.label, group: entry.menu?.join(' › ') || 'Commands', chord: entry.shortcut ?? undefined, disabled: !entry.enabled, run: () => { void run(entry.id); } }));
+  return source.map((entry) => ({ id: entry.id, label: translate(locale, entry.label), group: entry.menu?.map((part) => translate(locale, part)).join(' › ') || translate(locale, 'Commands'), chord: entry.shortcut ?? undefined, disabled: !entry.enabled, run: () => { void run(entry.id); } }));
 }
 
 export function applyUiCommand(id: string, ui: UiState): Partial<UiState> | null {

@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { listen } from '@tauri-apps/api/event';
 import { getSnapshot, nativeAction, openSecondWindow, runCommand, savePreferences } from './api';
 import { applyUiCommand, UI_COMMAND_IDS } from './commands';
+import { normalizeLocale, translate } from './i18n';
 import type { DesktopContextValue, DesktopSnapshot, DialogState, JsonObject, UiState, ViewMode, WindowBootstrap } from './types';
 
 const MIN_STAGE = 360;
@@ -30,7 +31,7 @@ function mergeUi(value: unknown): Partial<UiState> {
   const next: Partial<UiState> = {};
   (Object.keys(DEFAULT_UI) as Array<keyof UiState>).forEach((key) => {
     const candidate = source[key];
-    if (candidate !== undefined) (next[key] as unknown) = candidate;
+    if (candidate !== undefined) (next[key] as unknown) = key === 'locale' ? normalizeLocale(candidate) : candidate;
   });
   return next;
 }
@@ -147,7 +148,7 @@ function preferenceUi(preferences: JsonObject | undefined): Partial<UiState> {
       (next[key] as unknown) = value;
     };
     if (general.theme === 'light' || general.theme === 'dark' || general.theme === 'system') setIfAbsent('theme', general.theme);
-    if (typeof general.locale === 'string') setIfAbsent('locale', general.locale);
+    if (typeof general.locale === 'string') setIfAbsent('locale', normalizeLocale(general.locale));
     if (typeof nested.confirmDelete === 'boolean') setIfAbsent('confirmDelete', nested.confirmDelete);
     if (typeof nested.gpu === 'boolean') setIfAbsent('gpu', nested.gpu);
     const edge = finiteNumber(nested.previewEdge);
@@ -228,6 +229,8 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   const isSecondary = bootstrap.secondary;
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
   const [ui, setUiState] = useState<UiState>(DEFAULT_UI);
+  const locale = normalizeLocale(ui.locale);
+  const t = useCallback((source: string) => translate(locale, source), [locale]);
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -333,7 +336,9 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   const setUi = useCallback((patch: Partial<UiState> | ((current: UiState) => Partial<UiState>)) => {
     setUiState((current) => {
       const change = typeof patch === 'function' ? patch(current) : patch;
-      return { ...current, ...clampUi(change, current) };
+      const next = { ...current, ...clampUi(change, current) };
+      if (change.locale !== undefined) next.locale = normalizeLocale(change.locale);
+      return next;
     });
   }, []);
 
@@ -645,7 +650,7 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
     };
   }, [isSecondary, reloadExternalEdits, run]);
 
-  const value = useMemo<DesktopContextValue>(() => ({ snapshot, ui, setUi, run, native, refresh, dialog, setDialog, error, notice, setNotice, histogram, setHistogram }), [dialog, error, histogram, native, notice, refresh, run, setUi, snapshot, ui]);
+  const value = useMemo<DesktopContextValue>(() => ({ snapshot, ui, locale, t, setUi, run, native, refresh, dialog, setDialog, error, notice, setNotice, histogram, setHistogram }), [dialog, error, histogram, locale, native, notice, refresh, run, setUi, snapshot, t, ui]);
   return <DesktopContext.Provider value={value}>{children}</DesktopContext.Provider>;
 }
 

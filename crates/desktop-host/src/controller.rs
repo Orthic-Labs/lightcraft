@@ -6,8 +6,10 @@ use serde_json::{Map, Value, json};
 
 use lightcraft_engine::Session;
 
+use crate::auto_import::AutoImport;
+use crate::merge::{MergePreviewCancelRequest, MergePreviews};
 use crate::tasks::Tasks;
-use crate::{HostOptions, PreviewDescriptor, PreviewRequest, PreviewStore, Renderer, Request};
+use crate::{HostOptions, MergePreviewDescriptor, MergePreviewRequest, PreviewDescriptor, PreviewRequest, PreviewStore, Renderer, Request};
 
 const TICK: Duration = Duration::from_millis(250);
 const COMMAND_POLL: Duration = Duration::from_millis(20);
@@ -16,7 +18,9 @@ const PREVIEW_SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 pub struct Controller {
     session: Session,
     renderer: Renderer,
+    merge_previews: MergePreviews,
     tasks: Tasks,
+    auto_import: AutoImport,
     snapshot_cache: crate::snapshot::CatalogSnapshotCache,
     preferences: Map<String, Value>,
     notices: Vec<String>,
@@ -54,8 +58,10 @@ impl Controller {
         let notices = session.take_library_warnings();
         Ok(Self {
             session,
-            renderer: Renderer::new(store),
+            renderer: Renderer::new(store.clone()),
+            merge_previews: MergePreviews::new(store),
             tasks: Tasks::new(),
+            auto_import: AutoImport::new(),
             snapshot_cache: crate::snapshot::CatalogSnapshotCache::default(),
             preferences: Map::new(),
             notices,
@@ -90,12 +96,19 @@ impl Controller {
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     let _ = self.tasks.cancel(None);
+                    if let Err(error) = self.auto_import.stop() {
+                        log::error!("desktop auto import worker did not stop: {error}");
+                    }
                     while self.tasks.running() {
                         self.poll();
                         std::thread::sleep(Duration::from_millis(10));
                     }
                     if let Err(error) = cancel_preview_build(&self.session, PREVIEW_SHUTDOWN_WAIT) {
                         log::error!("desktop owner disconnected before preview build stopped: {error}");
+                        break;
+                    }
+                    if let Err(error) = self.merge_previews.shutdown(&mut self.session, PREVIEW_SHUTDOWN_WAIT) {
+                        log::error!("desktop owner disconnected before merge previews stopped: {error}");
                         break;
                     }
                     self.renderer.cancel_all();
@@ -124,6 +137,12 @@ impl Controller {
                 false
             }
             Request::Preview { request, reply } => self.preview(request, reply),
+            Request::MergePreview { request, reply } => self.merge_preview(request, reply),
+            Request::MergePreviewCancel { request, reply } => {
+                let result = self.merge_preview_cancel(request);
+                let _ = reply.send(result);
+                false
+            }
             Request::Preferences { patch, reply } => {
                 let result = self.preferences(patch);
                 let _ = reply.send(result);
@@ -151,6 +170,13 @@ impl Controller {
                 self.tasks.start_export(&mut self.session, &previous)
             }
             "library.import" => self.tasks.start_import(&mut self.session, params),
+            "merge.hdr" | "merge.panorama" | "merge.hdrPanorama" => {
+                if params.get("preview").and_then(Value::as_bool).unwrap_or(false) {
+                    self.session.execute(id, params).map_err(|error| error.to_string())
+                } else {
+                    self.tasks.start_merge(&mut self.session, id, params)
+                }
+            }
             "library.backup" => self.backup(params),
             "library.open" => self.open(params),
             "library.restore" => self.restore(params),
@@ -199,13 +225,76 @@ impl Controller {
         false
     }
 
+    fn merge_preview(&mut self, request: MergePreviewRequest, reply: Sender<Result<MergePreviewDescriptor, String>>) -> bool {
+        let result = lightcraft_engine::guard::catch("desktop merge preview request", || {
+            self.merge_previews.request(&mut self.session, request, reply.clone())
+        });
+        if let Ok(Err(error)) | Err(error) = result {
+            let _ = reply.send(Err(error));
+        }
+        self.merge_previews.poll(&mut self.session);
+        false
+    }
+
+    fn merge_preview_cancel(&mut self, request: MergePreviewCancelRequest) -> Result<bool, String> {
+        lightcraft_engine::guard::catch("desktop merge preview cancellation", || self.merge_previews.cancel(request)).unwrap_or_else(Err)
+    }
+
     fn preferences(&mut self, patch: Option<Value>) -> Result<Value, String> {
         if let Some(Value::Object(values)) = patch {
-            self.preferences.extend(values);
+            let memory_patch = values.get("ui").and_then(Value::as_object).and_then(|ui| ui.get("memoryMb")).cloned();
+            Self::merge_preferences(&mut self.preferences, values);
+            self.apply_memory_preference(memory_patch);
         } else if patch.is_some() {
             return Err("preferences patch must be an object".into());
         }
         Ok(Value::Object(self.preferences.clone()))
+    }
+
+    fn apply_memory_preference(&mut self, memory_patch: Option<Value>) {
+        let Some(value) = memory_patch else { return };
+        match Self::memory_budget_bytes(&value) {
+            Ok(bytes) => {
+                self.session.set_memory_budget(bytes);
+                self.notices.retain(|notice| !notice.starts_with("Invalid memory budget preference:"));
+            }
+            Err(error) => {
+                let notice = format!("Invalid memory budget preference: {error}");
+                if !self.notices.iter().any(|existing| existing == &notice) {
+                    self.notices.push(notice);
+                }
+            }
+        }
+    }
+
+    fn merge_preferences(target: &mut Map<String, Value>, patch: Map<String, Value>) {
+        for (key, value) in patch {
+            match value {
+                Value::Object(incoming) => {
+                    if let Some(Value::Object(existing)) = target.get_mut(&key) {
+                        Self::merge_preferences(existing, incoming);
+                    } else {
+                        target.insert(key, Value::Object(incoming));
+                    }
+                }
+                other => {
+                    target.insert(key, other);
+                }
+            }
+        }
+    }
+
+    fn memory_budget_bytes(value: &Value) -> Result<usize, String> {
+        let mb = value.as_u64().ok_or_else(|| "ui.memoryMb must be an integer".to_string())?;
+        if mb == 0 {
+            return Ok(lightcraft_engine::memory::default_budget());
+        }
+        if !(64..=1_048_576).contains(&mb) {
+            return Err("ui.memoryMb must be 0 or between 64 and 1048576 MB".into());
+        }
+        mb.checked_mul(1_048_576)
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .ok_or_else(|| "ui.memoryMb exceeds this platform's addressable memory".into())
     }
 
     fn persist(&mut self) -> Result<(), String> {
@@ -228,6 +317,10 @@ impl Controller {
         if let Err(error) = lightcraft_engine::guard::catch("desktop task poll", || self.tasks.poll(&mut self.session)) {
             self.last_error = Some(error);
         }
+        if let Err(error) = lightcraft_engine::guard::catch("desktop auto import poll", || self.auto_import.poll(&mut self.session, &mut self.tasks))
+        {
+            self.last_error = Some(error);
+        }
         self.notices.extend(self.tasks.take_notices());
         if self.notices.len() > 64 {
             let drop_count = self.notices.len() - 64;
@@ -236,14 +329,17 @@ impl Controller {
         if let Err(error) = lightcraft_engine::guard::catch("desktop preview poll", || self.renderer.poll(&mut self.session)) {
             self.last_error = Some(error);
         }
+        self.merge_previews.poll(&mut self.session);
     }
 
     pub(crate) fn shutdown(&mut self) -> Result<(), String> {
+        self.auto_import.stop()?;
         self.tasks.cancel(None)?;
         self.poll();
         if self.tasks.running() {
             return Err("background tasks are still stopping; retry shutdown after progress completes".into());
         }
+        self.merge_previews.shutdown(&mut self.session, PREVIEW_SHUTDOWN_WAIT)?;
         cancel_preview_build(&self.session, PREVIEW_SHUTDOWN_WAIT)?;
         self.renderer.cancel_all();
         self.session.persist().map_err(|error| {
@@ -271,6 +367,9 @@ impl Controller {
         if self.tasks.running() {
             return Err("cannot change libraries while a background task is running; wait for it to finish".into());
         }
+        if self.merge_previews.running() {
+            return Err("cannot change libraries while a merge preview is running; wait for it to finish or change options to supersede it".into());
+        }
         if preview_build_running(&self.session) {
             return Err("cannot change libraries while a preview build is running; run library.cancelPreviews, wait for library.previewProgress running=false, then retry".into());
         }
@@ -286,13 +385,17 @@ impl Controller {
         let notices = fresh.take_library_warnings();
         let photos = fresh.catalog.len();
 
+        self.auto_import.reset()?;
         self.session.close_library().map_err(|error| format!("could not close current library: {error}"))?;
         self.renderer.cancel_all();
         let store = self.renderer.store();
         self.session = fresh;
         self.renderer = Renderer::new(store);
+        self.merge_previews.reset();
         self.snapshot_cache = crate::snapshot::CatalogSnapshotCache::default();
         self.notices = notices;
+        let memory_preference = self.preferences.get("ui").and_then(Value::as_object).and_then(|ui| ui.get("memoryMb")).cloned();
+        self.apply_memory_preference(memory_preference);
         self.last_error = None;
         Ok((path, photos))
     }
@@ -304,6 +407,9 @@ impl Controller {
         }
         if self.tasks.running() {
             return Err("cannot back up while a background task is running; wait for it to finish".into());
+        }
+        if self.merge_previews.running() {
+            return Err("cannot back up while a merge preview is running; wait for it to finish".into());
         }
         let source = self
             .session
@@ -328,6 +434,9 @@ impl Controller {
         let path = library_path(params, "library.restore")?;
         if self.tasks.running() {
             return Err("cannot restore while a background task is running; wait for it to finish".into());
+        }
+        if self.merge_previews.running() {
+            return Err("cannot restore while a merge preview is running; wait for it to finish".into());
         }
         let path_metadata = std::fs::symlink_metadata(&path).map_err(|error| format!("library restore path: {error}"))?;
         if path_metadata.file_type().is_symlink() {
@@ -497,6 +606,62 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(controller.shutdown().is_ok());
+    }
+
+    #[test]
+    fn preferences_apply_memory_budget_reset_and_preserve_unknown() {
+        let controller_result = Controller::new(HostOptions { demo: true, ..HostOptions::default() }, PreviewStore::default());
+        assert!(controller_result.is_ok());
+        let Ok(mut controller) = controller_result else { return };
+        let explicit = controller.preferences(Some(json!({
+            "ui": {"memoryMb": 128, "futureSetting": {"keep": true}},
+            "futureRoot": {"keep": "yes"}
+        })));
+        assert!(explicit.is_ok());
+        assert_eq!(controller.session.memory_report().budget, 128 * (1 << 20));
+
+        let unrelated = controller.preferences(Some(json!({"ui": {"theme": "dark"}})));
+        assert!(unrelated.is_ok());
+        assert_eq!(controller.session.memory_report().budget, 128 * (1 << 20));
+        assert_eq!(controller.preferences["ui"]["futureSetting"]["keep"], true);
+        assert_eq!(controller.preferences["futureRoot"]["keep"], "yes");
+
+        let automatic = controller.preferences(Some(json!({"ui": {"memoryMb": 0}})));
+        assert!(automatic.is_ok());
+        assert_eq!(controller.session.memory_report().budget, lightcraft_engine::memory::default_budget());
+        assert!(controller.shutdown().is_ok());
+    }
+
+    #[test]
+    fn invalid_memory_preference_is_reported_without_changing_budget() {
+        let controller_result = Controller::new(HostOptions { demo: true, ..HostOptions::default() }, PreviewStore::default());
+        assert!(controller_result.is_ok());
+        let Ok(mut controller) = controller_result else { return };
+        let before = controller.session.memory_report().budget;
+        assert!(controller.preferences(Some(json!({"ui": {"memoryMb": 63}}))).is_ok());
+        assert_eq!(controller.session.memory_report().budget, before);
+        assert!(controller.notices.iter().any(|notice| notice.contains("ui.memoryMb must be 0 or between 64 and 1048576 MB")));
+        assert!(Controller::memory_budget_bytes(&json!(1_048_577)).is_err());
+        assert!(Controller::memory_budget_bytes(&json!(-1)).is_err());
+        assert!(Controller::memory_budget_bytes(&json!("128")).is_err());
+        assert!(controller.shutdown().is_ok());
+    }
+
+    #[test]
+    fn library_switch_reapplies_memory_preference() {
+        let old = temp_library("memory-old");
+        let next = temp_library("memory-next");
+        seed_library(&old);
+        seed_library(&next);
+        let controller_result = Controller::new(HostOptions { library_path: Some(old.clone()), ..HostOptions::default() }, PreviewStore::default());
+        assert!(controller_result.is_ok());
+        let Ok(mut controller) = controller_result else { return };
+        assert!(controller.preferences(Some(json!({"ui": {"memoryMb": 128}}))).is_ok());
+        assert!(controller.run("library.open", &json!({"path": next})).is_ok());
+        assert_eq!(controller.session.memory_report().budget, 128 * (1 << 20));
+        assert!(controller.shutdown().is_ok());
+        let _ = fs::remove_dir_all(old);
+        let _ = fs::remove_dir_all(next);
     }
 
     #[test]

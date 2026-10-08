@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { AppShell, ShellProvider, createThemeStore, useCommands, useShortcuts, type Command, type NavGroup } from '@rightkit/app-shell/react';
 import { getPlatform } from '@rightkit/platform-ui';
 import { createShell } from '@rightkit/shell';
@@ -18,10 +18,12 @@ const sourceIcons: Record<string, 'library' | 'search' | 'import' | 'export' | '
   photos: 'library', clock: 'search', 'flag-pick': 'export', trash: 'chevron', album: 'library', folder: 'import', sparkles: 'export', calendar: 'search', warning: 'chevron',
 };
 
-function sourceNav(groups: LibraryGroup[]): NavGroup[] {
+const builtinSourceIds = new Set(['all', 'recently-added', 'picks', 'recently-deleted', 'by-date', 'local', 'missing']);
+
+function sourceNav(groups: LibraryGroup[], t: (source: string) => string): NavGroup[] {
   return groups.map((group) => ({
-    title: group.title,
-    items: group.items.map((item) => ({ id: item.id, label: item.label, icon: <Icon name={sourceIcons[item.icon] ?? 'library'} />, badge: item.count === undefined ? undefined : String(item.count), keywords: [item.id, item.icon] })),
+    title: t(group.title),
+    items: group.items.map((item) => ({ id: item.id, label: builtinSourceIds.has(item.id) ? t(item.label) : item.label, icon: <Icon name={sourceIcons[item.icon] ?? 'library'} />, badge: item.count === undefined ? undefined : String(item.count), keywords: [item.id, item.icon, item.label] })),
   }));
 }
 
@@ -51,13 +53,13 @@ function ShortcutBindings({ commands }: { commands: Command[] }) {
 
 function Workspace() {
   const desktop = useDesktop();
-  const { snapshot, ui, setUi, run, native, error, notice } = desktop;
+  const { snapshot, ui, locale, t, setUi, run, native, error, notice } = desktop;
   // Rust preferences own persisted choice; RightKit applies matching CSS tokens.
   useEffect(() => { themeStore.save(ui.theme); }, [ui.theme]);
   const groups = useMemo(() => libraryGroups(snapshot), [snapshot]);
-  const navGroups = useMemo(() => sourceNav(groups), [groups]);
+  const navGroups = useMemo(() => sourceNav(groups, t), [groups, t]);
   const navItems = useMemo(() => groups.flatMap((group) => group.items), [groups]);
-  const commands = useMemo(() => paletteCommands(snapshot, (id) => run(id)), [run, snapshot]);
+  const commands = useMemo(() => paletteCommands(snapshot, (id) => run(id), locale), [locale, run, snapshot]);
   useCommands(commands);
   useEffect(() => {
     const timer = window.setTimeout(() => { void shell.ready(); }, 0);
@@ -78,7 +80,7 @@ function Workspace() {
         }).catch(() => undefined);
         else void run(item.command, item.params ?? {});
       }}
-      title={ui.view === 'photoGrid' || ui.view === 'squareGrid' ? 'Library' : ui.view[0].toUpperCase() + ui.view.slice(1)}
+      title={t(ui.view === 'photoGrid' || ui.view === 'squareGrid' ? 'Library' : ui.view[0].toUpperCase() + ui.view.slice(1))}
       wordmark={<span className="lc-wordmark"><span>Light</span>Craft</span>}
       sidebarWidth={ui.sidebarCollapsed ? 48 : ui.sidebarWidth}
       sidebarCollapsed={ui.sidebarCollapsed}
@@ -87,8 +89,13 @@ function Workspace() {
       platform={getPlatform()}
       theme={ui.theme}
       onThemeChange={(theme) => { setUi({ theme }); }}
+      labels={{
+        jumpTo: t('Jump to'), sections: t('Sections'), settings: t('Settings'), appearance: t('Appearance'),
+        toggleSidebar: t('Toggle sidebar'), goTo: t('Go to'),
+        theme: { system: t('System'), light: t('Light'), dark: t('Dark') },
+      }}
       commands={commands}
-      titlebarEnd={<div className="lc-title-status" aria-live="polite">{snapshot?.status.unsaved && <span className="lc-status-dot" title="Unsaved changes" />} {error && <span className="lc-title-error">{error}</span>}{notice && !error && <span>{notice}</span>}</div>}
+      titlebarEnd={<div className="lc-title-status" aria-live="polite">{snapshot?.status.unsaved && <span className="lc-status-dot" title={t('Unsaved changes')} />} {error && <span className="lc-title-error">{error}</span>}{notice && !error && <span>{notice}</span>}</div>}
     >
       <div className={`lc-content ${ui.sidebarCollapsed ? 'is-shell-collapsed' : ''}`}>
         {(ui.view === 'photoGrid' || ui.view === 'squareGrid') ? <LibraryWorkspace showSidebar={false} /> : <StageLayout />}
@@ -99,7 +106,7 @@ function Workspace() {
 }
 
 function StageLayout() {
-  const { ui, setUi } = useDesktop();
+  const { ui, t, setUi } = useDesktop();
   const drag = useRef<{ x: number; width: number } | null>(null);
   const [dragging, setDragging] = useState(false);
   useEffect(() => {
@@ -111,12 +118,23 @@ function StageLayout() {
   }, [dragging, setUi]);
   return <div className="lc-stage-layout" style={{ '--lc-inspector-width': `${ui.inspectorCollapsed ? 0 : ui.inspectorWidth}px` } as CSSProperties}>
     <StageWorkspace />
-    {!ui.inspectorCollapsed && <button className="lc-inspector-resizer" aria-label="Resize inspector" onPointerDown={(event) => { drag.current = { x: event.clientX, width: ui.inspectorWidth }; setDragging(true); event.currentTarget.setPointerCapture(event.pointerId); }} />}
+    {!ui.inspectorCollapsed && <button className="lc-inspector-resizer" aria-label={t('Resize inspector')} onPointerDown={(event) => { drag.current = { x: event.clientX, width: ui.inspectorWidth }; setDragging(true); event.currentTarget.setPointerCapture(event.pointerId); }} />}
     {!ui.inspectorCollapsed && <Inspector />}
-    {ui.inspectorCollapsed && <button type="button" className="lc-inspector-collapsed" aria-label="Expand inspector" onClick={() => setUi({ inspectorCollapsed: false })}>◧</button>}
+    {ui.inspectorCollapsed && <button type="button" className="lc-inspector-collapsed" aria-label={t('Expand inspector')} onClick={() => setUi({ inspectorCollapsed: false })}>◧</button>}
   </div>;
 }
 
+function LocalizedShell({ children }: { children: ReactNode }) {
+  const { t } = useDesktop();
+  return <ShellProvider
+    bridge={shell.bridge()}
+    themeStore={themeStore}
+    platform={getPlatform()}
+    paletteLabels={{ placeholder: t('Search or run a command…'), title: t('Command palette'), empty: t('No matches.'), results: t('Results') }}
+    helpTitle={t('Keyboard shortcuts')}
+  >{children}</ShellProvider>;
+}
+
 export default function App() {
-  return <DesktopProvider><ShellProvider bridge={shell.bridge()} themeStore={themeStore} platform={getPlatform()}><Workspace /></ShellProvider></DesktopProvider>;
+  return <DesktopProvider><LocalizedShell><Workspace /></LocalizedShell></DesktopProvider>;
 }
