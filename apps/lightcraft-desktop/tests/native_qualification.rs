@@ -630,7 +630,7 @@ fn native_hidden_control_journeys() {
                         let _selected_first = run(control, "library.select", json!({"ids": [first_id], "active": first_id, "mode": "replace"}));
                         let first_again = snapshot(control);
                         assert_eq!(first_again["active"].as_u64(), Some(first_id), "selection snapshot must expose first active photo");
-                        assert!(first_again["viewGeneration"].as_u64().is_some_and(|generation| generation > second_generation), "selection must advance view generation");
+                        assert_eq!(first_again["viewGeneration"].as_u64(), Some(second_generation), "selection must preserve visible view generation");
                         let first_again_grid = wait_for_rendered_preview(control, ".lc-photo-cell.is-active img.lc-photo-preview", Some(&second_src));
                         assert_active_grid_identity(control, "procedural-rgb-01.png");
                         assert_ne!(first_again_grid["src"].as_str(), Some(second_src.as_str()), "quick selection must replace second photo pixels");
@@ -638,10 +638,10 @@ fn native_hidden_control_journeys() {
                         wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
                         let first_stage = wait_for_rendered_preview(control, "img.stage-preview", None);
                         let first_stage_src = first_stage["src"].as_str().expect("first stage preview must expose scoped source").to_string();
-                        let selected_second = run(control, "library.select", json!({"ids": [second_id], "active": second_id, "mode": "replace"}));
-                        assert_eq!(selected_second["active"].as_u64(), Some(second_id), "selection must return second active photo");
+                        let _selected_second = run(control, "library.select", json!({"ids": [second_id], "active": second_id, "mode": "replace"}));
                         let second_again = snapshot(control);
-                        assert!(second_again["viewGeneration"].as_u64().is_some_and(|generation| generation > first_again["viewGeneration"].as_u64().unwrap_or(0)), "second selection must advance view generation");
+                        assert_eq!(second_again["active"].as_u64(), Some(second_id), "selection snapshot must expose second active photo");
+                        assert_eq!(second_again["viewGeneration"], first_again["viewGeneration"], "selection must preserve visible view generation");
                         let second_stage = wait_for_rendered_preview(control, "img.stage-preview", Some(&first_stage_src));
                         assert_ne!(second_stage["src"].as_str(), Some(first_stage_src.as_str()), "quick selection must never leave first photo in stage");
                         control.key("G").expect("library route key must execute");
