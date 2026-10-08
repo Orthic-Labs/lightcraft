@@ -352,8 +352,8 @@ impl Renderer {
     pub fn cancel(&mut self, slot: &str) -> bool {
         let slots = [self.slots.get(slot), self.quick_slots.get(slot)];
         let mut cancelled = false;
-        for slot_id in slots.into_iter().flatten().copied() {
-            if let Some(pending) = self.pending.remove(&slot_id) {
+        for slot_id in slots.into_iter().flatten() {
+            if let Some(pending) = self.pending.remove(slot_id) {
                 let _ = pending.reply.send(Err("preview cancelled".to_string()));
                 cancelled = true;
             }
