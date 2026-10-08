@@ -303,6 +303,7 @@ impl Controller {
             Ok(()) if !cancelled => {
                 self.segmenter_dir = Some(path.clone());
                 self.session.segmenter.configure_model_dir(Some(path.clone()));
+                self.preferences.insert("sam3Dir".into(), json!(path.to_string_lossy()));
                 if let Some(status) = self.sam_validation_status.as_mut() {
                     status.done = status.total;
                     status.error = None;
@@ -777,6 +778,7 @@ mod tests {
         let controller_result = Controller::new(HostOptions { demo: true, ..HostOptions::default() }, PreviewStore::default());
         assert!(controller_result.is_ok());
         let Ok(mut controller) = controller_result else { return };
+        assert!(controller.preferences(Some(json!({"sam3Dir": current.to_string_lossy()}))).is_ok());
         let explicit = controller.preferences(Some(json!({
             "ui": {"memoryMb": 128, "futureSetting": {"keep": true}},
             "futureRoot": {"keep": "yes"}
@@ -823,6 +825,7 @@ mod tests {
             std::thread::yield_now();
         }
         assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&current));
+        assert_eq!(controller.preferences.get("sam3Dir").and_then(Value::as_str), Some(current.to_string_lossy().as_ref()));
         assert!(controller.shutdown().is_ok());
     }
 
@@ -834,6 +837,7 @@ mod tests {
             Controller::new(HostOptions { demo: true, sam3_dir: Some(current.clone()), ..HostOptions::default() }, PreviewStore::default());
         assert!(controller_result.is_ok());
         let Ok(mut controller) = controller_result else { return };
+        assert!(controller.preferences(Some(json!({"sam3Dir": current.to_string_lossy()}))).is_ok());
         let cancel = std::sync::Arc::new(AtomicBool::new(true));
         let progress = std::sync::Arc::new(AtomicU64::new(0));
         let (tx, result) = std::sync::mpsc::sync_channel(1);
@@ -850,6 +854,34 @@ mod tests {
         let status = controller.sam_validation_json();
         assert!(status.get("error").and_then(Value::as_str).is_some_and(|error| error.contains("cancelled")));
         assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&current));
+        assert_eq!(controller.preferences.get("sam3Dir").and_then(Value::as_str), Some(current.to_string_lossy().as_ref()));
+        assert!(controller.shutdown().is_ok());
+    }
+
+    #[test]
+    fn completed_sam_validation_commits_folder_and_preference() {
+        let current = temp_library("sam3-success-current");
+        let selected = temp_library("sam3-success-selected");
+        let controller_result =
+            Controller::new(HostOptions { demo: true, sam3_dir: Some(current.clone()), ..HostOptions::default() }, PreviewStore::default());
+        assert!(controller_result.is_ok());
+        let Ok(mut controller) = controller_result else { return };
+        assert!(controller.preferences(Some(json!({"sam3Dir": current.to_string_lossy()}))).is_ok());
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let progress = std::sync::Arc::new(AtomicU64::new(0));
+        let (tx, result) = std::sync::mpsc::sync_channel(1);
+        assert!(tx.send(Ok(())).is_ok());
+        controller.sam_validation_status = Some(SamValidationStatus {
+            path: selected.clone(),
+            done: 0,
+            total: lightcraft_engine::segment::MODEL_BYTES,
+            error: None,
+            finished: false,
+        });
+        controller.sam_validation = Some(SamValidationTask { path: selected.clone(), cancel, progress, result, worker: None });
+        controller.poll_sam_validation();
+        assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&selected));
+        assert_eq!(controller.preferences.get("sam3Dir").and_then(Value::as_str), Some(selected.to_string_lossy().as_ref()));
         assert!(controller.shutdown().is_ok());
     }
 
