@@ -154,13 +154,25 @@ mod tests {
     #[test]
     fn owner_serializes_cloned_handles_and_actions() {
         let Some(host) = demo_host() else { return };
+        let initial = host.snapshot();
+        assert!(initial.is_ok(), "demo snapshot should expose an active photo: {:?}", initial.as_ref().err());
+        let initial = match initial {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+        let photo_id = initial.get("active").and_then(Value::as_u64);
+        assert!(photo_id.is_some(), "demo snapshot should select a photo");
+        let Some(photo_id) = photo_id else {
+            return;
+        };
         let peer = host.clone();
         let worker = std::thread::spawn(move || peer.snapshot());
-        let selected = host.run("library.select".into(), json!({"ids": [1], "active": 1}));
+        let selected = host.run("library.select".into(), json!({"ids": [photo_id], "active": photo_id}));
         assert!(selected.is_ok(), "selection action should dispatch: {:?}", selected.err());
+        assert_eq!(selected.ok().and_then(|value| value.get("selected").and_then(Value::as_u64)), Some(1));
         let joined = worker.join();
         assert!(joined.is_ok(), "owner snapshot worker should complete");
-        let rated = host.run("photo.rate".into(), json!({"rating": 5, "ids": [1]}));
+        let rated = host.run("photo.rate".into(), json!({"rating": 5, "ids": [photo_id]}));
         assert!(rated.is_ok(), "rating action should dispatch: {:?}", rated.err());
         let began = host.run("develop.beginInteraction".into(), json!({"label": "Host test"}));
         assert!(began.is_ok(), "interaction should begin: {:?}", began.err());
@@ -174,7 +186,7 @@ mod tests {
             Ok(value) => value,
             Err(_) => return,
         };
-        assert_eq!(snapshot.get("active").and_then(Value::as_u64), Some(1));
+        assert_eq!(snapshot.get("active").and_then(Value::as_u64), Some(photo_id));
         assert!(snapshot.get("undo").and_then(Value::as_u64).is_some_and(|count| count > 0));
         assert!(host.shutdown().is_ok());
     }
