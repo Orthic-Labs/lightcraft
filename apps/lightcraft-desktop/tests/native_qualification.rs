@@ -59,8 +59,16 @@ fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, catal
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect::<Vec<_>>();
+    #[cfg(target_os = "macos")]
+    let launch_binary = binary
+        .ancestors()
+        .find(|path| path.extension().is_some_and(|extension| extension == "app"))
+        .expect("native qualification must launch the SDK-installed app bundle")
+        .to_path_buf();
+    #[cfg(not(target_os = "macos"))]
+    let launch_binary = binary.to_path_buf();
     let spec = LaunchSpec {
-        binary: binary.to_path_buf(),
+        binary: launch_binary,
         mode: Mode::Hidden,
         env: {
             let mut values = env;
@@ -110,14 +118,16 @@ fn assert_sources_unchanged(paths: &[(&str, &Path)], expected: &[(&str, String)]
 }
 
 fn wait_for_dom(control: &rightkit_qa::control::Control, expression: &str) -> Value {
+    let mut last = Value::Null;
     for _ in 0..100 {
         let value = control.eval(expression).expect("DOM route query must execute");
         if value.as_bool() == Some(true) {
             return value;
         }
+        last = value;
         sleep(Duration::from_millis(50));
     }
-    panic!("DOM route condition did not become true: {expression}");
+    panic!("DOM route condition did not become true: {expression}; last result={last}");
 }
 
 fn click_dom(control: &rightkit_qa::control::Control, selector: &str, message: &str) {
@@ -137,6 +147,10 @@ fn set_native_viewport(control: &rightkit_qa::control::Control, width: u64, heig
     assert_eq!(result["requested"]["height"].as_u64(), Some(height), "QA viewport must report requested height");
     assert!(result["observedInnerSize"]["width"].as_u64().is_some_and(|value| value > 0), "QA viewport must report observed width: {result}");
     assert!(result["observedInnerSize"]["height"].as_u64().is_some_and(|value| value > 0), "QA viewport must report observed height: {result}");
+    let dom_size = control
+        .eval("return {width: window.innerWidth, height: window.innerHeight, scale: window.devicePixelRatio};")
+        .expect("WebView viewport diagnostics must execute");
+    eprintln!("[qa] viewport native={result}; DOM={dom_size}");
     let settled = wait_for_dom(control, &format!("return window.innerWidth === {width} && window.innerHeight === {height};"));
     assert_eq!(settled.as_bool(), Some(true), "WebView inner size must match requested QA viewport");
     result
@@ -494,9 +508,9 @@ fn native_hidden_control_journeys() {
     let harness = qa_harness(&binary, &evidence, &revision, platform, &architecture);
 
     let scenario_names = [
-        "ipc",
         // Capture core import/edit/undo/export proof before broader parity journeys.
         "engineExport",
+        "ipc",
         "stalePreview",
         "cache",
         "scalability",

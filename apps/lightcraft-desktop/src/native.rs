@@ -5,6 +5,7 @@ mod preferences;
 #[path = "services.rs"]
 mod services;
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -480,9 +481,13 @@ fn response(status: u16, body: Vec<u8>, content_type: &str) -> Response<Vec<u8>>
 const PRIMARY_IDENTIFIER: &str = "ai.storyteller.lightcraft";
 const MAX_PERSISTED_LIBRARY_PATH: usize = 8_192;
 
+fn qa_hidden_enabled(value: Option<&OsStr>) -> bool {
+    value.and_then(|value| value.to_str().map(str::trim)).is_some_and(|value| value.eq_ignore_ascii_case("1") || value.eq_ignore_ascii_case("true"))
+}
+
 fn runtime_modes(args: &[String]) -> (bool, Option<PathBuf>) {
     #[cfg(feature = "qa-native")]
-    let qa_env = std::env::var_os("LIGHTCRAFT_DESKTOP_QA").is_some() || std::env::var_os("RIGHTKIT_QA_HIDDEN").is_some();
+    let qa_env = std::env::var_os("LIGHTCRAFT_DESKTOP_QA").is_some() || qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_HIDDEN").as_deref());
     #[cfg(not(feature = "qa-native"))]
     let qa_env = false;
     let qa = args.iter().any(|arg| arg == "--qa") || qa_env;
@@ -624,7 +629,7 @@ fn build_shell() -> rightkit_shell::Shell {
     let hardening = rightkit_shell::Hardening { block_zoom: false, ..Default::default() };
     let qa = std::env::args().any(|arg| arg == "--qa")
         || std::env::var_os("LIGHTCRAFT_DESKTOP_QA").is_some()
-        || std::env::var_os("RIGHTKIT_QA_HIDDEN").is_some();
+        || qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_HIDDEN").as_deref());
     rightkit_shell::Shell::builder("lightcraft-preview")
         .app_name("LightCraft")
         .main_label("main")
@@ -747,6 +752,9 @@ pub fn run() {
         });
     #[cfg(feature = "qa-native")]
     let builder = if let Some(control) = qa_control_plugin() { builder.plugin(control) } else { builder };
+    #[cfg(target_os = "macos")]
+    let builder =
+        if qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_BACKGROUND").as_deref()) { builder.activate_ignoring_other_apps(false) } else { builder };
     if let Err(error) = builder.run(tauri::generate_context!()) {
         eprintln!("lightcraft desktop failed: {error}");
     }
@@ -775,5 +783,16 @@ mod tests {
         assert!(persisted_library_path(&path).is_none());
         fs::remove_file(path)?;
         Ok(())
+    }
+
+    #[test]
+    fn qa_hidden_flag_requires_enabled_value() {
+        assert!(!qa_hidden_enabled(Some(OsStr::new("0"))));
+        assert!(!qa_hidden_enabled(Some(OsStr::new("false"))));
+        assert!(!qa_hidden_enabled(Some(OsStr::new(""))));
+        assert!(qa_hidden_enabled(Some(OsStr::new("1"))));
+        assert!(qa_hidden_enabled(Some(OsStr::new("true"))));
+        assert!(qa_hidden_enabled(Some(OsStr::new(" TRUE "))));
+        assert!(!qa_hidden_enabled(None));
     }
 }
