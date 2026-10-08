@@ -403,9 +403,32 @@ fn qa_viewport(app: &AppHandle<Wry>, args: &Value) -> Result<Value, String> {
             "resizable": candidate.resizable,
         })
     });
-    window
+    // Tao adds native menu height when sizing borderless Windows windows.
+    // Hide it only during resize, then restore prior visibility even on errors.
+    #[cfg(target_os = "windows")]
+    let menu_visible = window.is_menu_visible().map_err(|error| format!("reading QA menu visibility: {error}"))?;
+    #[cfg(target_os = "windows")]
+    if menu_visible {
+        window.hide_menu().map_err(|error| format!("hiding QA menu: {error}"))?;
+    }
+    let resize_result = window
         .set_size(tauri::Size::Logical(tauri::LogicalSize::new(width as f64, height as f64)))
-        .map_err(|error| format!("setting QA viewport: {error}"))?;
+        .map_err(|error| format!("setting QA viewport: {error}"));
+    let restore_result: Result<Option<()>, String> = {
+        #[cfg(target_os = "windows")]
+        {
+            menu_visible.then(|| window.show_menu().map_err(|error| format!("restoring QA menu: {error}"))).transpose()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Ok(None)
+        }
+    };
+    match (resize_result, restore_result) {
+        (Err(error), Err(restore)) => return Err(format!("{error}; {restore}")),
+        (Err(error), Ok(_)) | (Ok(_), Err(error)) => return Err(error),
+        (Ok(_), Ok(_)) => {}
+    }
     let observed = window.inner_size().map_err(|error| format!("reading QA viewport: {error}"))?;
     let after = geometry(&window);
     Ok(json!({
