@@ -217,7 +217,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 
 | Id | Feature | Tier | Status | Evidence | Missing / notes |
 |---|---|---|---|---|---|
-| LR-EDIT-AUTO | Auto settings | P0 | ✅ | `cmd:develop.auto`, `crates/pipeline/src/auto.rs` | |
+| LR-EDIT-AUTO | Auto settings | P0 | 🟡 | `cmd:develop.auto`, `crates/pipeline/src/auto.rs` | Eight sliders & one-step undo work; histogram-based tone rules with fixed vibrance/saturation. Lightroom Classic Auto output quality has not been benchmarked. |
 | LR-EDIT-BW | Black & white | P0 | ✅ | `cmd:develop.treatment` | |
 | LR-EDIT-HDR-MODE | HDR editing | P2 | ⬜ | | |
 | LR-EDIT-LIGHT-EXPOSURE | Exposure | P0 | ✅ | `ctl:light.exposure` | |
