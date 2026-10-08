@@ -25,6 +25,13 @@ pub const DEFAULT_LIBRARY_DIR: &str = "library";
 /// Largest backup (offsets are 32-bit without zip64).
 pub const MAX_BYTES: u64 = 0xFFFF_FFFF - (64 << 20);
 
+/// Largest single entry restore reads into memory. Browser restores are deliberately bounded
+/// per entry even though the zip format itself allows almost 4 GiB entries.
+pub const MAX_RESTORE_ENTRY_BYTES: u64 = 256 << 20;
+
+/// Largest central directory restore reads into memory.
+pub const MAX_RESTORE_DIRECTORY_BYTES: u64 = 64 << 20;
+
 const LOCAL_SIG: u32 = 0x0403_4b50;
 const CENTRAL_SIG: u32 = 0x0201_4b50;
 const END_SIG: u32 = 0x0605_4b50;
@@ -241,6 +248,11 @@ pub fn verify(entry: &ZipEntry, data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Check that stored original bytes match their content-addressed storage key.
+pub fn verify_original_hash(hash: &str, data: &[u8]) -> Result<(), String> {
+    if crate::store::content_hash(data) == hash { Ok(()) } else { Err(format!("originals/{hash}: content hash mismatch")) }
+}
+
 /// A name for the restored library's folder.
 pub fn restored_dir_name(now_ms: f64) -> String {
     format!("library-restored-{}", now_ms.max(0.0) as u64)
@@ -302,5 +314,22 @@ mod tests {
     fn size_limits_are_errors_not_panics() {
         let mut w = ZipWriter { offset: MAX_BYTES - 10, ..Default::default() };
         assert!(w.entry("x", &[0; 64]).is_err());
+    }
+
+    #[test]
+    fn original_hash_matches_bytes_even_when_zip_crc_is_valid() {
+        let original = b"original image";
+        let replacement = b"replacement image";
+        let hash = crate::store::content_hash(original);
+        let name = original_entry(&hash, "photo.png");
+        let zip = build(&[(name.as_str(), replacement)]);
+        let tail = &zip[zip.len() - tail_len(zip.len() as u64) as usize..];
+        let (offset, size) = find_central(tail).unwrap();
+        let entries = parse_central(&zip[offset as usize..(offset + size) as usize]).unwrap();
+        let entry = &entries[0];
+        let start = data_offset(entry, &zip[entry.header as usize..entry.header as usize + 30]).unwrap() as usize;
+        verify(entry, &zip[start..start + replacement.len()]).unwrap();
+        assert!(verify_original_hash(&hash, replacement).is_err());
+        assert!(verify_original_hash(&hash, original).is_ok());
     }
 }
