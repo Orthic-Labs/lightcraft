@@ -212,7 +212,9 @@ fn run(rx: &mpsc::Receiver<Job>, shared: &Shared, idle: Duration) {
         let is_detail = matches!(job.kind, Kind::Detail { .. });
         let _done = Done(if is_detail { &shared.detail } else { &shared.pending });
         if queue.iter().any(|later| supersedes(later, &job)) {
-            let _ = job.reply.send(Outcome { tag: job.tag, result: Ok(None), superseded: true });
+            let outcome = Outcome { tag: job.tag, result: Ok(None), superseded: true };
+            drop(_done);
+            let _ = job.reply.send(outcome);
             continue;
         }
         let result = match std::panic::catch_unwind(AssertUnwindSafe(|| run_job(&mut state, shared, &mut job))) {
@@ -229,7 +231,9 @@ fn run(rx: &mpsc::Receiver<Job>, shared: &Shared, idle: Duration) {
             state.cache = None;
         }
         shared.loaded.store(state.model.is_some(), Ordering::SeqCst);
-        let _ = job.reply.send(Outcome { tag: job.tag, result, superseded: false });
+        let outcome = Outcome { tag: job.tag, result, superseded: false };
+        drop(_done);
+        let _ = job.reply.send(outcome);
     }
 }
 
