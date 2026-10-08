@@ -1011,23 +1011,34 @@ fn native_hidden_control_journeys() {
                             .eval(r#"return (() => { const node = document.querySelector("input[aria-label='Exposure']"); if (!node) return false; node.focus(); return document.activeElement === node; })();"#)
                             .expect("exposure slider focus query must execute");
                         assert_eq!(focused.as_bool(), Some(true), "exposure slider focus must execute");
-                        control.key("Left").expect("exposure keyboard adjustment must execute");
-                        wait_for_snapshot(
-                            control,
-                            |value| value["develop"]["light"]["exposure"] != edited_exposure,
-                            "keyboard adjustment must reach engine before testing cancellation",
-                        );
-                        control.key("Escape").expect("exposure Escape cancellation must execute");
-                        let cancelled = wait_for_snapshot(
-                            control,
-                            |value| {
-                                value["develop"]["light"]["exposure"] == edited_exposure
-                                    && value["undo"].as_u64() == edited["undo"].as_u64()
-                            },
-                            "Escape cancellation did not settle through host bridge",
-                        );
-                        assert_eq!(cancelled["develop"]["light"]["exposure"], edited_exposure, "Escape must cancel active slider gesture");
-                        assert_eq!(cancelled["undo"].as_u64(), edited["undo"].as_u64(), "cancelled gesture must not create undo step");
+                        control.eval("window.__lcInteractionDiagnostics = []; return true;").expect("keyboard interaction diagnostics must initialize");
+                        let keyboard_result = catch_unwind(AssertUnwindSafe(|| {
+                            control.key("Left").expect("exposure keyboard adjustment must execute");
+                            wait_for_snapshot(
+                                control,
+                                |value| value["develop"]["light"]["exposure"] != edited_exposure,
+                                "keyboard adjustment must reach engine before testing cancellation",
+                            );
+                            control.key("Escape").expect("exposure Escape cancellation must execute");
+                            let cancelled = wait_for_snapshot(
+                                control,
+                                |value| {
+                                    value["develop"]["light"]["exposure"] == edited_exposure
+                                        && value["undo"].as_u64() == edited["undo"].as_u64()
+                                },
+                                "Escape cancellation did not settle through host bridge",
+                            );
+                            assert_eq!(cancelled["develop"]["light"]["exposure"], edited_exposure, "Escape must cancel active slider gesture");
+                            assert_eq!(cancelled["undo"].as_u64(), edited["undo"].as_u64(), "cancelled gesture must not create undo step");
+                        }));
+                        let keyboard_trace = control.eval("return (() => { const trace = window.__lcInteractionDiagnostics || []; delete window.__lcInteractionDiagnostics; return trace; })();").unwrap_or(Value::Null);
+                        let keyboard_receipt = json!({"before": edited, "after": snapshot(control), "trace": keyboard_trace});
+                        if let Ok(bytes) = serde_json::to_vec_pretty(&keyboard_receipt) {
+                            let _ = fs::write(scenario.dir().join("gesture-keyboard.json"), bytes);
+                        }
+                        if let Err(payload) = keyboard_result {
+                            resume_unwind(payload);
+                        }
                         control.move_to(300.0, 300.0).expect("pointer move must execute");
                         control.drag((300.0, 300.0), (420.0, 320.0), 8).expect("pointer drag must execute");
                         control.wheel(420.0, 320.0, 0.0, -120.0).expect("wheel must execute");

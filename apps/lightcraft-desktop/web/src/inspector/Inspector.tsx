@@ -15,6 +15,9 @@ type InspectorDesktop = {
   setHistogram: (histogram: unknown) => void;
 };
 
+type InteractionDiagnostic = Record<string, unknown>;
+type DiagnosticWindow = Window & { __lcInteractionDiagnostics?: InteractionDiagnostic[] };
+
 const PANEL_ITEMS: Array<{ id: Exclude<Panel, null>; label: string; icon: IconName }> = [
   { id: 'edit', label: 'Edit', icon: 'develop' },
   { id: 'profiles', label: 'Profiles', icon: 'profiles' },
@@ -131,18 +134,29 @@ function ControlRow({ spec, value, run }: { spec: ControlSpec; value: number; ru
   const started = useRef(false);
   const commandQueue = useRef(Promise.resolve());
   useEffect(() => setDraft(value), [value]);
-  const enqueue = (id: string, params: JsonObject = {}) => {
-    const pending = commandQueue.current.then(() => run(id, params));
-    commandQueue.current = pending.then(() => undefined, () => undefined);
-    return pending;
+  const trace = (phase: string, details: InteractionDiagnostic = {}) => {
+    if (typeof window === 'undefined') return;
+    const records = (window as DiagnosticWindow).__lcInteractionDiagnostics;
+    if (!Array.isArray(records) || records.length >= 128) return;
+    records.push({ at: Date.now(), control: spec.id, phase, ...details, started: started.current });
   };
-  const begin = () => { if (!started.current) { started.current = true; void enqueue('develop.beginInteraction', { label: spec.label }); } };
-  const end = () => { if (started.current) { started.current = false; void enqueue('develop.endInteraction', {}); } };
-  const cancel = () => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } if (!started.current) return; started.current = false; void enqueue('develop.cancelInteraction', {}); };
+  const enqueue = (id: string, params: JsonObject = {}) => {
+    trace('enqueue.before', { command: id });
+    const pending = commandQueue.current.then(() => run(id, params));
+    const observed = pending.then(
+      value => { trace('enqueue.after', { command: id }); return value; },
+      error => { trace('enqueue.error', { command: id, error: String(error) }); throw error; },
+    );
+    commandQueue.current = observed.then(() => undefined, () => undefined);
+    return observed;
+  };
+  const begin = () => { if (started.current) { trace('begin.skipped'); return; } trace('begin.before'); started.current = true; trace('begin.started'); void enqueue('develop.beginInteraction', { label: spec.label }); };
+  const end = () => { if (!started.current) { trace('end.skipped'); return; } trace('end.before'); started.current = false; trace('end.started'); void enqueue('develop.endInteraction', {}); };
+  const cancel = () => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } if (!started.current) { trace('cancel.skipped'); return; } trace('cancel.before'); started.current = false; trace('cancel.started'); void enqueue('develop.cancelInteraction', {}); };
   const set = (next: number) => { if (!Number.isFinite(next)) return Promise.resolve(); const clamped = Math.max(spec.min, Math.min(spec.max, next)); setDraft(clamped); return enqueue('develop.set', { control: spec.id, value: clamped }); };
   const onKey = (next: number) => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } begin(); void set(next).then(() => { if (!started.current) return; if (timer.current) clearTimeout(timer.current); timer.current = setTimeout(end, 400); }, () => undefined); };
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); if (started.current) cancel(); }, [run]);
-  return <div className="lc-inspector__row"><label htmlFor={`ctl-${spec.id}`}>{spec.label}</label><input id={`ctl-${spec.id}`} type="range" min={spec.min} max={spec.max} step={spec.step} value={draft} aria-label={spec.label} onPointerDown={begin} onPointerUp={end} onPointerCancel={cancel} onChange={e => { begin(); void set(Number(e.target.value)); }} onKeyDown={e => { if (e.key === 'Escape') { cancel(); setDraft(value); } else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End') { e.preventDefault(); const current = Number(e.currentTarget.value); const base = Number.isFinite(current) ? current : draft; const next = e.key === 'Home' ? spec.min : e.key === 'End' ? spec.max : (e.key === 'ArrowLeft' || e.key === 'ArrowDown') ? base - spec.step : base + spec.step; onKey(next); } }} /><input type="number" min={spec.min} max={spec.max} step={spec.step} value={Number(draft.toFixed(spec.decimals))} aria-label={`${spec.label} value`} onFocus={begin} onChange={e => setDraft(Number(e.target.value))} onKeyDown={e => { if (e.key === 'Escape') { cancel(); setDraft(value); } }} onBlur={() => { void set(draft); end(); }} /><button className="lc-inspector__reset" type="button" aria-label={`Reset ${spec.label}`} title={`Reset ${spec.label}`} onClick={() => { end(); void enqueue('develop.resetControl', { control: spec.id }); setDraft(spec.default); }}>↺</button></div>;
+  return <div className="lc-inspector__row"><label htmlFor={`ctl-${spec.id}`}>{spec.label}</label><input id={`ctl-${spec.id}`} type="range" min={spec.min} max={spec.max} step={spec.step} value={draft} aria-label={spec.label} onPointerDown={begin} onPointerUp={end} onPointerCancel={cancel} onChange={e => { begin(); void set(Number(e.target.value)); }} onKeyDown={e => { trace('keydown', { target: 'range', key: e.key, code: e.code, trusted: e.nativeEvent.isTrusted }); if (e.key === 'Escape') { cancel(); setDraft(value); } else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End') { e.preventDefault(); const current = Number(e.currentTarget.value); const base = Number.isFinite(current) ? current : draft; const next = e.key === 'Home' ? spec.min : e.key === 'End' ? spec.max : (e.key === 'ArrowLeft' || e.key === 'ArrowDown') ? base - spec.step : base + spec.step; onKey(next); } }} /><input type="number" min={spec.min} max={spec.max} step={spec.step} value={Number(draft.toFixed(spec.decimals))} aria-label={`${spec.label} value`} onFocus={begin} onChange={e => setDraft(Number(e.target.value))} onKeyDown={e => { trace('keydown', { target: 'number', key: e.key, code: e.code, trusted: e.nativeEvent.isTrusted }); if (e.key === 'Escape') { cancel(); setDraft(value); } }} onBlur={() => { void set(draft); end(); }} /><button className="lc-inspector__reset" type="button" aria-label={`Reset ${spec.label}`} title={`Reset ${spec.label}`} onClick={() => { end(); void enqueue('develop.resetControl', { control: spec.id }); setDraft(spec.default); }}>↺</button></div>;
 }
 
 function MixerLegend({ settings }: { settings: Json }) { const mixer = object(settings.mixer); return <div className="lc-inspector__empty">{Object.keys(mixer).length ? 'Adjust hue, saturation & luminance for each colour.' : 'Select photo to adjust its colours.'}</div>; }
