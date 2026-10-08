@@ -71,11 +71,18 @@ export default function Filmstrip() {
   const [viewportWidth, setViewportWidth] = useState(900);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const activeSearch = useRef<ActiveSearch | null>(null);
-  const chunkOffset = Math.floor(Math.max(0, Math.floor(scrollLeft / ITEM_STRIDE) - 2) / PAGE) * PAGE;
-  const slice = usePhotoSlice(chunkOffset, PAGE);
   const active = snapshot?.active ?? null;
   const generation = snapshot?.viewGeneration;
   const total = snapshot?.total ?? 0;
+  const chunkOffset = Math.floor(Math.max(0, Math.floor(scrollLeft / ITEM_STRIDE) - 2) / PAGE) * PAGE;
+  const slice = usePhotoSlice(chunkOffset, PAGE);
+  const nextChunkOffset = Math.min(total, chunkOffset + PAGE);
+  const nextSlice = usePhotoSlice(nextChunkOffset, PAGE);
+  const sliceReady = slice.offset === chunkOffset && slice.generation === generation && !slice.loading;
+  const nextSliceReady = nextChunkOffset > chunkOffset && nextSlice.offset === nextChunkOffset && nextSlice.generation === generation && !nextSlice.loading;
+  const filmPhotos = sliceReady ? slice.photos : [];
+  const nextFilmPhotos = nextSliceReady ? nextSlice.photos : [];
+  const loadedFilmPhotos = sliceReady ? [...filmPhotos, ...nextFilmPhotos] : [];
   const activeIndexHint = snapshot && typeof (snapshot as DesktopSnapshot & { activeIndex?: unknown }).activeIndex === 'number'
     ? (snapshot as DesktopSnapshot & { activeIndex?: number }).activeIndex ?? null
     : null;
@@ -132,12 +139,13 @@ export default function Filmstrip() {
   }, [active, activeIndexHint, generation, total]);
   useEffect(() => {
     if (active === null) return;
+    if (!sliceReady) return;
     const localIndex = slice.photos.findIndex((photo) => photo.id === active);
     if (localIndex < 0) return;
     setActiveIndex(slice.offset + localIndex);
     const search = activeSearch.current;
     if (search?.key === `${generation}:${active}`) search.cancelled = true;
-  }, [active, generation, slice.offset, slice.photos]);
+  }, [active, generation, slice.offset, slice.photos, sliceReady]);
   useEffect(() => {
     if (activeIndex === null || !viewport.current) return;
     const target = Math.max(0, activeIndex * ITEM_STRIDE - Math.max(0, (viewportWidth - ITEM_WIDTH) / 2));
@@ -152,13 +160,13 @@ export default function Filmstrip() {
     event.preventDefault();
     event.stopPropagation();
     if (active === null) return;
-    const local = slice.photos.findIndex((photo) => photo.id === active);
+    const local = loadedFilmPhotos.findIndex((photo) => photo.id === active);
     if (local < 0) {
       void run(delta < 0 ? 'library.previous' : 'library.next', {});
       return;
     }
     const next = local + delta;
-    const photo = slice.photos[next];
+    const photo = loadedFilmPhotos[next];
     if (photo) choose(photo);
     else void run(delta < 0 ? 'library.previous' : 'library.next', {});
   };
@@ -176,6 +184,10 @@ export default function Filmstrip() {
     }).catch(() => undefined);
   };
   const totalWidth = Math.max(viewportWidth, snapshot.total * ITEM_STRIDE + ITEM_GAP);
+  const visibleFilmStart = Math.max(0, Math.floor(scrollLeft / ITEM_STRIDE) - chunkOffset - Math.ceil(viewportWidth / ITEM_STRIDE));
+  const visibleFilmEnd = Math.min(loadedFilmPhotos.length, visibleFilmStart + Math.ceil(viewportWidth / ITEM_STRIDE) * 3);
+  const visibleFilmPhotos = loadedFilmPhotos.slice(visibleFilmStart, visibleFilmEnd);
+  const visibleFilmOffset = (chunkOffset + visibleFilmStart) * ITEM_STRIDE;
   const contextFilter = filterLabel(snapshot.filter);
   const position = activeIndex === null ? `${snapshot.total} photos` : `${activeIndex + 1} of ${snapshot.total}`;
   const contextLabel = sourceLabel(snapshot.source, snapshot.albums);
@@ -187,13 +199,13 @@ export default function Filmstrip() {
     </div>
     <div className="lc-filmstrip-scroll" ref={viewport} onScroll={(event) => setScrollLeft(event.currentTarget.scrollLeft)}>
       <div className="lc-filmstrip-spacer" style={{ width: totalWidth }}>
-        <div className="lc-filmstrip-window" style={{ left: chunkOffset * ITEM_STRIDE }} onKeyDown={(event) => {
+        <div className="lc-filmstrip-window" style={{ left: visibleFilmOffset }} onKeyDown={(event) => {
           if (event.key === 'ArrowRight') move(1, event);
           if (event.key === 'ArrowLeft') move(-1, event);
           if (event.key === 'Home') jumpToEdge('first', event);
           if (event.key === 'End') jumpToEdge('last', event);
         }} role="listbox" aria-label="Photos" aria-busy={slice.loading} tabIndex={0}>
-          {slice.photos.map((photo) => {
+          {visibleFilmPhotos.map((photo) => {
             const details = ui.filmBadges ? badgeLabel(photo) : '';
             const visibleBadge = ui.filmBadges ? badge(photo) : '';
             const label = [ui.filmNames ? photo.fileName : `Photo ${photo.id}`, details].filter(Boolean).join(', ');

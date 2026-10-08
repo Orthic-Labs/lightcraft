@@ -83,7 +83,7 @@ export function PhotoPreview({ photoId, slot, width, height, viewGeneration = 0,
   const image = images.length > 0;
   const error = preview.state.status === "error";
   return (
-    <div className={className} style={wrapperStyle} role={error && image ? "group" : !image ? (error ? "img" : "status") : undefined} aria-label={error ? `${alt || "Photo"}: ${preview.state.error}` : !image ? "Loading preview" : undefined}>
+    <div className="photo-preview-frame" style={wrapperStyle} role={error && image ? "group" : !image ? (error ? "img" : "status") : undefined} aria-label={error ? `${alt || "Photo"}: ${preview.state.error}` : !image ? "Loading preview" : undefined}>
       {images}
       {!image && <span data-preview-state={error ? "error" : "loading"}>{error ? "Preview unavailable" : "Loading preview…"}</span>}
       {error && image && <div role="alert" style={{ position: "absolute", zIndex: 3, inset: "auto 8px 8px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "6px 8px", background: "rgba(0, 0, 0, 0.72)", color: "white" }}><span data-preview-state="error">{preview.state.error}</span><button type="button" onClick={preview.retry}>Retry</button></div>}

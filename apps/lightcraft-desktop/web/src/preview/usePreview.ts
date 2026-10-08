@@ -111,6 +111,18 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
     if (pending) acknowledge(pending.handle);
   }, [acknowledge]);
 
+  const retainedPreview = useCallback((photoId: number, excludeHandle?: string) => {
+    const presented = presentedPreview.current;
+    if (presented?.descriptor.photoId === photoId
+      && presented.descriptor.handle !== excludeHandle
+      && !acknowledgedHandles.current.has(presented.descriptor.handle)) return presented;
+    const active = activeDescriptor.current;
+    if (active?.photoId === photoId && active.handle !== excludeHandle && !acknowledgedHandles.current.has(active.handle)) {
+      return { descriptor: active, url: `lightcraft-preview://${active.handle}` };
+    }
+    return null;
+  }, []);
+
   const onImageReady = useCallback((descriptor: PreviewDescriptor) => {
     if (activeDescriptor.current?.handle !== descriptor.handle || acknowledgedHandles.current.has(descriptor.handle)) return false;
     presentedHandle.current = descriptor.handle;
@@ -129,9 +141,11 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
     }
     acknowledge(descriptor.handle);
     activeDescriptor.current = null;
-    const retained = presentedPreview.current?.descriptor.photoId === descriptor.photoId && presentedPreview.current.descriptor.handle !== descriptor.handle
-      ? presentedPreview.current
-      : null;
+    const retained = retainedPreview(descriptor.photoId, descriptor.handle);
+    if (presentedPreview.current?.descriptor.handle === descriptor.handle) {
+      presentedPreview.current = null;
+      presentedHandle.current = null;
+    }
     // A newer request owns presentation, but released current pixels must not be retained
     // as its fallback while that request is pending or fails.
     if (pendingRequest.current && pendingRequest.current.sequence !== descriptor.sequence) {
@@ -139,7 +153,7 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
       return;
     }
     setState({ status: "error", descriptor: retained?.descriptor ?? null, url: retained?.url ?? null, error: "Preview could not be decoded" });
-  }, [acknowledge]);
+  }, [acknowledge, retainedPreview]);
 
   useEffect(() => {
     if (options.enabled === false || !Number.isSafeInteger(options.photoId) || options.photoId < 0) {
@@ -218,7 +232,7 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
           }
           pendingRequest.current = null;
           acknowledge(descriptor.handle);
-          const retained = presentedPreview.current?.descriptor.photoId === current.photoId ? presentedPreview.current : null;
+          const retained = retainedPreview(current.photoId);
           const message = error instanceof Error ? error.message : String(error);
           setState({ status: "error", descriptor: retained?.descriptor ?? null, url: retained?.url ?? null, error: message || "Preview could not be decoded" });
         });
@@ -227,7 +241,7 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
         if (cancelled || pendingRequest.current?.sequence !== current.sequence) return;
         pendingRequest.current = null;
         const message = error instanceof Error ? error.message : String(error);
-        const retained = presentedPreview.current?.descriptor.photoId === current.photoId ? presentedPreview.current : null;
+        const retained = retainedPreview(current.photoId);
         if (/preview (?:superseded|view is stale|request is stale)/i.test(message)) {
           if (staleRetryCount.current < 2) {
             const retryNumber = staleRetryCount.current;
@@ -268,7 +282,7 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
     };
     // request values are represented by explicit dependencies below; callback identity is caller-owned.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [options.enabled, options.photoId, options.slot, options.viewGeneration, request.width, request.height, request.quality, request.before, retryValue, retirePending]);
+  }, [options.enabled, options.photoId, options.slot, options.viewGeneration, request.width, request.height, request.quality, request.before, retryValue, retirePending, retainedPreview]);
 
   useEffect(() => () => {
     retirePending();

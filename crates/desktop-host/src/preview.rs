@@ -179,7 +179,7 @@ mod tests {
         assert_ne!(first, second);
         assert!(store.acknowledge(&first));
         assert!(store.get(&first).is_none());
-        assert_eq!(store.get(&second).map(|value| value.bytes.as_ref()), Some(&[1, 2, 3][..]));
+        assert_eq!(store.get(&second).map(|value| value.bytes.to_vec()), Some(vec![1, 2, 3]));
     }
 
     #[test]

@@ -390,7 +390,7 @@ fn assert_sustained_preview_gestures(control: &rightkit_qa::control::Control, ev
     let exposure = baseline["develop"]["light"]["exposure"].clone();
     let undo = baseline["undo"].as_u64().expect("gesture baseline undo count required");
     control.eval(r#"return (() => {
-        const t = {frames:0, blank:0, unready:0, errors:[], imageErrors:[], stopped:false};
+        const t = {frames:0, blank:0, unready:0, errors:[], imageErrors:[], blankSamples:[], phase:"setup", stopped:false};
         const read = () => {
             const images = [...document.querySelectorAll('img.stage-preview')].filter(e => {
                 const css = getComputedStyle(e), r = e.getBoundingClientRect();
@@ -407,7 +407,16 @@ fn assert_sustained_preview_gestures(control: &rightkit_qa::control::Control, ev
         const tick = () => {
             if (t.stopped) return;
             const images = read(); t.frames++;
-            if (!images.length) t.blank++;
+            if (!images.length) {
+                t.blank++;
+                if (t.blankSamples.length < 160) t.blankSamples.push({at:performance.now(),phase:t.phase,
+                    images:[...document.querySelectorAll('img.stage-preview')].map(e => {
+                        const css=getComputedStyle(e), r=e.getBoundingClientRect(), parent=e.parentElement.getBoundingClientRect();
+                        return {src:e.src,opacity:css.opacity,visibility:css.visibility,display:css.display,
+                            rect:{width:r.width,height:r.height},parent:{width:parent.width,height:parent.height},
+                            complete:e.complete,naturalWidth:e.naturalWidth};
+                    }),states:[...document.querySelectorAll('.stage-workspace [data-preview-state]')].map(e=>({state:e.dataset.previewState,text:e.textContent.slice(0,80)}))});
+            }
             else if (!images.some(e => e.complete && e.naturalWidth > 0 && e.naturalHeight > 0)) t.unready++;
             t.raf = requestAnimationFrame(tick);
         };
@@ -437,6 +446,7 @@ fn assert_sustained_preview_gestures(control: &rightkit_qa::control::Control, ev
             let target = if (preferred - start).abs() < 0.1 { 1.0 - preferred } else { preferred };
             let steps = if index < 4 { 48 } else { 96 };
             let prior = wait_for_rendered_preview(control, "img.stage-preview", None);
+            control.eval(&format!("return window.__lcPreviewStress.phase='drag {index}';")).expect("drag phase must be recorded");
             control.drag((x + width * start, y), (x + width * target, y), steps).expect("sustained pointer drag must execute");
             let edited = wait_for_snapshot(
                 control,
@@ -447,6 +457,7 @@ fn assert_sustained_preview_gestures(control: &rightkit_qa::control::Control, ev
             rounds.push(
                 json!({"index":index,"steps":steps,"undo":edited["undo"],"exposure":edited["develop"]["light"]["exposure"],"decoded":rendered}),
             );
+            control.eval(&format!("return window.__lcPreviewStress.phase='undo {index}';")).expect("undo phase must be recorded");
             run(control, "edit.undo", json!({}));
             wait_for_snapshot(
                 control,
@@ -464,7 +475,7 @@ fn assert_sustained_preview_gestures(control: &rightkit_qa::control::Control, ev
         t.stopped = true; t.observer.disconnect(); cancelAnimationFrame(t.raf);
         document.querySelector('.stage-workspace').removeEventListener('error',t.onError,true);
         delete window.__lcPreviewStress;
-        return {frames:t.frames,blank:t.blank,unready:t.unready,errors:t.errors,imageErrors:t.imageErrors};
+        return {frames:t.frames,blank:t.blank,unready:t.unready,errors:t.errors,imageErrors:t.imageErrors,blankSamples:t.blankSamples};
     })();"#,
         )
         .expect("preview stress observer cleanup must execute");
@@ -623,7 +634,7 @@ fn assert_active_grid_is_bounded(control: &rightkit_qa::control::Control) {
 fn grid_metrics(control: &rightkit_qa::control::Control) -> Value {
     control
         .eval(
-            "return (() => { const scroll = document.querySelector('.lc-grid-scroll'); const grid = document.querySelector('.lc-grid-window'); const images = [...(grid?.querySelectorAll('.lc-photo-preview') || [])]; const first = grid?.querySelector('.lc-photo-caption span:first-child')?.textContent?.trim() || ''; return {scrollTop: scroll?.scrollTop || 0, scrollHeight: scroll?.scrollHeight || 0, clientHeight: scroll?.clientHeight || 0, top: Number.parseFloat(grid?.style.top || '0') || 0, cells: grid?.querySelectorAll('.lc-photo-cell').length || 0, images: images.length, loaded: images.filter((img) => img.complete && img.naturalWidth > 0 && img.naturalHeight > 0).length, first, busy: grid?.getAttribute('aria-busy') === 'true'}; })();",
+            "return (() => { const scroll = document.querySelector('.lc-grid-scroll'); const grid = document.querySelector('.lc-grid-window'); const images = [...(grid?.querySelectorAll('img.lc-photo-preview') || [])]; const first = grid?.querySelector('.lc-photo-caption span:first-child')?.textContent?.trim() || ''; const bounds=scroll?.getBoundingClientRect(); const visible=[...(grid?.querySelectorAll('.lc-photo-cell') || [])].filter(e=>{const r=e.getBoundingClientRect();return bounds&&r.bottom>bounds.top&&r.top<bounds.bottom;}); const ready=visible.filter(e=>[...e.querySelectorAll('img.lc-photo-preview')].some(img=>img.complete&&img.naturalWidth>0&&img.naturalHeight>0)); return {visible:visible.length,visibleReady:ready.length,errors:grid?.querySelectorAll('[data-preview-state=error]').length||0,scrollTop: scroll?.scrollTop || 0, scrollHeight: scroll?.scrollHeight || 0, clientHeight: scroll?.clientHeight || 0, top: Number.parseFloat(grid?.style.top || '0') || 0, cells: grid?.querySelectorAll('.lc-photo-cell').length || 0, images: images.length, loaded: images.filter((img) => img.complete && img.naturalWidth > 0 && img.naturalHeight > 0).length, first, busy: grid?.getAttribute('aria-busy') === 'true'}; })();",
         )
         .expect("scalable grid DOM query must execute")
 }
@@ -634,6 +645,9 @@ fn wait_for_grid(control: &rightkit_qa::control::Control, scrolled: bool, previo
         let visible = value["cells"].as_u64().is_some_and(|count| count <= 512)
             && value["images"].as_u64().is_some_and(|count| count <= 512)
             && value["loaded"].as_u64().is_some_and(|count| count > 0)
+            && value["visible"].as_u64().is_some_and(|count| count > 0)
+            && value["visibleReady"] == value["visible"]
+            && value["errors"].as_u64() == Some(0)
             && value["busy"].as_bool() == Some(false)
             && previous_first.is_none_or(|previous| value["first"].as_str() != Some(previous))
             && (!scrolled || (value["scrollTop"].as_f64().unwrap_or(0.0) > 0.0 && value["top"].as_f64().unwrap_or(0.0) > 0.0));
@@ -643,6 +657,30 @@ fn wait_for_grid(control: &rightkit_qa::control::Control, scrolled: bool, previo
         sleep(Duration::from_millis(50));
     }
     panic!("scalable grid did not settle: {:?}", grid_metrics(control));
+}
+
+fn assert_thumbnail_page_boundaries(control: &rightkit_qa::control::Control) {
+    click_dom(control, ".lc-display-wrap > button", "Display menu must open for square grid");
+    click_dom(control, ".lc-display-views button:last-child", "square grid must open");
+    click_dom(control, ".lc-display-wrap > button", "Display menu must close after grid choice");
+    wait_for_dom(control, "return document.querySelector('.lc-grid-scroll.is-square') !== null;");
+    wait_for_grid(control, false, None);
+    control.eval("return (()=>{const s=document.querySelector('.lc-grid-scroll'),g=document.querySelector('.lc-grid-window'),cell=g.querySelector('.lc-photo-cell');const cols=getComputedStyle(g).gridTemplateColumns.split(' ').length,stride=cell.getBoundingClientRect().height+parseFloat(getComputedStyle(g).rowGap);s.scrollTop=(Math.floor(512/cols)-1)*stride;s.dispatchEvent(new Event('scroll',{bubbles:true}));return true;})();").expect("square grid page-boundary scroll must execute");
+    wait_for_grid(control, true, None);
+    wait_for_dom(
+        control,
+        "return (()=>{const s=document.querySelector('.lc-grid-scroll'),r=s.getBoundingClientRect(),cells=[...s.querySelectorAll('.lc-photo-cell')].map(e=>e.getBoundingClientRect()).filter(c=>c.bottom>r.top&&c.top<r.bottom);return cells.length>0&&Math.min(...cells.map(c=>c.top))<=r.top+14&&Math.max(...cells.map(c=>c.bottom))>=r.bottom-18;})();",
+    );
+    control.eval("return (()=>{const s=document.querySelector('.lc-filmstrip-scroll');s.scrollLeft=127*132;s.dispatchEvent(new Event('scroll',{bubbles:true}));return true;})();").expect("filmstrip page-boundary scroll must execute");
+    wait_for_dom(
+        control,
+        "return (()=>{const s=document.querySelector('.lc-filmstrip-scroll'),r=s.getBoundingClientRect(),items=[...s.querySelectorAll('.lc-filmstrip-item')].filter(e=>{const b=e.getBoundingClientRect();return b.right>r.left&&b.left<r.right;});return items.length>0&&items.every(e=>[...e.querySelectorAll('img')].some(i=>i.complete&&i.naturalWidth>0))&&Math.min(...items.map(e=>e.getBoundingClientRect().left))<=r.left+14&&Math.max(...items.map(e=>e.getBoundingClientRect().right))>=r.right-14&&!s.querySelector('[data-preview-state=error]');})();",
+    );
+    control.eval("return (()=>{for(const [selector,axis] of [['.lc-filmstrip-scroll','scrollLeft'],['.lc-grid-scroll','scrollTop']]){const e=document.querySelector(selector);e[axis]=0;e.dispatchEvent(new Event('scroll',{bubbles:true}));}return true;})();").expect("thumbnail boundary scroll must restore start");
+    click_dom(control, ".lc-display-wrap > button", "Display menu must reopen");
+    click_dom(control, ".lc-display-views button:first-child", "photo grid must restore");
+    click_dom(control, ".lc-display-wrap > button", "Display menu must close after restoring grid");
+    wait_for_grid(control, false, None);
 }
 
 fn enable_grid_info(control: &rightkit_qa::control::Control) {
@@ -1417,6 +1455,10 @@ fn native_hidden_control_journeys() {
                         assert_eq!(snapshot["version"].as_u64(), Some(1));
                         assert!(snapshot["viewGeneration"].is_number());
                         assert!(snapshot["controls"].is_array());
+                        import_file(control, &inputs.png);
+                        control.key("G").expect("populated library route must execute");
+                        wait_for_rendered_preview(control, "img.lc-photo-preview", None);
+                        wait_for_rendered_preview(control, "img.lc-filmstrip-preview", None);
                         for (width, height) in [(1280_u64, 800_u64), (1600_u64, 1000_u64)] {
                             set_native_viewport(control, width, height);
                             wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
@@ -1601,6 +1643,7 @@ fn native_hidden_control_journeys() {
                             .expect("fresh scalability tail must reply");
                         assert_eq!(fresh["generationChanged"].as_bool(), None);
                         assert_eq!(fresh["photos"].as_array().map(Vec::len), Some(512), "fresh tail page must remain capped at 512 photos");
+                        assert_thumbnail_page_boundaries(control);
                     }
                     "gesture" => {
                         let gesture_photo = scenario.dir().join("gesture-photo.png");
