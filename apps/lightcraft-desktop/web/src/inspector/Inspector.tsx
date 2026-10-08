@@ -1,3 +1,4 @@
+import { canonicalSection, sectionIsOpen, toggledSection } from '../controlSections';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ControlSpec, DesktopSnapshot, JsonObject, Panel, UiState } from '../types';
 import { useDesktop } from '../desktop';
@@ -43,17 +44,7 @@ const SECTION_LABELS: Record<string, string> = {
   light: 'Light', curve: 'Tone Curve', color: 'Color', mixer: 'Color Mixer', bwMix: 'B&W Mixer', grading: 'Color Grading', effects: 'Effects', vignette: 'Vignette', grain: 'Grain', detail: 'Detail', optics: 'Optics', geometry: 'Geometry', profile: 'Profile', calibration: 'Calibration', pointColor: 'Point Color', redEye: 'Red Eye',
 };
 
-const SECTION_ALIASES: Record<string, string> = {
-  light: 'Light', color: 'Color', exposure: 'Exposure', curve: 'Tone Curve', tonecurve: 'Tone Curve',
-  mixer: 'Color Mixer', colormixer: 'Color Mixer', bwmix: 'B&W Mixer', bwmixer: 'B&W Mixer',
-  grading: 'Color Grading', colorgrading: 'Color Grading', effects: 'Effects', vignette: 'Vignette', grain: 'Grain', detail: 'Detail',
-  optics: 'Optics', geometry: 'Geometry', profile: 'Profile', calibration: 'Calibration',
-  pointcolor: 'Point Color', redeye: 'Red Eye',
-};
 const SECTION_ORDER = ['Light', 'Color', 'Exposure', 'Tone Curve', 'Color Mixer', 'B&W Mixer', 'Color Grading', 'Effects', 'Vignette', 'Grain', 'Detail', 'Optics', 'Geometry', 'Profile', 'Calibration', 'Point Color', 'Red Eye'];
-
-function sectionToken(value: string): string { return value.trim().toLowerCase().replace(/[^a-z0-9]/g, ''); }
-function canonicalSection(value: string): string { const trimmed = value.trim(); return SECTION_ALIASES[sectionToken(trimmed)] ?? (trimmed || 'Light'); }
 
 function object(value: unknown): Json { return value && typeof value === 'object' && !Array.isArray(value) ? value as Json : {}; }
 function array(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
@@ -184,16 +175,8 @@ function EditPanel({ desktop }: { desktop: InspectorDesktop }) {
     for (const ctl of controls) { const key = canonicalSection(ctl.section || 'Light'); const list = map.get(key) ?? []; list.push(ctl); map.set(key, list); }
     return map;
   }, [controls]);
-  const sectionOpen = (key: string) => {
-    const canonical = canonicalSection(key);
-    const matches = Object.entries(ui.sections).filter(([stored]) => canonicalSection(stored) === canonical);
-    const exact = matches.find(([stored]) => stored === canonical);
-    if (exact) return exact[1];
-    const alias = matches[0];
-    if (alias) return alias[1];
-    return canonical === 'Light' || canonical === 'Color';
-  };
-  const toggleSection = (key: string) => { const canonical = canonicalSection(key); setUi({ sections: { ...ui.sections, [canonical]: !sectionOpen(canonical) } }); };
+  const sectionOpen = (key: string) => sectionIsOpen(ui.sections, key);
+  const toggleSection = (key: string) => setUi({ sections: toggledSection(ui.sections, key) });
   const settings = object(snapshot?.develop);
   const profile = object(settings.profile);
   const profileId = text(profile.id, 'lc.color');

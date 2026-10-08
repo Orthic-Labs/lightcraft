@@ -1,3 +1,4 @@
+import { toggledSection } from './controlSections';
 import type { Command } from '@rightkit/app-shell';
 import type { CommandInfo, JsonObject, UiState } from './types';
 import { translate, type LocaleCode } from './i18n';
@@ -59,7 +60,7 @@ export function applyUiCommand(id: string, ui: UiState): Partial<UiState> | null
     if (panel === 'close') return { inspectorCollapsed: true };
     if (['edit','profiles','crop','remove','masking','redeye','presets','info','keywords','versions','activity'].includes(panel)) return { panel: panel as UiState['panel'], inspectorCollapsed: false, ...(['edit','profiles','crop','remove','masking','redeye','presets'].includes(panel) ? { view: 'detail' } : {}) };
   }
-  if (id.startsWith('section.')) return { view: 'detail', panel: 'edit', inspectorCollapsed: false, sections: { ...ui.sections, [id.slice(8)]: !ui.sections[id.slice(8)] } };
+  if (id.startsWith('section.')) return { view: 'detail', panel: 'edit', inspectorCollapsed: false, sections: toggledSection(ui.sections, id.slice(8)) };
   if (id.startsWith('tool.')) {
     const tool = id.slice(5);
     if (tool === 'none' || tool === 'done') return { tool: '' };

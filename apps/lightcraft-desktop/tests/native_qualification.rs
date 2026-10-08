@@ -1281,6 +1281,11 @@ fn native_hidden_control_journeys() {
                             choose_inspector_panel(control, "edit");
                             wait_for_dom(control, "return document.querySelector('input[id=\"ctl-light.exposure\"]') !== null;");
                             assert_primary_editing_usable(control);
+                            click_dom(control, ".lc-inspector__section-head", "Light section must collapse by pointer");
+                            wait_for_dom(control, "return document.querySelector('input[id=\"ctl-light.exposure\"]') === null;");
+                            control.key(if cfg!(target_os = "macos") { "Cmd+1" } else { "Ctrl+1" }).expect("Light shortcut must reopen canonical section state");
+                            wait_for_dom(control, "return document.querySelector('input[id=\"ctl-light.exposure\"]') !== null;");
+                            assert_primary_editing_usable(control);
                             assert_workspace_design(control);
                             let route = control
                                 .eval("return document.querySelector('.stage-view-mode select')?.value || '';")
