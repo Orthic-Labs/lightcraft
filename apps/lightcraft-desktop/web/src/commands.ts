@@ -59,13 +59,13 @@ export function applyUiCommand(id: string, ui: UiState): Partial<UiState> | null
     if (panel === 'close') return { inspectorCollapsed: true };
     if (['edit','profiles','crop','remove','masking','redeye','presets','info','keywords','versions','activity'].includes(panel)) return { panel: panel as UiState['panel'], inspectorCollapsed: false, ...(['edit','profiles','crop','remove','masking','redeye','presets'].includes(panel) ? { view: 'detail' } : {}) };
   }
-  if (id.startsWith('section.')) return { view: 'detail', panel: 'edit', sections: { ...ui.sections, [id.slice(8)]: !ui.sections[id.slice(8)] } };
+  if (id.startsWith('section.')) return { view: 'detail', panel: 'edit', inspectorCollapsed: false, sections: { ...ui.sections, [id.slice(8)]: !ui.sections[id.slice(8)] } };
   if (id.startsWith('tool.')) {
     const tool = id.slice(5);
     if (tool === 'none' || tool === 'done') return { tool: '' };
-    if (tool === 'guidedUpright') return { view: 'detail', panel: 'crop', tool };
-    if (tool === 'wbPicker') return { view: 'detail', panel: 'edit', tool };
-    if (['brush', 'linear', 'radial'].includes(tool)) return { view: 'detail', panel: 'masking', tool };
+    if (tool === 'guidedUpright') return { view: 'detail', panel: 'crop', inspectorCollapsed: false, tool };
+    if (tool === 'wbPicker') return { view: 'detail', panel: 'edit', inspectorCollapsed: false, tool };
+    if (['brush', 'linear', 'radial'].includes(tool)) return { view: 'detail', panel: 'masking', inspectorCollapsed: false, tool };
     if (tool === 'keywordPainter') return { view: 'photoGrid', tool };
     return { tool };
   }
@@ -88,7 +88,7 @@ export function applyUiCommand(id: string, ui: UiState): Partial<UiState> | null
   if (id === 'view.maskOverlayColor') return { sections: { ...ui.sections, maskOverlayColor: !ui.sections.maskOverlayColor } };
   if (id === 'view.maskPins') return { maskPins: !ui.maskPins };
   if (id === 'view.histogram') return { sections: { ...ui.sections, histogram: !ui.sections.histogram } };
-  if (id === 'view.visualizeSpots') return { view: 'detail', panel: 'remove', maskOverlay: true };
+  if (id === 'view.visualizeSpots') return { view: 'detail', panel: 'remove', inspectorCollapsed: false, maskOverlay: true };
   if (id === 'view.cropOverlay') return { cropOverlay: ui.cropOverlay === 'off' ? 'thirds' : 'off' };
   if (id === 'view.cropOverlayOrientation') {
     const orientations = ['thirds', 'golden', 'diagonal', 'off']; const current = orientations.indexOf(ui.cropOverlay);
