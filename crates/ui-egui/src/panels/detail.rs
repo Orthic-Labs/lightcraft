@@ -330,7 +330,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     }
     // until the loupe has this photo: show its cached render / embedded preview / a thumbnail
     if app.renderer.textures.get(&Slot::Main).is_none_or(|t| t.photo != id)
-        && let Some(q) = app.session.quick_view_job(id, want.max(8), !crop_tool)
+        && let Some(q) = app.session.quick_view_job(id, rw.max(rh).max(8), !crop_tool)
     {
         app.renderer.request_quick(Slot::Preview, q, 110);
     }
