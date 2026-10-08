@@ -153,8 +153,11 @@ pub fn set_init_marker(path: Option<PathBuf>) {
     let mut state = MARKER.lock().unwrap_or_else(|e| e.into_inner());
     let old = state.path.clone();
     let clear_old = path.is_none();
+    let same_path = old == path;
     state.path = path;
-    state.startup_active = false;
+    if !same_path {
+        state.startup_active = false;
+    }
     drop(state);
     if clear_old && let Some(old) = old {
         let _ = std::fs::remove_file(old);
@@ -175,6 +178,9 @@ pub fn begin_startup_marker(backends: Backends) -> bool {
 /// Finish a successful startup guard. Safe to call more than once.
 pub fn startup_succeeded() {
     let mut state = MARKER.lock().unwrap_or_else(|e| e.into_inner());
+    if !state.startup_active {
+        return;
+    }
     if let Some(path) = state.path.as_deref() {
         let _ = std::fs::remove_file(path);
     }
@@ -297,8 +303,18 @@ mod tests {
         assert!(m.exists());
         let seen = with_init_marker(Backends::DX12, || m.exists());
         assert!(seen && m.exists(), "device setup cannot clear the first-frame guard");
+        // Reconfiguring the same path while startup is armed must preserve that lifecycle state.
+        set_init_marker(Some(m.clone()));
         startup_succeeded();
         assert!(!m.exists(), "a successful second launch clears its marker");
+
+        // Once startup has completed, a later compute marker belongs to compute setup and is not
+        // removed by a repeated startup completion callback.
+        let seen = with_init_marker(Backends::DX12, || {
+            startup_succeeded();
+            m.exists()
+        });
+        assert!(seen, "startup completion cannot clear a concurrent compute marker");
         set_init_marker(None);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -754,12 +754,15 @@ fn early_preferences_root(qa: bool, qa_data_dir: Option<&Path>) -> Option<PathBu
         .map(|root| root.join("ai.storyteller.lightcraft.preview"))
 }
 
-fn early_gpu_marker_path() -> Option<PathBuf> {
+fn early_gpu_marker_path(primary: bool) -> Option<PathBuf> {
     if std::env::var_os("LIGHTCRAFT_NO_PREFS").is_some() {
         return None;
     }
     let args: Vec<String> = std::env::args().collect();
     let (qa, qa_data_dir) = runtime_modes(&args);
+    if primary && !qa {
+        return lightcraft_engine::camera_profiles::config_dir().map(|root| root.join("gpu-init.marker"));
+    }
     early_preferences_root(qa, qa_data_dir.as_deref()).map(|root| root.join("gpu-init.marker"))
 }
 
@@ -911,7 +914,9 @@ fn build_shell() -> rightkit_shell::Shell {
 }
 
 pub fn run() {
-    let early_marker = early_gpu_marker_path();
+    let context = tauri::generate_context!();
+    let primary = context.config().identifier == PRIMARY_IDENTIFIER;
+    let early_marker = early_gpu_marker_path(primary);
     let preflight_marker = early_marker.is_some();
     let early_recovery = early_marker.as_deref().and_then(lightcraft_engine::gpu::backend::take_init_marker);
     if let Some(marker) = early_marker.clone() {
@@ -1048,7 +1053,7 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     let builder =
         if qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_BACKGROUND").as_deref()) { builder.activate_ignoring_other_apps(false) } else { builder };
-    if let Err(error) = builder.run(tauri::generate_context!()) {
+    if let Err(error) = builder.run(context) {
         startup_window_failed();
         eprintln!("lightcraft desktop failed: {error}");
     }
