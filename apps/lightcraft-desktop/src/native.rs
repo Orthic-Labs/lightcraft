@@ -275,7 +275,9 @@ mod tauri_commands {
         }
         if services::is_import_picker(&action) {
             let explicit = services::has_explicit_picker_input(&action, &params)?;
-            if qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_HIDDEN").as_deref()) && !explicit {
+            let unattended = qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_HIDDEN").as_deref())
+                || qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_BACKGROUND").as_deref());
+            if unattended && !explicit {
                 return Err("interactive import picker unavailable in hidden QA; supply explicit path(s)".into());
             }
             if explicit {
