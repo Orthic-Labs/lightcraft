@@ -752,6 +752,30 @@ fn assert_active_grid_identity(control: &rightkit_qa::control::Control, file_nam
     assert_eq!(value.as_str(), Some(file_name), "active grid DOM identity must match selected source");
 }
 
+fn wait_for_active_grid_preview(control: &rightkit_qa::control::Control, file_name: &str, expected_src: Option<&str>) -> Value {
+    let mut last = Value::Null;
+    let expression = "return (() => { const img = document.querySelector('.lc-photo-cell.is-active img.lc-photo-preview'); if (!img) return {ready:false, reason:'missing'}; const cell = img.closest('.lc-photo-cell'); const src = img.getAttribute('src') || ''; const identity = cell?.querySelector('.lc-photo-caption span:first-child')?.textContent?.trim() || ''; return {ready: img.complete && img.naturalWidth > 0 && img.naturalHeight > 0, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight, src, identity, active: Boolean(cell?.classList.contains('is-active')), selected: Boolean(cell?.getAttribute('aria-selected') === 'true')}; })();";
+    for _ in 0..160 {
+        let value = control.eval(expression).expect("active grid preview DOM query must execute");
+        let ready = value["ready"].as_bool() == Some(true);
+        let scoped = value["src"].as_str().is_some_and(is_scoped_preview_src);
+        let changed = expected_src.is_none_or(|previous| value["src"].as_str() != Some(previous));
+        let identity = value["identity"].as_str() == Some(file_name);
+        let active = value["active"].as_bool() == Some(true);
+        let selected = value["selected"].as_bool() == Some(true);
+        if ready && scoped && changed && identity && active && selected {
+            assert_eq!(value["active"].as_bool(), Some(true), "active grid cell must own rendered preview: {value}");
+            assert_eq!(value["selected"].as_bool(), Some(true), "active grid cell must be selected: {value}");
+            assert!(value["naturalWidth"].as_u64().is_some_and(|width| width > 0));
+            assert!(value["naturalHeight"].as_u64().is_some_and(|height| height > 0));
+            return value;
+        }
+        last = value;
+        sleep(Duration::from_millis(50));
+    }
+    panic!("active grid preview did not settle on {file_name}: {expression}; last result={last}");
+}
+
 fn wait_task(control: &rightkit_qa::control::Control, task_id: &str) -> Value {
     for _ in 0..900 {
         let value = snapshot(control);
@@ -1562,13 +1586,13 @@ fn native_hidden_control_journeys() {
                         let first = import_file(control, &inputs.png);
                         control.key("G").expect("library route key must execute");
                         wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
-                        let first_grid = wait_for_rendered_preview(control, ".lc-photo-cell.is-active img.lc-photo-preview", None);
+                        let first_grid = wait_for_active_grid_preview(control, "procedural-rgb-01.png", None);
                         assert_active_grid_identity(control, "procedural-rgb-01.png");
                         let first_src = first_grid["src"].as_str().expect("first grid preview must expose scoped source").to_string();
                         let first_id = first["active"].as_u64().expect("first import must select active photo");
                         let second = import_file(control, &inputs.arw);
                         let second_generation = second["viewGeneration"].as_u64().expect("second import generation required");
-                        let second_grid = wait_for_rendered_preview(control, ".lc-photo-cell.is-active img.lc-photo-preview", Some(&first_src));
+                        let second_grid = wait_for_active_grid_preview(control, "synthetic-sonya-01.arw", Some(&first_src));
                         assert_active_grid_identity(control, "synthetic-sonya-01.arw");
                         let second_src = second_grid["src"].as_str().expect("second grid preview must expose scoped source").to_string();
                         assert_ne!(first_src, second_src, "second import must replace active grid pixels");
@@ -1577,7 +1601,7 @@ fn native_hidden_control_journeys() {
                         let first_again = snapshot(control);
                         assert_eq!(first_again["active"].as_u64(), Some(first_id), "selection snapshot must expose first active photo");
                         assert_eq!(first_again["viewGeneration"].as_u64(), Some(second_generation), "selection must preserve visible view generation");
-                        let first_again_grid = wait_for_rendered_preview(control, ".lc-photo-cell.is-active img.lc-photo-preview", Some(&second_src));
+                        let first_again_grid = wait_for_active_grid_preview(control, "procedural-rgb-01.png", Some(&second_src));
                         assert_active_grid_identity(control, "procedural-rgb-01.png");
                         assert_ne!(first_again_grid["src"].as_str(), Some(second_src.as_str()), "quick selection must replace second photo pixels");
                         control.key("D").expect("develop route key must execute");
@@ -1592,7 +1616,7 @@ fn native_hidden_control_journeys() {
                         assert_ne!(second_stage["src"].as_str(), Some(first_stage_src.as_str()), "quick selection must never leave first photo in stage");
                         control.key("G").expect("library route key must execute");
                         wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
-                        wait_for_rendered_preview(control, ".lc-photo-cell.is-active img.lc-photo-preview", None);
+                        wait_for_active_grid_preview(control, "synthetic-sonya-01.arw", None);
                         assert_active_grid_identity(control, "synthetic-sonya-01.arw");
                         let stale = control
                             .command("lc_view_slice", &json!({"generation": second_again["viewGeneration"].as_u64().unwrap_or(0) + 1, "offset": 0, "limit": 512}))
