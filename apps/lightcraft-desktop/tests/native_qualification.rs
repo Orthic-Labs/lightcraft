@@ -758,7 +758,7 @@ fn native_hidden_control_journeys() {
             if name == "preferences" {
                 with_control(&binary, scenario, &inputs.catalog, |control, _data| {
                     let updated = control
-                        .command("lc_preferences", &json!({"qaSentinel": "preserved", "ui": {"theme": "dark"}}))
+                        .command("lc_preferences", &json!({"qaSentinel": "preserved", "ui": {"theme": "dark", "view": "detail", "startupView": "photoGrid"}}))
                         .expect("preferences patch must reply");
                     assert_eq!(updated["qaSentinel"].as_str(), Some("preserved"));
                 });
@@ -766,6 +766,8 @@ fn native_hidden_control_journeys() {
                     let reopened = control.command("lc_preferences", &Value::Null).expect("preferences reopen must reply after process restart");
                     assert_eq!(reopened["qaSentinel"].as_str(), Some("preserved"), "unknown preference fields must survive process restart");
                     assert_eq!(reopened["ui"]["theme"].as_str(), Some("dark"), "dark theme choice must survive restart");
+                    assert_eq!(reopened["ui"]["startupView"].as_str(), Some("photoGrid"), "startup choice must survive restart");
+                    wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
                     wait_for_dom(control, "return document.documentElement.getAttribute('data-theme') === 'dark';");
                     let dark = scenario.dir().join("dark-theme.png");
                     control.screenshot_to(&dark).expect("dark theme screenshot must be captured");
@@ -816,7 +818,10 @@ fn native_hidden_control_journeys() {
                     assert_eq!(modal_state["activeInside"].as_bool(), Some(true));
 
                     // Settings contains a real select: changing it must retain focused control through React rerender.
-                    for _ in 0..5 {
+                    for _ in 0..24 {
+                        if control.eval("return document.activeElement?.tagName === 'SELECT';").expect("focused control must be readable").as_bool() == Some(true) {
+                            break;
+                        }
                         control.key("Tab").expect("native Tab must reach settings select");
                     }
                     assert_eq!(control.eval("return document.activeElement?.tagName;").expect("settings select focus query must execute").as_str(), Some("SELECT"));
@@ -865,7 +870,7 @@ fn native_hidden_control_journeys() {
                     }
                     click_dom(control, "[data-command=\"app.settings\"]", "settings hydration command must open");
                     wait_for_dom(control, "return document.querySelector('.lc-dialog h2')?.textContent === 'Settings';");
-                    click_dom(control, ".lc-settings-tab:nth-child(2)", "settings Import tab must open");
+                    click_dom(control, "[data-settings-section=\"import\"]", "settings Import tab must open");
                     wait_for_dom(control, "return ['Raw photos','Default copyright','Default creator','Metadata preset'].every((label) => [...document.querySelectorAll('.lc-settings-panel .lc-field span')].some((node) => node.textContent === label)) && document.querySelector('.lc-dialog-actions .lc-button-primary')?.disabled === false;");
                     let hydrated = control
                         .eval("return Object.fromEntries([...document.querySelectorAll('.lc-settings-panel .lc-field')].map((field) => [field.querySelector('span')?.textContent, field.querySelector('input,select')?.value]));")
@@ -878,13 +883,13 @@ fn native_hidden_control_journeys() {
                     assert_eq!(hydrated["Metadata preset"].as_str(), Some(metadata_expected), "saved metadata preset must hydrate");
                     assert_eq!(hydrated["Default copyright"].as_str(), Some("Fixture Copyright"), "saved copyright default must hydrate");
                     assert_eq!(hydrated["Default creator"].as_str(), Some("Fixture Creator"), "saved creator default must hydrate");
-                    click_dom(control, ".lc-settings-tab:nth-child(3)", "settings Performance tab must open");
+                    click_dom(control, "[data-settings-section=\"performance\"]", "settings Performance tab must open");
                     wait_for_dom(control, "return [...document.querySelectorAll('.lc-settings-panel .lc-field span')].some((node) => node.textContent === 'Memory budget (MB; 0 = automatic)');");
                     let memory = control
                         .eval("return [...document.querySelectorAll('.lc-settings-panel .lc-field')].find((field) => field.querySelector('span')?.textContent === 'Memory budget (MB; 0 = automatic)')?.querySelector('input')?.value || ''; ")
                         .expect("automatic memory setting must be readable");
                     assert_eq!(memory.as_str(), Some("0"), "fresh settings must expose automatic memory budget");
-                    click_dom(control, ".lc-settings-tab:nth-child(1)", "settings General tab must open");
+                    click_dom(control, "[data-settings-section=\"general\"]", "settings General tab must open");
                     set_dialog_field(control, "Theme", "dark");
                     click_dom(control, ".lc-dialog-actions .lc-button-primary", "settings field-only save must execute");
                     assert_eq!(wait_for_dom(control, "return document.querySelector('.lc-dialog') === null;").as_bool(), Some(true));
@@ -892,7 +897,43 @@ fn native_hidden_control_journeys() {
                     assert_eq!(after_library["import"], before_library["import"], "theme-only Settings save must preserve import defaults & metadata preset");
                     let persisted = control.command("lc_preferences", &Value::Null).expect("theme preference must reopen after field-only save");
                     assert_eq!(persisted["ui"]["theme"].as_str(), Some("dark"));
+                    click_dom(control, ".rk-search--trigger", "settings parity palette must open");
+                    wait_for_dom(control, "return document.querySelector('.rk-palette') !== null;");
+                    for key in ["s", "e", "t", "t", "i", "n", "g", "s"] {
+                        control.key(key).expect("settings parity search must execute");
+                    }
+                    click_dom(control, "[data-command=\"app.settings\"]", "settings parity dialog must open");
+                    wait_for_dom(control, "return document.querySelector('.lc-dialog-actions .lc-button-primary')?.disabled === false;");
+                    set_dialog_field(control, "Open in", "detail");
+                    set_dialog_field(control, "Application", "QA External Editor");
+                    click_dom(control, "[data-settings-section=\"interface\"]", "Interface settings must open");
+                    set_dialog_field(control, "Info overlay", "2");
+                    click_dom(control, ".lc-dialog-actions .lc-button-primary", "settings parity values must save");
+                    wait_for_dom(control, "return document.querySelector('.lc-dialog') === null;");
+                    let parity = control.command("lc_preferences", &Value::Null).expect("new settings must persist");
+                    assert_eq!(parity["ui"]["startupView"].as_str(), Some("detail"));
+                    assert_eq!(parity["ui"]["externalEditor"].as_str(), Some("QA External Editor"));
+                    assert_eq!(parity["ui"]["infoOverlay"].as_u64(), Some(2));
+                    assert_eq!(parity["qaSentinel"].as_str(), Some("preserved"));
                     control.command("lc_preferences", &json!({"ui": {"theme": "light"}})).expect("settings journey must restore light theme");
+                });
+                with_control(&binary, scenario, &inputs.catalog, |control, _data| {
+                    wait_for_dom(control, "return document.querySelector('.lc-stage-layout') !== null && document.querySelector('.info-overlay') !== null;");
+                    let exposure_overlay = control.eval("return document.querySelector('.info-overlay')?.textContent || '';").expect("Exposure overlay must render");
+                    click_dom(control, ".footer-right button:first-child", "Info control must cycle Exposure to Off");
+                    wait_for_dom(control, "return document.querySelector('.info-overlay') === null;");
+                    click_dom(control, ".footer-right button:first-child", "Info control must cycle Off to Basic");
+                    wait_for_dom(control, "return document.querySelector('.info-overlay') !== null;");
+                    let basic_overlay = control.eval("return document.querySelector('.info-overlay')?.textContent || '';").expect("Basic overlay must render");
+                    assert_ne!(basic_overlay, exposure_overlay, "Basic & Exposure modes must show different authoritative photo metadata");
+                    click_dom(control, ".rk-search--trigger", "shortcut help palette must open");
+                    wait_for_dom(control, "return document.querySelector('.rk-palette') !== null;");
+                    for key in ["s", "h", "o", "r", "t", "c", "u", "t", "s"] {
+                        control.key(key).expect("shortcut help search must execute");
+                    }
+                    click_dom(control, "[data-command=\"app.shortcuts\"]", "shortcut help must open through app route");
+                    wait_for_dom(control, "return document.querySelectorAll('.lc-shortcuts kbd').length > 20;");
+                    control.key("Escape").expect("shortcut help must close");
                 });
             } else if name == "mergeHdr" {
                 with_control(&binary, scenario, &inputs.catalog, |control, _data| {

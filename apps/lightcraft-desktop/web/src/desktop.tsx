@@ -1,9 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getSnapshot, nativeAction, openSecondWindow, runCommand, savePreferences } from './api';
-import { applyUiCommand, UI_COMMAND_IDS } from './commands';
+import { allUiMetadata, applyUiCommand, UI_COMMAND_IDS } from './commands';
 import { normalizeLocale, translate } from './i18n';
-import type { DesktopContextValue, DesktopSnapshot, DialogState, JsonObject, UiState, ViewMode, WindowBootstrap } from './types';
+import type { DesktopContextValue, DesktopSnapshot, DialogState, JsonObject, StartupView, UiState, ViewMode, WindowBootstrap } from './types';
 
 const MIN_STAGE = 360;
 const DEFAULT_UI: UiState = {
@@ -13,7 +13,7 @@ const DEFAULT_UI: UiState = {
   slideshow: false, infoOverlay: 0, maskOverlay: false, maskOverlayMode: 'selected', maskPins: true,
   clipping: false, theme: 'system', locale: 'en', sections: { light: true, color: true, effects: true, detail: false, optics: false },
   autoAdvance: false, gridInfo: true, softProof: false, brushSize: 100, brushFeather: 50, cropOverlay: 'thirds', filterText: '',
-  confirmDelete: false, gpu: true, previewEdge: 2560, memoryMb: 0, externalEditor: '', filmNames: true, filmBadges: true,
+  startupView: 'last', confirmDelete: false, gpu: true, previewEdge: 2560, memoryMb: 0, externalEditor: '', filmNames: true, filmBadges: true,
 };
 
 const DesktopContext = createContext<DesktopContextValue | null>(null);
@@ -30,8 +30,13 @@ function mergeUi(value: unknown): Partial<UiState> {
   const source = value as Record<string, unknown>;
   const next: Partial<UiState> = {};
   (Object.keys(DEFAULT_UI) as Array<keyof UiState>).forEach((key) => {
-    const candidate = source[key];
-    if (candidate !== undefined) (next[key] as unknown) = key === 'locale' ? normalizeLocale(candidate) : candidate;
+    const candidate = source[key] ?? (key === 'startupView' ? source.startup_view : undefined);
+    if (candidate === undefined) return;
+    if (key === 'locale') (next[key] as unknown) = normalizeLocale(candidate);
+    else if (key === 'startupView') {
+      const startupView = startupViewOf(candidate);
+      if (startupView !== null) next.startupView = startupView;
+    } else (next[key] as unknown) = candidate;
   });
   return next;
 }
@@ -42,6 +47,15 @@ function objectOf(value: unknown): Record<string, unknown> | null {
 
 function finiteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function startupViewOf(value: unknown): StartupView | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'last' || normalized === 'lastview' || normalized === 'last_view') return 'last';
+  if (normalized === 'grid' || normalized === 'photogrid' || normalized === 'photo_grid') return 'photoGrid';
+  if (normalized === 'detail') return 'detail';
+  return null;
 }
 
 /** Map legacy egui UiState once; a persisted `ui` object becomes migration sentinel. */
@@ -56,9 +70,11 @@ function migrateLegacyUi(value: JsonObject): Partial<UiState> {
 
   if (typeof legacy.language === 'string' && ['en', 'zh-hans', 'zh-hant', 'ja'].includes(legacy.language.toLowerCase())) next.locale = legacy.language.toLowerCase();
   if (typeof view === 'string' && viewModes.includes(view as UiState['view'])) next.view = view as UiState['view'];
-  const startupView = settings?.startupView;
-  if (next.view === undefined && startupView === 'grid') next.view = 'photoGrid';
-  if (next.view === undefined && startupView === 'detail') next.view = 'detail';
+  const startupView = startupViewOf(settings?.startupView)
+    ?? startupViewOf(settings?.startup_view)
+    ?? startupViewOf(legacy.startupView)
+    ?? startupViewOf(legacy.startup_view);
+  if (startupView !== null) next.startupView = startupView;
   if (typeof legacy.leftPanel === 'boolean') next.sidebarCollapsed = !legacy.leftPanel;
   const leftWidth = finiteNumber(legacy.leftWidth);
   if (leftWidth !== null) next.sidebarWidth = leftWidth;
@@ -238,6 +254,7 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   const snapshotRef = useRef<DesktopSnapshot | null>(null);
   const dialogRef = useRef<DialogState | null>(null);
   const prefHydrated = useRef(false);
+  const startupViewApplied = useRef(false);
   const enginePrefsApplied = useRef<{ gpu: boolean; memoryMb: number } | null>(null);
   const refreshInFlight = useRef<Promise<void> | null>(null);
   const noticeQueue = useRef<string[] | null>(null);
@@ -257,9 +274,15 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
       setError(null);
       if (!prefHydrated.current) {
         prefHydrated.current = true;
+        const hydrated = preferenceUi(next.preferences);
+        if (!isSecondary && !startupViewApplied.current) {
+          startupViewApplied.current = true;
+          const startupView = hydrated.startupView ?? DEFAULT_UI.startupView;
+          if (startupView !== 'last') hydrated.view = startupView;
+        }
         setUiState((current) => ({
           ...current,
-          ...preferenceUi(next.preferences),
+          ...hydrated,
           ...(isSecondary ? { view: bootstrap.view ?? 'detail' } : {}),
         }));
       }
@@ -379,7 +402,10 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
           return openSecondWindow(view, active);
         }
         const nextDialog = dialogForCommand(id);
-        if (nextDialog) setDialog(nextDialog);
+        if (id === 'app.shortcuts') {
+          const shortcuts = allUiMetadata(locale).filter((entry) => entry.shortcut !== null);
+          setDialog({ kind: 'shortcuts', params: { shortcuts } });
+        } else if (nextDialog) setDialog(nextDialog);
         setUi((current) => applyUiCommand(id, current) ?? {});
         if (id === 'view.fullScreenPreview') return nativeAction('toggleFullscreen', { ...params, enabled: params.enabled });
         if (id === 'view.enterFullScreen') return nativeAction('fullscreen', params);
@@ -555,7 +581,7 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
       setError(text);
       throw reason;
     }
-  }, [refresh, setUi, ui.confirmDelete, ui.externalEditor]);
+  }, [locale, refresh, setUi, ui.confirmDelete, ui.externalEditor]);
 
   const native = useCallback(async (action: string, params: JsonObject = {}): Promise<unknown> => {
     try {

@@ -2,7 +2,7 @@ export type JsonObject = Record<string, unknown>;
 import type { LocaleCode } from './i18n';
 export interface CommandInfo { id: string; label: string; menu: string[]; shortcut: string | null; params: string; enabled: boolean; disabled_reason?: string }
 export interface ControlSpec { id: string; label: string; section: string; min: number; max: number; default: number; step: number; decimals: number; track: { kind: string; [key: string]: unknown } }
-export interface PhotoSummary { id: number; fileName: string; format: string; kind: string; w: number; h: number; captured: string | null; rating: number; flag: 'none'|'pick'|'reject'; label: string | null; edited: boolean; title: string; keywords: string[]; camera: string; deleted: boolean; copyOf?: number|null; copyName?: string; previewOnly?: boolean }
+export interface PhotoSummary { id: number; fileName: string; format: string; kind: string; w: number; h: number; captured: string | null; imported?: string; rating: number; flag: 'none'|'pick'|'reject'; label: string | null; edited: boolean; title: string; keywords: string[]; camera: string; lens?: string; shutter?: string; aperture?: number|null; iso?: number|null; focalMm?: number|null; deleted: boolean; copyOf?: number|null; copyName?: string; previewOnly?: boolean }
 export interface AlbumSummary { id: number; name: string; parent: number|null; count: number; smart: boolean; folder: boolean }
 export interface JobStatus { id: string; kind: string; label: string; completed: number; total: number; cancellable: boolean; error?: string }
 export type CompletedJobState = 'done'|'cancelled'|'failed';
@@ -17,8 +17,9 @@ export interface MergePreviewRequest { command: MergeCommand; params: JsonObject
 export interface MergePreviewCancelRequest { slot: string; sequence: number }
 export interface MergePreviewDescriptor { handle: string; slot: string; viewGeneration: number; sequence: number; key: string; width: number; height: number; info: JsonObject; renderMs: number }
 export type ViewMode = 'photoGrid'|'squareGrid'|'detail'|'compare'|'survey'|'people'|'reference';
+export type StartupView = 'last'|'photoGrid'|'detail';
 export type Panel = 'edit'|'profiles'|'crop'|'remove'|'masking'|'redeye'|'presets'|'info'|'keywords'|'versions'|'activity'|null;
-export interface AppSettings { confirmDelete: boolean; gpu: boolean; previewEdge: number; externalEditor: string; memoryMb: number; filmNames: boolean; filmBadges: boolean }
+export interface AppSettings { startupView: StartupView; confirmDelete: boolean; gpu: boolean; previewEdge: number; externalEditor: string; memoryMb: number; filmNames: boolean; filmBadges: boolean }
 export interface UiState extends AppSettings { view: ViewMode; panel: Panel; tool: string; zoom: 'fit'|'fill'|number; clickZoom: number; beforeAfter: 'off'|'sideBySide'|'split'|'topBottom'|'splitTopBottom'|'original'; sidebarCollapsed: boolean; inspectorCollapsed: boolean; sidebarWidth: number; inspectorWidth: number; thumbSize: number; filmstrip: boolean; filterBar: boolean; referenceId: number|null; compareIds: number[]; navigator: boolean; slideshow: boolean; infoOverlay: number; maskOverlay: boolean; maskOverlayMode: string; maskPins: boolean; clipping: boolean; theme: 'light'|'dark'|'system'; locale: string; sections: Record<string,boolean>; autoAdvance: boolean; gridInfo: boolean; softProof: boolean; brushSize: number; brushFeather: number; cropOverlay: string; filterText: string }
 export interface WindowBootstrap { secondary: boolean; view: ViewMode|null; active: number|null }
 export interface DialogState { kind: string; params?: JsonObject }

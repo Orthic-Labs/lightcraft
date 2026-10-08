@@ -41,6 +41,8 @@ Merge dialogs request generation-aware, cancellable decoded previews through opa
 
 QA startup uses isolated data directories & empty catalogs unless demo is explicitly requested. `qa-native` gates automation. Normal startup preserves native data paths; candidate app identifier `ai.storyteller.lightcraft.preview` keeps preview preferences isolated during coexistence.
 
+Settings exposes original library location/open, startup view, Auto Advance, external editor & filmstrip/grid/detail preferences. Startup choices apply once to the main window; secondary windows retain their requested view. Basic & Exposure overlays display Rust photo metadata, with three-state cycling; keyboard help uses localized command metadata. Native preference journeys exercise field-only save, restart behavior, overlay modes & help rows.
+
 ## Cutover
 
 Tauri remains preview until installed macOS & Windows qualification passes. Cutover must preserve original files, catalog format, CLI/MCP behavior, preferences & recovery; validate copied libraries before replacing default desktop packaging. Preserve baseline app & catalog/preferences backup for rollback. Record qualified revision, native artifacts, screenshots & outcome evidence before making Tauri default.

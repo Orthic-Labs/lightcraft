@@ -105,7 +105,10 @@ export function applyUiCommand(id: string, ui: UiState): Partial<UiState> | null
   if (id === 'view.clickZoom') return { clickZoom: ui.clickZoom >= 4 ? 1 : ui.clickZoom * 2 };
   if (id === 'view.zoomIn') return { zoom: typeof ui.zoom === 'number' ? Math.min(16, ui.zoom * 1.25) : 1.25 };
   if (id === 'view.zoomOut') return { zoom: typeof ui.zoom === 'number' ? Math.max(0.1, ui.zoom / 1.25) : 0.8 };
-  if (id === 'view.infoOverlay') return { infoOverlay: ui.infoOverlay ? 0 : 1 };
+  if (id === 'view.infoOverlay') {
+    const mode = Number.isFinite(ui.infoOverlay) ? Math.trunc(ui.infoOverlay) : 0;
+    return { infoOverlay: (Math.max(0, Math.min(2, mode)) + 1) % 3 };
+  }
   if (id === 'view.slideshow') return { slideshow: !ui.slideshow };
   if (id === 'view.fullScreenPreview') return { slideshow: false, zoom: 'fit' };
   if (id === 'view.enterFullScreen') return {};

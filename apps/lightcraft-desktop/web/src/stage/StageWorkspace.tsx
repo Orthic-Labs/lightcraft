@@ -148,6 +148,7 @@ function inspectedSummary(value: unknown, fallbackId: number): PhotoSummary | nu
     w: width,
     h: height,
     captured: typeof source.captured === "string" ? source.captured : null,
+    imported: typeof source.imported === "string" ? source.imported : undefined,
     rating: number(source.rating),
     flag,
     label,
@@ -155,6 +156,11 @@ function inspectedSummary(value: unknown, fallbackId: number): PhotoSummary | nu
     title: typeof meta.title === "string" ? meta.title : "",
     keywords: Array.isArray(meta.keywords) ? meta.keywords.filter((item): item is string => typeof item === "string") : [],
     camera: typeof meta.camera === "string" ? meta.camera : "",
+    lens: typeof meta.lens === "string" ? meta.lens : undefined,
+    shutter: typeof meta.shutter === "string" ? meta.shutter : undefined,
+    aperture: typeof meta.aperture === "number" && Number.isFinite(meta.aperture) ? meta.aperture : null,
+    iso: typeof meta.iso === "number" && Number.isFinite(meta.iso) ? meta.iso : null,
+    focalMm: typeof meta.focal_mm === "number" && Number.isFinite(meta.focal_mm) ? meta.focal_mm : null,
     deleted: source.deleted === true,
     copyOf: typeof source.copy_of === "number" ? source.copy_of : typeof source.copyOf === "number" ? source.copyOf : null,
     copyName: typeof source.copy_name === "string" ? source.copy_name : typeof source.copyName === "string" ? source.copyName : undefined,
@@ -326,13 +332,34 @@ function RemoveToolbar({ ui, setUi, run }: { ui: UiState; setUi: (patch: Partial
 
 function Footer({ ui, setUi, run, onNative }: { ui: UiState; setUi: (patch: Partial<UiState>) => void; run: (id: string, params?: Record<string, unknown>) => Promise<unknown>; onNative: (action: string, params?: Record<string, unknown>) => Promise<unknown> }) {
   const zoomValue = typeof ui.zoom === "number" ? ui.zoom : ui.zoom === "fill" ? 1.25 : 1;
-  return <footer className="stage-footer"><div className="footer-left"><button type="button" onClick={() => setUi({ filmstrip: !ui.filmstrip })} aria-pressed={ui.filmstrip}>Filmstrip</button><button type="button" onClick={() => setUi({ navigator: !ui.navigator })} aria-pressed={ui.navigator}>Navigator</button><button type="button" onClick={() => setUi({ beforeAfter: ui.beforeAfter === "off" ? "sideBySide" : "off" })} aria-pressed={ui.beforeAfter !== "off"}>Before / After</button><button type="button" onClick={() => setUi({ clipping: !ui.clipping })} aria-pressed={ui.clipping}>Clipping</button><button type="button" onClick={() => setUi({ softProof: !ui.softProof })} aria-pressed={ui.softProof}>Proof</button></div><div className="footer-center"><button type="button" onClick={() => setUi({ zoom: "fit" })}>Fit</button><button type="button" onClick={() => setUi({ zoom: "fill" })}>Fill</button><button type="button" onClick={() => setUi({ zoom: 1 })}>100%</button><input aria-label="Zoom" type="range" min="0.25" max="4" step="0.05" value={zoomValue} onChange={(event) => setUi({ zoom: Number(event.target.value) })} /><output>{Math.round(zoomValue * 100)}%</output></div><div className="footer-right"><button type="button" onClick={() => setUi({ infoOverlay: ui.infoOverlay ? 0 : 1 })}>Info</button><button type="button" onClick={() => setUi({ slideshow: !ui.slideshow })}>{ui.slideshow ? "Pause" : "Slideshow"}</button><button type="button" onClick={() => void onNative("fullscreen", { enabled: true })}>Fullscreen</button><button type="button" onClick={() => void onNative("secondWindow", { view: "detail" })}>Second window</button><button type="button" onClick={() => void run("view.beforeAfter", {})}>Compare</button></div></footer>;
+  const nextInfoOverlay = () => {
+    const mode = Number.isFinite(ui.infoOverlay) ? Math.trunc(ui.infoOverlay) : 0;
+    setUi({ infoOverlay: (Math.max(0, Math.min(2, mode)) + 1) % 3 });
+  };
+  return <footer className="stage-footer"><div className="footer-left"><button type="button" onClick={() => setUi({ filmstrip: !ui.filmstrip })} aria-pressed={ui.filmstrip}>Filmstrip</button><button type="button" onClick={() => setUi({ navigator: !ui.navigator })} aria-pressed={ui.navigator}>Navigator</button><button type="button" onClick={() => setUi({ beforeAfter: ui.beforeAfter === "off" ? "sideBySide" : "off" })} aria-pressed={ui.beforeAfter !== "off"}>Before / After</button><button type="button" onClick={() => setUi({ clipping: !ui.clipping })} aria-pressed={ui.clipping}>Clipping</button><button type="button" onClick={() => setUi({ softProof: !ui.softProof })} aria-pressed={ui.softProof}>Proof</button></div><div className="footer-center"><button type="button" onClick={() => setUi({ zoom: "fit" })}>Fit</button><button type="button" onClick={() => setUi({ zoom: "fill" })}>Fill</button><button type="button" onClick={() => setUi({ zoom: 1 })}>100%</button><input aria-label="Zoom" type="range" min="0.25" max="4" step="0.05" value={zoomValue} onChange={(event) => setUi({ zoom: Number(event.target.value) })} /><output>{Math.round(zoomValue * 100)}%</output></div><div className="footer-right"><button type="button" onClick={nextInfoOverlay} aria-pressed={ui.infoOverlay !== 0}>Info</button><button type="button" onClick={() => setUi({ slideshow: !ui.slideshow })}>{ui.slideshow ? "Pause" : "Slideshow"}</button><button type="button" onClick={() => void onNative("fullscreen", { enabled: true })}>Fullscreen</button><button type="button" onClick={() => void onNative("secondWindow", { view: "detail" })}>Second window</button><button type="button" onClick={() => void run("view.beforeAfter", {})}>Compare</button></div></footer>;
 }
 
-function InfoOverlay({ photo, develop, onClose }: { photo: PhotoSummary | null; develop: DevelopShape; onClose: () => void }) {
+function prettyDate(value: string): string {
+  return value.replace("T", " ").slice(0, 16);
+}
+
+function InfoOverlay({ photo, mode, onClose }: { photo: PhotoSummary | null; mode: number; onClose: () => void }) {
   if (!photo) return null;
-  const wb = record(develop.wb ?? develop.whiteBalance);
-  return <aside className="info-overlay"><button type="button" onClick={onClose} aria-label="Close photo info">×</button><strong>{titleFor(photo)}</strong><span>{photo.w} × {photo.h} · {photo.format}</span><span>{photo.camera || "Camera unknown"}</span><span>WB {number(wb.temp, 0).toFixed(0)}K · {number(wb.tint, 0).toFixed(0)}</span></aside>;
+  const lines: string[] = [photo.fileName];
+  if (mode === 1) {
+    const date = photo.captured || photo.imported;
+    lines.push(date ? `${prettyDate(date)} · ${photo.w} × ${photo.h}` : `${photo.w} × ${photo.h}`);
+  } else if (mode === 2) {
+    const exposure: string[] = [];
+    if (photo.shutter) exposure.push(`${photo.shutter} s`);
+    if (typeof photo.aperture === "number" && Number.isFinite(photo.aperture)) exposure.push(`f/${photo.aperture.toFixed(1)}`);
+    if (typeof photo.iso === "number" && Number.isFinite(photo.iso)) exposure.push(`ISO ${photo.iso}`);
+    if (typeof photo.focalMm === "number" && Number.isFinite(photo.focalMm)) exposure.push(`${photo.focalMm.toFixed(0)} mm`);
+    lines.push(exposure.length ? exposure.join("  ") : "No exposure information");
+    const camera = [photo.camera, photo.lens].filter((value) => value).join(" · ");
+    if (camera) lines.push(camera);
+  }
+  return <aside className="info-overlay"><button type="button" onClick={onClose} aria-label="Close photo info">×</button>{lines.map((line, index) => index === 0 ? <strong key={line}>{line}</strong> : <span key={`${line}-${index}`}>{line}</span>)}</aside>;
 }
 
 function MultiViewActions({ view, candidate, reference, run, setUi }: { view: ViewMode; candidate: number | null; reference: number | null; run: (id: string, params?: Record<string, unknown>) => Promise<unknown>; setUi: (patch: Partial<UiState>) => void }) {
@@ -511,7 +538,7 @@ export function StageWorkspace() {
     <div className="stage-body">
       <div className="stage-canvas" style={{ ["--stage-zoom" as string]: zoom, ["--stage-pan-x" as string]: `${pan.x * 100}%`, ["--stage-pan-y" as string]: `${pan.y * 100}%` }}>
         {ui.view === "compare" ? <div className="compare-panes"><div className="compare-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} before={ui.beforeAfter === "original"} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /><span className="pane-label">Select</span></div><div className="compare-pane"><StageImage photoId={candidate} photo={photoFor(candidate)} previewEdge={previewEdge} slot={previewSlot(ui.view, 1)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span className="pane-label">Candidate {candidate ?? "—"}</span></div></div> : ui.view === "reference" ? <div className="compare-panes"><div className="compare-pane"><StageImage photoId={ui.referenceId} photo={photoFor(ui.referenceId)} previewEdge={previewEdge} slot="reference" viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span className="pane-label">Reference {ui.referenceId ?? "—"}</span></div><div className="compare-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot="reference-active" viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /><span className="pane-label">Active</span></div></div> : ui.view === "survey" ? <div className="survey-grid">{(selection.length ? selection : active == null ? [] : [active]).map((id, index) => <button type="button" className={id === active ? "survey-photo selected" : "survey-photo"} key={id} onClick={() => { setUi({ view: "detail" }); void send("library.select", { ids: [id], active: id, mode: "replace" }); }}><StageImage photoId={id} photo={photoFor(id)} previewEdge={previewEdge} slot={previewSlot(ui.view, index)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span>{index + 1}</span></button>)}</div> : ui.view === "people" ? <div className="people-stage"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><div className="face-boxes">{Array.isArray(record(snapshot?.source).faces) ? (record(snapshot?.source).faces as unknown[]).map((face, index) => { const f = record(face); const r = box(f.rect ?? f.bounds) ?? { x0: 0.3 + index * 0.05, y0: 0.25, x1: 0.44 + index * 0.05, y1: 0.42 }; return <span key={index} style={{ left: `${r.x0 * 100}%`, top: `${r.y0 * 100}%`, width: `${(r.x1 - r.x0) * 100}%`, height: `${(r.y1 - r.y0) * 100}%` }} />; }) : null}</div></div> : ui.beforeAfter !== "off" && ui.beforeAfter !== "original" ? <BeforeAfterStage mode={ui.beforeAfter} photoId={active} photo={photoFor(active)} previewEdge={previewEdge} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /> : <div className="single-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} before={ui.beforeAfter === "original"} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} />{ui.panel === "crop" ? <CropOverlay develop={develop} guide={ui.cropOverlay} /> : null}{ui.maskOverlay && ui.panel === "masking" ? <MaskOverlay develop={develop} pins={ui.maskPins} /> : null}{ui.panel === "remove" ? <SpotsOverlay develop={develop} /> : null}{ui.panel === "redeye" ? <SpotsOverlay develop={develop} eyes /> : null}{ui.clipping ? <div className="clipping-overlay" aria-label="Clipping preview" /> : null}</div>}
-        {ui.infoOverlay ? <InfoOverlay photo={photo} develop={develop} onClose={() => setUi({ infoOverlay: 0 })} /> : null}
+        {ui.infoOverlay ? <InfoOverlay photo={photo} mode={ui.infoOverlay} onClose={() => setUi({ infoOverlay: 0 })} /> : null}
         {ui.navigator ? <Navigator zoom={zoom} pan={pan} onChange={setPan} /> : null}
         {histogram ? <div className="histogram-badge" aria-label="Histogram available">Histogram</div> : null}
       </div>
