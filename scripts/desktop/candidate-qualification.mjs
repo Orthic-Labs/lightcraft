@@ -20,13 +20,25 @@ function runLsappinfo(args) {
   };
 }
 
+function lsappinfoValue(stdout) {
+  const equals = stdout.indexOf('=');
+  if (equals < 0) return null;
+  const value = stdout.slice(equals + 1).trim();
+  if (value.startsWith('"')) {
+    const end = value.indexOf('"', 1);
+    return end > 0 ? value.slice(1, end) : null;
+  }
+  return value.split(/\s+/)[0] || null;
+}
+
 function collectMacForegroundBaseline(root, record) {
   const front = runLsappinfo(['front']);
   const asn = front.stdout.trim().replace(/:$/, '');
   const pid = asn ? runLsappinfo(['info', '-only', 'pid', asn]) : null;
   const name = asn ? runLsappinfo(['info', '-only', 'name', asn]) : null;
-  const pidMatch = pid?.stdout.match(/pid\s*=\s*(\d+)/);
-  const nameMatch = name?.stdout.match(/"([^"]+)"/);
+  const pidValue = lsappinfoValue(pid?.stdout || '');
+  const nameValue = lsappinfoValue(name?.stdout || '');
+  const parsedPid = pidValue && /^\d+$/.test(pidValue) ? Number(pidValue) : null;
   const report = {
     schema: 1,
     sourceRevision: record.sourceRevision,
@@ -34,7 +46,7 @@ function collectMacForegroundBaseline(root, record) {
     architecture: record.architecture,
     readOnly: true,
     asn: asn || null,
-    parsed: { pid: pidMatch ? Number(pidMatch[1]) : null, name: nameMatch?.[1] || null },
+    parsed: { pid: parsedPid, name: nameValue },
     commands: { front, pid, name },
   };
   const output = path.join(root, 'mac-foreground-baseline.json');
