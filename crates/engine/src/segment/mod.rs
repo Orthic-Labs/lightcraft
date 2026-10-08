@@ -189,7 +189,7 @@ impl Segmenter {
         }
         #[cfg(feature = "sam")]
         if self.worker.loaded() || self.worker.pending() > 0 || self.worker.detail() > 0 {
-            self.worker.discard_model();
+            self.worker.discard_model(dir.as_deref());
         }
         self.pending = None;
         self.dir = dir;
