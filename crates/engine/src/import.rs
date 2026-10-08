@@ -494,6 +494,76 @@ fn probe_all_with_cancel(
     results
 }
 
+/// Read/parse sidecars concurrently after probes finish. Results stay indexed by source path, so
+/// naming, capture-time fallback, copy order, and duplicate decisions remain deterministic; file
+/// placement itself stays serial in [`ImportJob::prepare_files`].
+fn read_sidecars(
+    paths: &[String],
+    probes: &[Result<ProbeInfo, String>],
+    eligible: &[bool],
+    naming: crate::sidecar::SidecarNaming,
+    cancel: &std::sync::atomic::AtomicBool,
+    metrics: &ImportMetrics,
+) -> Vec<Option<crate::sidecar::SidecarData>> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut out: Vec<Option<crate::sidecar::SidecarData>> = vec![None; paths.len()];
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    #[cfg(not(target_arch = "wasm32"))]
+    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, MAX_IMPORT_PROBE_WORKERS).min(paths.len().max(1));
+    #[cfg(target_arch = "wasm32")]
+    let workers = 1;
+    let read_one = |i: usize| {
+        if !eligible.get(i).copied().unwrap_or(false) {
+            return None;
+        }
+        let Some(Ok(info)) = probes.get(i) else { return None };
+        let started = web_time::Instant::now();
+        let raw = info.kind == MediaKind::Raw;
+        let packet = crate::sidecar::find_sidecar(&paths[i], naming)
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .or_else(|| info.xmp.clone().filter(|_| raw));
+        let sidecar = packet.and_then(|x| match crate::sidecar::parse_sidecar(&x, raw) {
+            Ok(sc) => Some(sc),
+            Err(e) => {
+                log::warn!("import {}: XMP: {e}", paths[i]);
+                None
+            }
+        });
+        metrics.sidecar_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+        if sidecar.is_some() {
+            metrics.sidecars.fetch_add(1, Relaxed);
+        }
+        sidecar
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    if workers > 1 {
+        let shared = std::sync::Mutex::new(&mut out);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, Relaxed);
+                        if i >= paths.len() || cancel.load(Relaxed) {
+                            break;
+                        }
+                        let sidecar = read_one(i);
+                        shared.lock().unwrap_or_else(|e| e.into_inner())[i] = sidecar;
+                    }
+                });
+            }
+        });
+        return out;
+    }
+    for i in 0..paths.len() {
+        if cancel.load(Relaxed) {
+            metrics.cancelled.store(true, Relaxed);
+            break;
+        }
+        out[i] = read_one(i);
+    }
+    out
+}
+
 /// Copy `src` into `root`/`folders` as `name` (default: its own name), made unique with -1, -2…;
 /// returns the new path. The copy is verified ([`crate::import_move::copy_new`]: a new file,
 /// synced and checked against `probe_hash`, the content hash the probe computed — or compared
@@ -1040,7 +1110,17 @@ impl ImportJob {
         let probed: Vec<Result<ProbeInfo, String>> =
             cached.into_iter().map(|c| c.map(Ok).unwrap_or_else(|| fresh.next().unwrap_or_else(|| Err("not probed".into())))).collect();
         crate::memory::release();
-        for (path, info) in todo.into_iter().zip(probed) {
+        let mut sidecar_hashes: std::collections::HashSet<String> = self.by_hash.keys().cloned().collect();
+        let sidecar_eligible: Vec<bool> = probed
+            .iter()
+            .map(|r| match r {
+                Ok(info) if opts.local => true,
+                Ok(info) => info.content_hash.as_ref().is_none_or(|h| sidecar_hashes.insert(h.clone())),
+                Err(_) => false,
+            })
+            .collect();
+        let sidecars = read_sidecars(&todo, &probed, &sidecar_eligible, self.naming, cancel, &self.metrics);
+        for ((path, info), sidecar) in todo.into_iter().zip(probed).zip(sidecars) {
             if cancel.load(Relaxed) {
                 self.metrics.cancelled.store(true, Relaxed);
                 break;
@@ -1063,22 +1143,6 @@ impl ImportJob {
             }
             // the XMP sidecar (or a raw's embedded XMP), read before copying: its capture time files
             // and names the copy when the file itself has none
-            let raw = info.kind == MediaKind::Raw;
-            let sidecar_started = web_time::Instant::now();
-            let packet = crate::sidecar::find_sidecar(&path, self.naming)
-                .and_then(|f| std::fs::read_to_string(f).ok())
-                .or_else(|| info.xmp.clone().filter(|_| raw));
-            let sidecar = packet.and_then(|x| match crate::sidecar::parse_sidecar(&x, raw) {
-                Ok(sc) => Some(sc),
-                Err(e) => {
-                    log::warn!("import {path}: XMP: {e}");
-                    None
-                }
-            });
-            self.metrics.sidecar_ns.fetch_add(sidecar_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
-            if sidecar.is_some() {
-                self.metrics.sidecars.fetch_add(1, Relaxed);
-            }
             if info.captured.is_none() {
                 info.captured = sidecar.as_ref().and_then(|sc| sc.captured.clone());
             }
