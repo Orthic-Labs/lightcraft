@@ -394,8 +394,32 @@ fn task_result(control: &rightkit_qa::control::Control, id: &str, params: Value)
         .clone()
 }
 
+fn import_review(control: &rightkit_qa::control::Control, paths: Value) -> Value {
+    let before = snapshot(control);
+    let started = run(control, "library.importPreview", paths);
+    let task_id = started["taskId"].as_str().expect("import review must return task id").to_string();
+    assert_eq!(started["kind"].as_str(), Some("importReview"), "import review must identify task kind: {started}");
+    let during = snapshot(control);
+    assert!(
+        during["status"]["jobs"].as_array().is_some_and(|jobs| jobs.iter().any(|job| job["id"].as_str().is_some_and(|id| id == task_id)))
+            || during["status"]["completedJobs"]
+                .as_array()
+                .is_some_and(|jobs| jobs.iter().any(|job| job["id"].as_str().is_some_and(|id| id == task_id))),
+        "import review must publish task without blocking snapshot access: {during}"
+    );
+    assert_eq!(during["active"], before["active"], "import review must not change active photo while running");
+    assert_eq!(during["selection"], before["selection"], "import review must not change selection while running");
+    let finished = wait_task(control, &task_id);
+    let receipt = completed_task(&finished, &task_id);
+    assert_eq!(receipt["state"].as_str(), Some("done"), "import review must complete successfully: {receipt}");
+    for key in ["active", "selection", "counts", "undo", "redo", "revision", "viewGeneration", "source"] {
+        assert_eq!(finished[key], before[key], "import review must leave owner {key} unchanged: {finished}");
+    }
+    receipt["result"].clone()
+}
+
 fn import_file(control: &rightkit_qa::control::Control, path: &Path) -> Value {
-    let preview = run(control, "library.importPreview", json!({"paths": [path]}));
+    let preview = import_review(control, json!({"paths": [path]}));
     assert!(preview["candidates"].as_array().is_some_and(|items| !items.is_empty()), "real fixture must produce an import candidate: {preview}");
     let started = run(control, "library.import", json!({"paths": [path], "mode": "add"}));
     let task_id = started["taskId"].as_str().expect("import must return task id").to_string();
@@ -955,7 +979,7 @@ fn native_hidden_control_journeys() {
             } else if name == "mergeHdr" {
                 with_control(&binary, scenario, &inputs.catalog, |control, _data| {
                     let paths = merge_inputs.iter().map(|path| path.to_string_lossy().to_string()).collect::<Vec<_>>();
-                    let review = run(control, "library.importPreview", json!({"paths": paths}));
+                    let review = import_review(control, json!({"paths": paths}));
                     let candidates = review["candidates"].as_array().expect("HDR merge fixture review must return candidates");
                     assert_eq!(candidates.len(), 2, "HDR merge review must expose two procedural PNGs: {review}");
                     assert!(candidates.iter().all(|candidate| candidate["duplicate"].is_null()), "HDR merge fixtures must be distinct import candidates: {review}");
