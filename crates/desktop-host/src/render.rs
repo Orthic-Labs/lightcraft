@@ -192,8 +192,9 @@ impl Renderer {
             return Ok(());
         }
         let stages = self.stages.entry(slot).or_default().clone();
+        let interactive_loupe = interactive && self.is_loupe_slot(&request.slot);
         self.submit(slot, request, key, job.with_stages(stages), interactive, reply);
-        if interactive && self.is_loupe_slot(&request.slot) {
+        if interactive_loupe {
             self.drop_background_queued();
         }
         self.apply_pressure();
