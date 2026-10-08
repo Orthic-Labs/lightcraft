@@ -9,8 +9,8 @@ use lightcraft_catalog::MediaKind;
 use lightcraft_color::Mat3;
 use lightcraft_engine::Session;
 use lightcraft_engine::import::{self, ImportCandidate, ImportMode, ImportOptions, ScanProgress};
-use lightcraft_geom::{Orientation, Rect};
-use lightcraft_raw::{BlackLevel, Cfa, ColorData, DngCompression, DngWriteOptions, OpcodeLists, RawData, RawFormat, RawImage};
+use lightcraft_geom::Orientation;
+use lightcraft_raw::{BlackLevel, Cfa, ColorData, DngCompression, DngWriteOptions, OpcodeLists, RawData, RawFormat, RawImage, Rect};
 use std::error::Error;
 use std::path::Path;
 
