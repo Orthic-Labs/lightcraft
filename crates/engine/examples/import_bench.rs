@@ -158,19 +158,33 @@ fn main() -> Result<(), Box<dyn Error>> {
         candidates.iter().filter(|c| c.error.is_none() && c.duplicate.is_none()).take(selected_count).map(|c| c.path.clone()).collect();
     let opts = ImportOptions { mode: ImportMode::Copy, destination: Some(copy_root.to_string_lossy().into()), ..Default::default() };
     let mut job = import::ImportJob::new(&mut session, opts.clone())?;
-    let prepare_started = std::time::Instant::now();
-    let prepared = job.prepare(&import_paths, &std::sync::atomic::AtomicBool::new(false));
-    let prepare_elapsed = prepare_started.elapsed();
-    let commit_started = std::time::Instant::now();
-    let report = import::commit_prepared(&mut session, &opts, job.now(), prepared)?;
-    let commit_elapsed = commit_started.elapsed();
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut batch_count = 0;
+    let mut imported = 0;
+    let mut failed = 0;
+    let mut sidecars_applied = 0;
+    let mut prepare_elapsed = std::time::Duration::ZERO;
+    let mut commit_elapsed = std::time::Duration::ZERO;
+    for batch in import_paths.chunks(8) {
+        batch_count += 1;
+        let prepare_started = std::time::Instant::now();
+        let prepared = job.prepare(batch, &cancel);
+        prepare_elapsed += prepare_started.elapsed();
+        let commit_started = std::time::Instant::now();
+        let report = import::commit_prepared(&mut session, &opts, job.now(), prepared)?;
+        commit_elapsed += commit_started.elapsed();
+        imported += report.imported.len();
+        failed += report.failed.len();
+        sidecars_applied += report.sidecars;
+    }
     let selected_metrics = job.metrics.snapshot();
     println!(
-        "selected-import requested={} imported={} failed={} sidecars={} transfer_kind=verified-copy prepare_ms={:.1} commit_ms={:.1}",
+        "selected-import requested={} batches={} imported={} failed={} sidecars={} transfer_kind=verified-copy prepare_ms={:.1} commit_ms={:.1}",
         import_paths.len(),
-        report.imported.len(),
-        report.failed.len(),
-        report.sidecars,
+        batch_count,
+        imported,
+        failed,
+        sidecars_applied,
         prepare_elapsed.as_secs_f64() * 1_000.0,
         commit_elapsed.as_secs_f64() * 1_000.0,
     );
