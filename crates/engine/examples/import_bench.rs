@@ -14,10 +14,31 @@ use lightcraft_raw::{BlackLevel, Cfa, ColorData, DngCompression, DngWriteOptions
 use std::error::Error;
 use std::path::Path;
 
+const MAX_COUNT: usize = 10_000;
+const MAX_EDGE: usize = 4_096;
+
+struct TempDir(std::path::PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn env_usize(name: &str, default: usize, max: usize) -> Result<usize, Box<dyn Error>> {
+    let value = std::env::var(name).ok().map(|v| v.parse::<usize>()).transpose()?.unwrap_or(default);
+    if value == 0 || value > max {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{name} must be in 1..={max}")).into());
+    }
+    Ok(value)
+}
+
 fn jpeg_fixture(index: usize, edge: usize) -> Result<Vec<u8>, Box<dyn Error>> {
     let width = edge.max(64);
-    let height = (width * 2 / 3).max(48);
-    let mut pixels = Vec::with_capacity(width * height * 3);
+    let height = width.checked_mul(2).ok_or_else(|| std::io::Error::other("JPEG fixture dimensions overflow"))?.checked_div(3).unwrap_or(0).max(48);
+    let area = width.checked_mul(height).ok_or_else(|| std::io::Error::other("JPEG fixture area overflow"))?;
+    let channels = area.checked_mul(3).ok_or_else(|| std::io::Error::other("JPEG fixture allocation overflow"))?;
+    let mut pixels = Vec::with_capacity(channels);
     for y in 0..height {
         for x in 0..width {
             let n = ((x.wrapping_mul(31) ^ y.wrapping_mul(17) ^ index.wrapping_mul(13)) & 31) as u8;
@@ -30,13 +51,16 @@ fn jpeg_fixture(index: usize, edge: usize) -> Result<Vec<u8>, Box<dyn Error>> {
 
 fn dng_fixture(index: usize, edge: usize) -> Result<Vec<u8>, Box<dyn Error>> {
     let width = edge.max(64);
-    let height = (width * 2 / 3).max(48);
+    let height = width.checked_mul(2).ok_or_else(|| std::io::Error::other("DNG fixture dimensions overflow"))?.checked_div(3).unwrap_or(0).max(48);
     let cfa = Cfa::bayer("RGGB").ok_or_else(|| std::io::Error::other("invalid benchmark CFA"))?;
-    let mut data = Vec::with_capacity(width * height);
+    let area = width.checked_mul(height).ok_or_else(|| std::io::Error::other("DNG fixture allocation overflow"))?;
+    let mut data = Vec::with_capacity(area);
     for y in 0..height {
         for x in 0..width {
             let noise = ((x.wrapping_mul(11) ^ y.wrapping_mul(7) ^ index.wrapping_mul(19)) & 127) as u16;
-            data.push(256 + ((x * 14_000 / width + y * 1_000 / height) as u16).saturating_add(noise));
+            let gradient = x.checked_mul(14_000).ok_or_else(|| std::io::Error::other("DNG fixture gradient overflow"))? / width
+                + y.checked_mul(1_000).ok_or_else(|| std::io::Error::other("DNG fixture gradient overflow"))? / height;
+            data.push(256 + (gradient as u16).saturating_add(noise));
         }
     }
     let raw = RawImage {
@@ -92,16 +116,17 @@ fn write_fixtures(root: &Path, count: usize, jpeg_edge: usize, raw_edge: usize) 
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let count = std::env::var("COUNT").ok().and_then(|x| x.parse().ok()).unwrap_or(1_300usize);
-    let jpeg_edge = std::env::var("JPEG_EDGE").ok().and_then(|x| x.parse().ok()).unwrap_or(1_600usize);
-    let raw_edge = std::env::var("RAW_EDGE").ok().and_then(|x| x.parse().ok()).unwrap_or(1_200usize);
+    let count = env_usize("COUNT", 1_300, MAX_COUNT)?;
+    let jpeg_edge = env_usize("JPEG_EDGE", 1_600, MAX_EDGE)?;
+    let raw_edge = env_usize("RAW_EDGE", 1_200, MAX_EDGE)?;
     let root = std::env::temp_dir().join(format!("lightcraft-import-bench-{}", std::process::id()));
-    std::fs::create_dir_all(&root)?;
-    let sidecars = write_fixtures(&root, count, jpeg_edge, raw_edge)?;
+    let temp = TempDir(root);
+    std::fs::create_dir_all(&temp.0)?;
+    let sidecars = write_fixtures(&temp.0, count, jpeg_edge, raw_edge)?;
 
     let mut session = Session::new().with_fs();
     let started = std::time::Instant::now();
-    let (input, paths) = import::ScanInput::new(&mut session, &[root.to_string_lossy().into()]);
+    let (input, paths) = import::ScanInput::new(&mut session, &[temp.0.to_string_lossy().into()]);
     let progress = ScanProgress::default();
     let output = import::scan_with(input, &paths, &progress);
     let import::ScanOutput { candidates, probes } = output;
@@ -126,7 +151,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         metrics.expand_ns as f64 / 1e6
     );
 
-    let copy_root = root.join("library");
+    let copy_root = temp.0.join("library");
     let import_paths: Vec<String> =
         candidates.iter().filter(|c| c.error.is_none() && c.duplicate.is_none()).take(8).map(|c| c.path.clone()).collect();
     let opts = ImportOptions { mode: ImportMode::Copy, destination: Some(copy_root.to_string_lossy().into()), ..Default::default() };
@@ -146,6 +171,5 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut cancelled_job = import::ImportJob::new(&mut session, ImportOptions::default())?;
     let cancelled = cancelled_job.prepare(&paths, &cancel);
     println!("cancelled-prepare entries={} cancelled={}", cancelled.len(), cancelled_job.metrics.snapshot().cancelled);
-    let _ = std::fs::remove_dir_all(root);
     Ok(())
 }

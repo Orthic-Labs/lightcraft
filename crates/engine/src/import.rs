@@ -497,6 +497,22 @@ fn probe_all_with_cancel(
 /// Read/parse sidecars concurrently after probes finish. Results stay indexed by source path, so
 /// naming, capture-time fallback, copy order, and duplicate decisions remain deterministic; file
 /// placement itself stays serial in [`ImportJob::prepare_files`].
+const MAX_SIDECAR_BYTES: u64 = 4 << 20;
+
+fn read_sidecar_packet(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let metadata = std::fs::metadata(path).ok()?;
+    if metadata.len() > MAX_SIDECAR_BYTES {
+        log::warn!("import {}: XMP sidecar exceeds {} bytes", path.display(), MAX_SIDECAR_BYTES);
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let mut packet = String::new();
+    let mut limited = file.take(MAX_SIDECAR_BYTES.saturating_add(1));
+    limited.read_to_string(&mut packet).ok()?;
+    (packet.len() as u64 <= MAX_SIDECAR_BYTES).then_some(packet)
+}
+
 fn read_sidecars(
     paths: &[String],
     probes: &[Result<ProbeInfo, String>],
@@ -519,9 +535,8 @@ fn read_sidecars(
         let Some(Ok(info)) = probes.get(i) else { return None };
         let started = web_time::Instant::now();
         let raw = info.kind == MediaKind::Raw;
-        let packet = crate::sidecar::find_sidecar(&paths[i], naming)
-            .and_then(|f| std::fs::read_to_string(f).ok())
-            .or_else(|| info.xmp.clone().filter(|_| raw));
+        let packet =
+            crate::sidecar::find_sidecar(&paths[i], naming).and_then(|f| read_sidecar_packet(&f)).or_else(|| info.xmp.clone().filter(|_| raw));
         let sidecar = packet.and_then(|x| match crate::sidecar::parse_sidecar(&x, raw) {
             Ok(sc) => Some(sc),
             Err(e) => {
@@ -1114,7 +1129,7 @@ impl ImportJob {
         let sidecar_eligible: Vec<bool> = probed
             .iter()
             .map(|r| match r {
-                Ok(info) if opts.local => true,
+                Ok(_) if opts.local => true,
                 Ok(info) => info.content_hash.as_ref().is_none_or(|h| sidecar_hashes.insert(h.clone())),
                 Err(_) => false,
             })
@@ -1592,5 +1607,27 @@ mod prepared_tests {
         let _ = std::fs::remove_file(path);
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
         assert_eq!(out.candidates.len(), 1);
+    }
+
+    #[test]
+    fn sidecar_prefetch_preserves_order_and_honors_cancel() {
+        let root = std::env::temp_dir().join(format!("lightcraft-import-sidecars-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let paths: Vec<String> = ["a.jpg", "b.jpg"].iter().map(|name| root.join(name).to_string_lossy().into()).collect();
+        for path in &paths {
+            std::fs::write(Path::new(path).with_extension("xmp"), r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"/>"#).unwrap();
+        }
+        let probes = vec![
+            Ok(ProbeInfo { format: "JPEG".into(), file_size: 1, ..Default::default() }),
+            Ok(ProbeInfo { format: "JPEG".into(), file_size: 2, ..Default::default() }),
+        ];
+        let metrics = ImportMetrics::default();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let sidecars = read_sidecars(&paths, &probes, &[true, true], crate::sidecar::SidecarNaming::Stem, &cancel, &metrics);
+        assert!(sidecars.iter().all(Option::is_some));
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let cancelled = read_sidecars(&paths, &probes, &[true, true], crate::sidecar::SidecarNaming::Stem, &cancel, &metrics);
+        assert!(cancelled.iter().all(Option::is_none));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -142,6 +142,7 @@ pub fn probe_bytes(name: &str, bytes: &[u8]) -> Result<ProbeInfo, String> {
             format: ext_upper(name),
             kind: MediaKind::Raw,
             file_size: bytes.len() as u64,
+            source_stamp: None,
             captured,
             meta,
             as_shot_wb,
@@ -392,13 +393,20 @@ pub fn fs_hooks() -> (FileLoader, FileProbe) {
         r
     });
     let probe: FileProbe = Arc::new(|path: &str| {
-        let metadata = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
-        let len = metadata.len() as usize;
+        let before = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+        let len = before.len() as usize;
         let _permit = crate::memory::work_gate().acquire(len);
         let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-        let stamp = metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos());
+        let after = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+        let before_stamp = before.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos());
+        let after_stamp = after.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos());
+        if before.len() != after.len() || before_stamp != after_stamp {
+            return Err(format!("{path}: file changed while it was being probed"));
+        }
         let mut info = probe_bytes(path, &bytes)?;
-        info.source_stamp = stamp;
+        // `Some(0)` marks a native probe whose filesystem cannot provide a timestamp: its cache
+        // entry will fail the later metadata check instead of being reused by size alone.
+        info.source_stamp = Some(after_stamp.unwrap_or(0));
         Ok(info)
     });
     (loader, probe)
