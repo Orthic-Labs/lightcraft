@@ -4107,7 +4107,7 @@ dependencies = [
 
 [[package]]
 name = "lightcraft-desktop"
-version = "0.2.1"
+version = "0.4.0"
 dependencies = [
  "lightcraft-codecs",
  "lightcraft-desktop-host",
@@ -4128,7 +4128,7 @@ dependencies = [
 
 [[package]]
 name = "lightcraft-desktop-host"
-version = "0.2.1"
+version = "0.4.0"
 dependencies = [
  "image",
  "lightcraft-catalog",

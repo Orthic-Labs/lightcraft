@@ -1911,6 +1911,30 @@ fn native_hidden_control_journeys() {
                         wait_for_dom(control, "return document.querySelector('.lc-inspector__header small')?.textContent === '1 mask';");
                         capture_visible_tool_preview(control, &scenario.dir().join("tool-masking.png"));
 
+                        click_dom(control, ".lc-mask-modes > button:first-child", "Brush must select its own mask through actual UI");
+                        let brush = wait_for_snapshot(control, |value| value["develop"]["masks"].as_array().map(Vec::len) == Some(2), "Brush UI must create second mask");
+                        let brush_id = brush["activeMask"].as_u64().expect("selected brush mask must be authoritative");
+                        let geometry = control.eval("return (() => { const e = document.querySelector('.single-pane .stage-image-wrap'); if (!e) return null; const r = e.getBoundingClientRect(); return {x:r.x,y:r.y,w:r.width,h:r.height}; })();").expect("brush stage must expose pointer bounds");
+                        let x = geometry["x"].as_f64().expect("brush stage x");
+                        let y = geometry["y"].as_f64().expect("brush stage y");
+                        let w = geometry["w"].as_f64().expect("brush stage width");
+                        let h = geometry["h"].as_f64().expect("brush stage height");
+                        control.drag((x + w * 0.45, y + h * 0.45), (x + w * 0.65, y + h * 0.55), 8).expect("actual brush pointer stroke must execute");
+                        let painted = wait_for_snapshot(control, |value| {
+                            value["develop"]["masks"].as_array().is_some_and(|masks| masks.iter().any(|mask| {
+                                mask["id"].as_u64() == Some(brush_id) && mask["components"].as_array().is_some_and(|components| components.iter().any(|component| {
+                                    component["shape"]["strokes"].as_array().is_some_and(|strokes| !strokes.is_empty())
+                                }))
+                            }))
+                        }, "brush stroke must reach selected engine mask");
+                        assert_eq!(painted["activeMask"].as_u64(), Some(brush_id));
+                        wait_for_dom(control, "return document.querySelector('.mask-vector .mask-brush-path') !== null;");
+                        run(control, "edit.undo", json!({}));
+                        assert_eq!(snapshot(control)["develop"]["masks"], brush["develop"]["masks"], "one undo must remove whole brush gesture");
+                        run(control, "edit.redo", json!({}));
+                        assert_eq!(snapshot(control)["develop"]["masks"], painted["develop"]["masks"], "redo must restore brush gesture");
+                        capture_visible_tool_preview(control, &scenario.dir().join("tool-brush-pointer.png"));
+
                         run(control, "spot.add", json!({"mode": "remove", "points": [[0.5, 0.5]], "size": 0.05, "source": [0.1, 0.0]}));
                         let spotted = snapshot(control);
                         assert_eq!(spotted["develop"]["spots"].as_array().map(Vec::len), Some(1), "remove tool command must create spot state");

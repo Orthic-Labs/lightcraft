@@ -4,14 +4,14 @@ import { PhotoPreview } from "../preview/PhotoPreview";
 import Filmstrip from "../library/Filmstrip";
 import { useDesktop } from "../desktop";
 import type { DesktopSnapshot, PhotoSummary, UiState, ViewMode } from "../types";
-import { longToNormalized, normalizedPhotoPoint, normalizedToLong, orientedAspectFor, radialHandleAt, radialHandles, radialShapeFromDrag, rotateNormalizedPoint } from "./maskGeometry";
+import { longToNormalized, normalizedPhotoPoint, normalizedToLong, normalizedToOutputPoint, orientedAspectFor, outputAspectFor, radialHandleAt, radialHandles, radialShapeFromDrag, rotateNormalizedPoint } from "./maskGeometry";
 import type { DevelopShape, Point } from "./maskGeometry";
 import "./StageWorkspace.css";
 
 type Box = { x0: number; y0: number; x1: number; y1: number };
 type MaskShapeView = { shape: DevelopShape; id: number; component: number; visible: boolean };
 
-export { longToNormalized, normalizedPhotoPoint, normalizedToLong, orientedAspectFor, radialHandleAt, radialHandles, radialShapeFromDrag, rotateNormalizedPoint } from "./maskGeometry";
+export { longToNormalized, normalizedPhotoPoint, normalizedToLong, normalizedToOutputPoint, orientedAspectFor, outputAspectFor, radialHandleAt, radialHandles, radialShapeFromDrag, rotateNormalizedPoint } from "./maskGeometry";
 
 const views: Array<{ id: ViewMode; label: string; key: string }> = [
   { id: "detail", label: "Detail", key: "D" },
@@ -230,10 +230,9 @@ function StageImage({
   onPointerUp?: (event: PointerEvent<HTMLElement>) => void;
   onPointerCancel?: (event: PointerEvent<HTMLElement>) => void;
 }) {
-  const crop = cropOf(develop);
   return (
     <div className="stage-image-wrap" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel}>
-      <div className="stage-image-transform" style={{ ["--stage-angle" as string]: `${crop.angle}deg` }}>
+      <div className="stage-image-transform">
         <PreviewPane photoId={photoId} photo={photo} previewEdge={previewEdge} slot={slot} viewGeneration={viewGeneration} before={before} className="stage-preview" onHistogram={onHistogram} />
       </div>
     </div>
@@ -287,13 +286,17 @@ function shapePins(shape: DevelopShape): Point[] {
   return [];
 }
 
-function brushPath(shape: DevelopShape): string | null {
+function svgPoint(value: Point, outputAspect: number): Point {
+  return { x: value.x * outputAspect * 100, y: value.y * 100 };
+}
+
+function brushPath(shape: DevelopShape, develop: DevelopShape, sourceAspect: number, outputAspect: number): string | null {
   const strokes = Array.isArray(shape.strokes) ? shape.strokes : [];
   const path = strokes.map((stroke) => {
     const raw = record(stroke).points;
     const points: Point[] = (Array.isArray(raw) ? raw : []).map(shapePoint).filter((value): value is Point => value !== null);
     if (!points.length) return "";
-    return `M ${points.map((value) => `${value.x * 100} ${value.y * 100}`).join(" L ")}`;
+    return `M ${points.map((value) => { const p = svgPoint(normalizedToOutputPoint(value, develop, sourceAspect), outputAspect); return `${p.x} ${p.y}`; }).join(" L ")}`;
   }).filter(Boolean).join(" ");
   return path || null;
 }
@@ -301,37 +304,56 @@ function brushPath(shape: DevelopShape): string | null {
 function MaskOverlay({ develop, activeMask, mode, pins, sourceAspect, zoom, pan, brushPreview }: { develop: DevelopShape; activeMask: number; mode: string; pins: boolean; sourceAspect: number; zoom: number; pan: Point; brushPreview?: Point[] }) {
   const visible = maskShapes(develop, mode, activeMask);
   const aspect = orientedAspectFor(develop, sourceAspect);
+  const outputAspect = outputAspectFor(develop, sourceAspect);
+  const project = (value: Point) => normalizedToOutputPoint(value, develop, sourceAspect);
+  const toSvg = (value: Point) => svgPoint(value, outputAspect);
   return <div className="mask-overlay" aria-hidden="true">
-    <svg className="mask-vector" viewBox="0 0 100 100" preserveAspectRatio="none" style={{ transform: `translate(${pan.x * 100}%, ${pan.y * 100}%) scale(${zoom}) rotate(${cropOf(develop).angle}deg)` }}>
+    <svg className="mask-vector" viewBox={`0 0 ${outputAspect * 100} 100`} preserveAspectRatio="xMidYMid meet" style={{ transform: `translate(${pan.x * 100}%, ${pan.y * 100}%) scale(${zoom})` }}>
       {visible.map(({ shape, id, component }) => {
         const kind = String(shape.kind ?? "");
         if (kind === "brush") {
-          const path = brushPath(shape);
+          const path = brushPath(shape, develop, sourceAspect, outputAspect);
           return path ? <path key={`${id}-${component}`} className="mask-brush-path" d={path} /> : null;
         }
         if (kind === "linear") {
           const start = shapePoint(shape.start);
           const end = shapePoint(shape.end);
-          return start && end ? <line key={`${id}-${component}`} className="mask-linear-line" x1={start.x * 100} y1={start.y * 100} x2={end.x * 100} y2={end.y * 100} /> : null;
+          const a = start ? toSvg(project(start)) : null;
+          const b = end ? toSvg(project(end)) : null;
+          return a && b ? <line key={`${id}-${component}`} className="mask-linear-line" x1={a.x} y1={a.y} x2={b.x} y2={b.y} /> : null;
         }
         if (kind === "radial") {
           const center = shapePoint(shape.center);
           const rx = number(shape.rx);
           const ry = number(shape.ry);
-          const rxNorm = longToNormalized({ x: rx, y: 0 }, aspect).x;
-          const ryNorm = longToNormalized({ x: 0, y: ry }, aspect).y;
-          return center && rx > 0 && ry > 0 ? <ellipse key={`${id}-${component}`} className="mask-radial-ellipse" cx={center.x * 100} cy={center.y * 100} rx={rxNorm * 100} ry={ryNorm * 100} transform={`rotate(${number(shape.angle)} ${center.x * 100} ${center.y * 100})`} /> : null;
+          if (!center || !(rx > 0 && ry > 0)) return null;
+          const angle = number(shape.angle) * Math.PI / 180;
+          const centerOutput = toSvg(project(center));
+          const u = { x: rx * Math.cos(angle), y: rx * Math.sin(angle) };
+          const v = { x: -ry * Math.sin(angle), y: ry * Math.cos(angle) };
+          const uPoint = toSvg(project(longToNormalized({ x: normalizedToLong(center, aspect).x + u.x, y: normalizedToLong(center, aspect).y + u.y }, aspect)));
+          const vPoint = toSvg(project(longToNormalized({ x: normalizedToLong(center, aspect).x + v.x, y: normalizedToLong(center, aspect).y + v.y }, aspect)));
+          const ux = uPoint.x - centerOutput.x;
+          const uy = uPoint.y - centerOutput.y;
+          const vx = vPoint.x - centerOutput.x;
+          const vy = vPoint.y - centerOutput.y;
+          const radiusX = Math.hypot(ux, uy);
+          const radiusY = Math.hypot(vx, vy);
+          const ellipseAngle = Math.atan2(uy, ux) * 180 / Math.PI;
+          return <ellipse key={`${id}-${component}`} className="mask-radial-ellipse" cx={centerOutput.x} cy={centerOutput.y} rx={radiusX} ry={radiusY} transform={`rotate(${ellipseAngle} ${centerOutput.x} ${centerOutput.y})`} />;
         }
         const seg = record(shape.seg);
         const rect = box(seg.rect ?? shape.rect ?? shape.bounds);
-        return rect ? <rect key={`${id}-${component}`} className="mask-seg-outline" x={rect.x0 * 100} y={rect.y0 * 100} width={(rect.x1 - rect.x0) * 100} height={(rect.y1 - rect.y0) * 100} /> : null;
+        if (!rect) return null;
+        const corners = [{ x: rect.x0, y: rect.y0 }, { x: rect.x1, y: rect.y0 }, { x: rect.x1, y: rect.y1 }, { x: rect.x0, y: rect.y1 }].map((value) => toSvg(project(value)));
+        return <polygon key={`${id}-${component}`} className="mask-seg-outline" points={corners.map((value) => `${value.x},${value.y}`).join(" ")} />;
       })}
-      {brushPreview && brushPreview.length ? <path className="mask-brush-path mask-brush-preview" d={`M ${brushPreview.map((value) => `${value.x * 100} ${value.y * 100}`).join(" L ")}`} /> : null}
+      {brushPreview && brushPreview.length ? <path className="mask-brush-path mask-brush-preview" d={`M ${brushPreview.map((value) => { const p = toSvg(project(value)); return `${p.x} ${p.y}`; }).join(" L ")}`} /> : null}
+      {pins ? <g className="mask-pins">{visible.flatMap(({ shape, id, component }) => [
+        ...shapePins(shape).map((value, pinIndex) => { const p = toSvg(project(value)); return <circle key={`${id}-${component}-pin-${pinIndex}`} className={`mask-pin ${String(shape.kind ?? "").toLowerCase() === "object" && pinIndex % 2 ? "mask-pin-exclude" : ""}`} cx={p.x} cy={p.y} r="2.5" />; }),
+        ...(String(shape.kind ?? "") === "radial" ? radialHandles(shape, aspect).map((value, handleIndex) => { const p = toSvg(project(value)); return <circle key={`${id}-${component}-handle-${handleIndex}`} className="mask-radial-handle" cx={p.x} cy={p.y} r="3.5" />; }) : []),
+      ])}</g> : null}
     </svg>
-    {pins ? <div className="mask-pins" style={{ transform: `translate(${pan.x * 100}%, ${pan.y * 100}%) scale(${zoom}) rotate(${cropOf(develop).angle}deg)` }}>{visible.flatMap(({ shape, id, component }) => [
-      ...shapePins(shape).map((value, pinIndex) => <b key={`${id}-${component}-pin-${pinIndex}`} className="mask-pin" style={{ left: `${value.x * 100}%`, top: `${value.y * 100}%` }}>{String(shape.kind ?? "").toLowerCase() === "object" && pinIndex % 2 ? "−" : "•"}</b>),
-      ...(String(shape.kind ?? "") === "radial" ? radialHandles(shape, aspect).map((value, handleIndex) => <i key={`${id}-${component}-handle-${handleIndex}`} className="mask-radial-handle" style={{ left: `${value.x * 100}%`, top: `${value.y * 100}%` }} />) : []),
-    ])}</div> : null}
   </div>;
 }
 
