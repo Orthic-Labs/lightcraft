@@ -918,6 +918,9 @@ fn native_hidden_control_journeys() {
                     control.command("lc_preferences", &json!({"ui": {"theme": "light"}})).expect("settings journey must restore light theme");
                 });
                 with_control(&binary, scenario, &inputs.catalog, |control, _data| {
+                    if snapshot(control)["active"].is_null() {
+                        task_result(control, "library.import", json!({"paths": [inputs.png], "mode": "add"}));
+                    }
                     wait_for_dom(control, "return document.querySelector('.lc-stage-layout') !== null && document.querySelector('.info-overlay') !== null;");
                     let exposure_overlay = control.eval("return document.querySelector('.info-overlay')?.textContent || '';").expect("Exposure overlay must render");
                     click_dom(control, ".footer-right button:first-child", "Info control must cycle Exposure to Off");
