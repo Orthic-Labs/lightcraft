@@ -72,9 +72,7 @@ fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, _cata
     let spec = LaunchSpec {
         binary: launch_binary,
         mode: Mode::Hidden,
-        env: {
-            env
-        },
+        env,
         startup_timeout: Duration::from_secs(90),
         label: "lightcraft-desktop-native".into(),
     };
