@@ -9,6 +9,7 @@ import { Filmstrip, LibraryShellSidebar, LibraryWorkspace, libraryGroups, type L
 import { StageWorkspace } from './stage/StageWorkspace';
 import { Inspector } from './inspector';
 import { DialogHost } from './dialogs';
+import { BackgroundActivity } from './BackgroundActivity';
 import './app.css';
 
 const themeStore = createThemeStore({ storageKey: 'lightcraft.theme', storage: null });
@@ -126,7 +127,7 @@ function Workspace() {
         theme: { system: t('System'), light: t('Light'), dark: t('Dark') },
       }}
       commands={commands}
-      titlebarEnd={<div className="lc-title-status" aria-live="polite">{snapshot?.status.unsaved && <span className="lc-status-dot" title={t('Unsaved changes')} />} {error && <span className="lc-title-error">{error}</span>}{notice && !error && <span>{notice}</span>}</div>}
+      titlebarEnd={<div className="lc-title-status">{snapshot?.status.unsaved && <span className="lc-status-dot" title={t('Unsaved changes')} />} <span aria-live="polite">{error && <span className="lc-title-error">{error}</span>}{notice && !error && <span>{notice}</span>}</span><BackgroundActivity /></div>}
     >
       <div className={`lc-content ${ui.sidebarCollapsed ? 'is-shell-collapsed' : ''}`}>
         <WorkspaceLayout />

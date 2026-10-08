@@ -2002,6 +2002,16 @@ fn native_hidden_control_journeys() {
                             .find(|path| path.is_file())
                             .expect("export must write file");
                         assert_png_pixels(&exported, 96, 64);
+                        // Completed work remains inspectable after its initiating UI closes.
+                        click_dom(control, ".lc-background-activity > button", "background activity must open");
+                        let task_selector = format!("#lc-background-jobs [data-task-id=\"{task_id}\"]");
+                        wait_for_dom(control, &format!("return document.querySelector({})?.getAttribute('data-task-state') === 'done';", serde_json::to_string(&task_selector).expect("task selector must serialize")));
+                        let activity = control.eval("return (() => { const panel = document.querySelector('#lc-background-jobs'); if (!panel) return null; const r = panel.getBoundingClientRect(); return { text: panel.textContent, inside: r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight, reachable: panel.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)) }; })();").expect("background activity must expose geometry");
+                        assert_eq!(activity["inside"].as_bool(), Some(true), "background activity must stay within viewport: {activity}");
+                        assert_eq!(activity["reachable"].as_bool(), Some(true), "background activity must not be obscured: {activity}");
+                        control.screenshot_to(&scenario.dir().join("background-activity.png")).expect("background activity screenshot must save");
+                        control.key("escape").expect("background activity must dismiss with Escape");
+                        wait_for_dom(control, "return document.querySelector('#lc-background-jobs') === null && document.activeElement === document.querySelector('.lc-background-activity > button');");
                         // Exercise actual React dialog, native IPC & encoder, rather than
                         // proving only engine export with hand-authored command parameters.
                         click_dom(control, ".rk-search--trigger", "Export palette trigger must execute");
