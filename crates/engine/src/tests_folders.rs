@@ -212,7 +212,8 @@ fn a_moved_folder_keeps_a_chosen_subfolder_chosen() {
     let dir = Scratch::new("move");
     std::fs::create_dir_all(dir.0.join("trip/day1")).unwrap();
     std::fs::create_dir_all(dir.0.join("archive")).unwrap();
-    let (day1, moved) = (dir.path("trip/day1"), dir.path("archive/trip/day1"));
+    let day1 = dir.path("trip/day1");
+    let moved = dir.0.join("archive").join("trip").join("day1").to_string_lossy().to_string();
     let mut s = Session::new();
     add(&mut s, &format!("{day1}/b.jpg"));
     s.execute("library.filter", &json!({"libraryFolder": day1})).unwrap();
