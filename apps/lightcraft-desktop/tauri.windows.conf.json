@@ -3,6 +3,7 @@
     "windows": [
       {
         "label": "main",
+        "visible": false,
         "title": "LightCraft",
         "width": 1600,
         "height": 1000,

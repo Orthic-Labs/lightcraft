@@ -771,7 +771,10 @@ fn qa_hidden_enabled(value: Option<&OsStr>) -> bool {
 }
 
 fn unattended_qa_enabled() -> bool {
-    qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_HIDDEN").as_deref()) || qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_BACKGROUND").as_deref())
+    std::env::args().any(|arg| arg == "--qa")
+        || std::env::var_os("LIGHTCRAFT_DESKTOP_QA").is_some()
+        || qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_HIDDEN").as_deref())
+        || qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_BACKGROUND").as_deref())
 }
 
 fn reject_unattended_picker(action: &str, params: &Value, enforce: bool) -> Result<(), String> {

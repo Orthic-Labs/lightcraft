@@ -46,6 +46,12 @@ function checkPins() {
 
 function checkNativeConfig() {
   const tauri = readJson("apps/lightcraft-desktop/tauri.conf.json");
+  // Platform overlays replace window arrays, so each main definition must start hidden.
+  // RightKit Shell reveals normal user launches when their WebView becomes ready.
+  for (const file of ["tauri.conf.json", "tauri.macos.conf.json", "tauri.windows.conf.json"]) {
+    const main = readJson(`apps/lightcraft-desktop/${file}`).app?.windows?.find((window) => window.label === "main");
+    if (main?.visible !== false) fail(`${file} main window must start hidden until Shell readiness`);
+  }
   const csp = tauri.app?.security?.csp ?? "";
   if (!csp.includes("lightcraft-preview:")) fail("Tauri CSP must allow scoped lightcraft-preview protocol");
   if (!Array.isArray(tauri.app?.security?.capabilities) || !tauri.app.security.capabilities.includes("main")) fail("Tauri main capability must be declared");
