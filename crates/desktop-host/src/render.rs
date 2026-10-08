@@ -25,6 +25,7 @@ const MAX_THUMBS_PER_PHOTO: usize = 4;
 const MAX_THUMBS: usize = 512;
 const MAX_THUMB_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SEQUENCE: u64 = 9_007_199_254_740_991;
+const INTERACTIVE_PRIORITY: u32 = 200;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -70,6 +71,8 @@ struct Pending {
     request: PreviewRequest,
     key: u64,
     priority: u32,
+    interactive: bool,
+    forced_draft: bool,
     reply: std::sync::mpsc::Sender<Result<PreviewDescriptor, String>>,
 }
 
@@ -160,14 +163,18 @@ impl Renderer {
                 return Ok(());
             }
         };
-        if request.quality == PreviewQuality::Draft {
+        // The React host keeps preview requests at full quality because it does not own
+        // engine interaction state.  Session is authoritative: while a slider/brush
+        // interaction is open, use the pipeline's draft path so the loupe can keep up.
+        let interactive = session.interaction.is_some();
+        if uses_draft_quality(request.quality, interactive) {
             job = job.draft();
         }
         if !request.before
             && self.is_loupe_slot(&request.slot)
             && let Some(loupe) = session.loupe_job(photo, request.width as usize, request.height as usize, true)
         {
-            job = if request.quality == PreviewQuality::Draft { loupe.draft() } else { loupe };
+            job = if uses_draft_quality(request.quality, interactive) { loupe.draft() } else { loupe };
         }
         let key = job.key;
         if let Some(previous) = self.pending.remove(&slot) {
@@ -185,7 +192,10 @@ impl Renderer {
             return Ok(());
         }
         let stages = self.stages.entry(slot).or_default().clone();
-        self.submit(slot, request, key, job.with_stages(stages), reply);
+        self.submit(slot, request, key, job.with_stages(stages), interactive, reply);
+        if interactive && self.is_loupe_slot(&request.slot) {
+            self.drop_background_queued();
+        }
         self.apply_pressure();
         Ok(())
     }
@@ -225,20 +235,24 @@ impl Renderer {
             let _ = previous.reply.send(Err("preview superseded".to_string()));
             self.drop_queued();
         }
-        self.submit_quick(slot, request, key, job, reply);
+        self.submit_quick(slot, request, key, job, session.interaction.is_some(), reply);
         self.apply_pressure();
         Ok(())
     }
 
     /// Drain completed jobs. Session accepts every result, while only current request metadata is
-    /// allowed through the presentation gate.
+    /// allowed through presentation gate; a draft completing after interaction closes is rerun full.
     pub fn poll(&mut self, session: &mut Session) -> usize {
         let mut completed = 0;
         while let Some(done) = self.pool.try_recv() {
             completed += 1;
             let slot = done.slot;
             let JobOutput { ticket, view_generation, sequence, result, payload } = done.result;
+            let current_ticket = self.pending.get(&slot).is_some_and(|pending| pending.ticket == ticket);
             session.accept(&result);
+            if !current_ticket {
+                continue;
+            }
             let Some(pending) = self.pending.get(&slot) else { continue };
             let (visible_generation, _) = session.visible_shared();
             if pending.request.view_generation != visible_generation {
@@ -246,6 +260,11 @@ impl Renderer {
                     let _ = stale.reply.send(Err("preview view is stale".to_string()));
                 }
                 self.drop_queued();
+                continue;
+            }
+            let interaction_ended = pending.forced_draft && session.interaction.is_none();
+            if interaction_ended {
+                self.requeue_full_after_interaction(session, slot);
                 continue;
             }
             if !publishable(pending, ticket, view_generation, sequence, result.key, result.photo) {
@@ -293,6 +312,26 @@ impl Renderer {
         completed
     }
 
+    fn requeue_full_after_interaction(&mut self, session: &mut Session, slot: SlotId) {
+        let Some(previous) = self.pending.remove(&slot) else { return };
+        let request = previous.request;
+        let reply = previous.reply;
+        let photo = PhotoId(request.photo_id);
+        let Some(mut job) = session.render_job(photo, request.width as usize, request.height as usize, request.before, true) else {
+            let _ = reply.send(Err("photo is unavailable".to_string()));
+            return;
+        };
+        if !request.before
+            && self.is_loupe_slot(&request.slot)
+            && let Some(loupe) = session.loupe_job(photo, request.width as usize, request.height as usize, true)
+        {
+            job = loupe;
+        }
+        let key = job.key;
+        let stages = self.stages.entry(slot).or_default().clone();
+        self.submit(slot, request, key, job.with_stages(stages), false, reply);
+    }
+
     pub fn cancel(&mut self, slot: &str) -> bool {
         let Some(slot_id) = self.slots.get(slot).copied() else { return false };
         let Some(pending) = self.pending.remove(&slot_id) else { return false };
@@ -334,9 +373,10 @@ impl Renderer {
         request: PreviewRequest,
         key: u64,
         job: RenderJob,
+        interactive: bool,
         reply: std::sync::mpsc::Sender<Result<PreviewDescriptor, String>>,
     ) {
-        let priority = priority(&request.slot);
+        let priority = priority_for(&request.slot, interactive);
         let ticket = self.ticket();
         let view_generation = request.view_generation;
         let sequence = request.sequence;
@@ -350,7 +390,8 @@ impl Renderer {
                 JobOutput { ticket, view_generation, sequence, result, payload }
             }),
         );
-        self.pending.insert(slot, Pending { ticket, request, key, priority, reply });
+        let forced_draft = forced_draft(request.quality, interactive);
+        self.pending.insert(slot, Pending { ticket, request, key, priority, interactive, forced_draft, reply });
     }
 
     fn submit_quick(
@@ -359,9 +400,10 @@ impl Renderer {
         request: PreviewRequest,
         key: u64,
         job: QuickJob,
+        interactive: bool,
         reply: std::sync::mpsc::Sender<Result<PreviewDescriptor, String>>,
     ) {
-        let priority = priority(&request.slot).saturating_add(1);
+        let priority = priority_for(&request.slot, interactive).saturating_add(1);
         let ticket = self.ticket();
         let view_generation = request.view_generation;
         let sequence = request.sequence;
@@ -375,7 +417,7 @@ impl Renderer {
                 JobOutput { ticket, view_generation, sequence, result, payload }
             }),
         );
-        self.pending.insert(slot, Pending { ticket, request, key, priority, reply });
+        self.pending.insert(slot, Pending { ticket, request, key, priority, interactive, forced_draft: false, reply });
     }
 
     fn ticket(&mut self) -> u64 {
@@ -499,6 +541,28 @@ impl Renderer {
         let pending = &self.pending;
         let _ = self.pool.reprioritize(|slot, priority| pending.contains_key(slot).then_some(priority));
     }
+
+    /// Interactive loupe work must not wait behind queued thumbnails or prefetches. Running
+    /// workers finish normally; only queued background jobs are removed and their callers are
+    /// released so they can retry after the interaction ends.
+    fn drop_background_queued(&mut self) {
+        let pending = &self.pending;
+        let dropped = self.pool.reprioritize(
+            |slot, priority| {
+                if priority < INTERACTIVE_PRIORITY { None } else { pending.contains_key(slot).then_some(priority) }
+            },
+        );
+        for slot in dropped {
+            // A queue entry can be stale by the time it is inspected. Release only a matching
+            // background pending request; never remove a newer interactive request for same slot.
+            let is_background = self.pending.get(&slot).is_some_and(|pending| pending.priority < INTERACTIVE_PRIORITY);
+            if is_background && let Some(pending) = self.pending.remove(&slot) {
+                // Reuse stale-request handling in web clients: they retain the last decoded
+                // pixels and retry briefly after the interaction settles.
+                let _ = pending.reply.send(Err("preview superseded".to_string()));
+            }
+        }
+    }
 }
 
 fn encode_result(result: &RenderResult) -> Result<EncodedPreview, String> {
@@ -543,6 +607,18 @@ fn priority(slot: &str) -> u32 {
     25
 }
 
+fn priority_for(slot: &str, interactive: bool) -> u32 {
+    if interactive && matches!(slot, "main" | "preview" | "before" | "compare-a" | "compare-b") { INTERACTIVE_PRIORITY } else { priority(slot) }
+}
+
+fn uses_draft_quality(quality: PreviewQuality, interactive: bool) -> bool {
+    interactive || quality == PreviewQuality::Draft
+}
+
+fn forced_draft(quality: PreviewQuality, interactive: bool) -> bool {
+    interactive && quality == PreviewQuality::Full
+}
+
 fn publishable(pending: &Pending, result_ticket: u64, result_generation: u64, result_sequence: u64, result_key: u64, result_photo: PhotoId) -> bool {
     pending.ticket == result_ticket
         && pending.request.view_generation == result_generation
@@ -579,6 +655,188 @@ mod tests {
     fn priorities_keep_interactive_work_ahead_of_prefetch() {
         assert!(priority("main") > priority("thumb:1"));
         assert!(priority("thumb:1") > priority("prefetch:1"));
+        assert!(priority_for("main", true) > priority("main"));
+        assert_eq!(priority_for("thumb:1", true), priority("thumb:1"));
+    }
+
+    #[test]
+    fn active_interactions_force_draft_quality_even_for_full_requests() {
+        assert!(uses_draft_quality(PreviewQuality::Full, true));
+        assert!(uses_draft_quality(PreviewQuality::Draft, true));
+        assert!(!uses_draft_quality(PreviewQuality::Full, false));
+        assert!(uses_draft_quality(PreviewQuality::Draft, false));
+        assert!(forced_draft(PreviewQuality::Full, true));
+        assert!(!forced_draft(PreviewQuality::Draft, true));
+        assert!(!forced_draft(PreviewQuality::Full, false));
+    }
+
+    #[test]
+    fn draft_quality_keeps_requested_dimensions_but_changes_cache_key() {
+        let mut session = Session::with_demo();
+        let photo = session.active().unwrap();
+        let full = session.loupe_job(photo, 640, 480, true).unwrap();
+        let draft = full.clone().draft();
+        assert_eq!(draft.request.max_w, full.request.max_w);
+        assert_eq!(draft.request.max_h, full.request.max_h);
+        assert_ne!(draft.key, full.key);
+        assert_ne!(draft.request.quality, full.request.quality);
+    }
+
+    #[test]
+    fn full_request_after_unchanged_interaction_does_not_stay_draft() {
+        let mut session = Session::with_demo();
+        let photo = session.active().unwrap();
+        let (generation, _) = session.visible_shared();
+        let full_key = session.loupe_job(photo, 320, 240, true).unwrap().key;
+        let draft_key = session.loupe_job(photo, 320, 240, true).unwrap().draft().key;
+        assert_ne!(draft_key, full_key);
+        session.begin_interaction("Exposure").unwrap();
+
+        let mut renderer = Renderer::new(PreviewStore::new(8, 1024, std::time::Duration::from_secs(30)));
+        let (reply, _) = std::sync::mpsc::channel();
+        renderer
+            .request(
+                &mut session,
+                PreviewRequest {
+                    photo_id: photo.0,
+                    slot: "main".into(),
+                    view_generation: generation,
+                    width: 320,
+                    height: 240,
+                    quality: PreviewQuality::Full,
+                    before: false,
+                    sequence: 1,
+                },
+                reply,
+            )
+            .unwrap();
+        let slot = renderer.slots.get("main").copied().unwrap();
+        assert_eq!(renderer.pending.get(&slot).unwrap().key, draft_key);
+
+        session.end_interaction().unwrap();
+        let (after_generation, _) = session.visible_shared();
+        assert_eq!(after_generation, generation);
+        let (reply, _) = std::sync::mpsc::channel();
+        renderer
+            .request(
+                &mut session,
+                PreviewRequest {
+                    photo_id: photo.0,
+                    slot: "main".into(),
+                    view_generation: after_generation,
+                    width: 320,
+                    height: 240,
+                    quality: PreviewQuality::Full,
+                    before: false,
+                    sequence: 2,
+                },
+                reply,
+            )
+            .unwrap();
+        assert_eq!(renderer.pending.get(&slot).unwrap().key, full_key);
+    }
+
+    #[test]
+    fn draft_completion_after_interaction_end_is_requeued_as_full() {
+        let mut session = Session::with_demo();
+        let photo = session.active().unwrap();
+        let (generation, _) = session.visible_shared();
+        let full_key = session.loupe_job(photo, 320, 240, true).unwrap().key;
+        session.begin_interaction("Exposure").unwrap();
+
+        // Hold one worker so interaction can end while draft work is still in flight.
+        let mut renderer = Renderer::new(PreviewStore::new(8, 4 * 1024 * 1024, std::time::Duration::from_secs(30)));
+        renderer.pool = JobPool::new(1);
+        let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let gate_worker = gate.clone();
+        let (started_sender, started_receiver) = std::sync::mpsc::channel();
+        renderer.pool.submit(
+            SlotId(99),
+            0,
+            1000,
+            Box::new(move || {
+                let _ = started_sender.send(());
+                let (lock, cv) = &*gate_worker;
+                let mut open = lock.lock().unwrap();
+                while !*open {
+                    open = cv.wait(open).unwrap();
+                }
+                JobOutput {
+                    ticket: 0,
+                    view_generation: 0,
+                    sequence: 0,
+                    result: RenderResult {
+                        request_id: 0,
+                        source_key: None,
+                        photo: PhotoId(0),
+                        level: lightcraft_engine::media::SourceLevel::Thumb,
+                        key: 0,
+                        rendered: Err("gate".into()),
+                        loaded: None,
+                        quick: None,
+                    },
+                    payload: Err("gate".into()),
+                }
+            }),
+        );
+        assert!(started_receiver.recv_timeout(std::time::Duration::from_secs(1)).is_ok());
+        let (gate_reply, _) = std::sync::mpsc::channel();
+        renderer.pending.insert(
+            SlotId(99),
+            Pending {
+                ticket: 0,
+                request: PreviewRequest {
+                    photo_id: 0,
+                    slot: "gate".into(),
+                    view_generation: generation,
+                    width: 1,
+                    height: 1,
+                    quality: PreviewQuality::Full,
+                    before: false,
+                    sequence: 0,
+                },
+                key: 0,
+                priority: 1000,
+                interactive: false,
+                forced_draft: false,
+                reply: gate_reply,
+            },
+        );
+
+        let (reply, receiver) = std::sync::mpsc::channel();
+        renderer
+            .request(
+                &mut session,
+                PreviewRequest {
+                    photo_id: photo.0,
+                    slot: "main".into(),
+                    view_generation: generation,
+                    width: 320,
+                    height: 240,
+                    quality: PreviewQuality::Full,
+                    before: false,
+                    sequence: 1,
+                },
+                reply,
+            )
+            .unwrap();
+        session.end_interaction().unwrap();
+        let (lock, cv) = &*gate;
+        *lock.lock().unwrap() = true;
+        cv.notify_one();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut response = None;
+        while response.is_none() && std::time::Instant::now() < deadline {
+            renderer.poll(&mut session);
+            if let Ok(value) = receiver.try_recv() {
+                response = Some(value);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let response = response.unwrap().unwrap();
+        assert_eq!(response.key, format!("{full_key:016x}"));
     }
 
     #[test]
@@ -620,6 +878,8 @@ mod tests {
             },
             key: 17,
             priority: 100,
+            interactive: false,
+            forced_draft: false,
             reply,
         };
         assert!(publishable(&pending, 8, 3, 9, 17, PhotoId(42)));
