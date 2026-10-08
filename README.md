@@ -21,3 +21,5 @@ Current captures show native LightCraft. Fable & Astra mockups simulate presenta
 ![Astra](screens/astra-develop-dark.png)
 
 [Assets & licensing](assets/ATTRIBUTION.md)
+
+[Fable’s opinion after reviewing Astra](fable/followup-opinion.md)
