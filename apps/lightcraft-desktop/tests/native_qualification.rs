@@ -24,7 +24,9 @@ fn fixture_root() -> PathBuf {
 }
 
 fn qa_harness(binary: &Path, evidence: &Path, revision: &str, platform: &str, architecture: &str) -> Harness {
-    Harness::new("lightcraft-desktop", PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
+    let managed_root = evidence.parent().expect("QA evidence path must have managed parent").to_path_buf();
+
+    Harness::new_in_managed_root("lightcraft-desktop", PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."), managed_root)
         .expect("RightKit QA harness must initialize")
         .with_evidence_root(evidence)
         .with_identity(json!({
