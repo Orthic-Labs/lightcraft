@@ -950,6 +950,12 @@ mod tests {
         assert_eq!(completed[0].state, "done");
         assert_eq!(completed[0].result.as_ref().and_then(|value| value.get("photos")).and_then(Value::as_u64), Some(2));
         assert!(completed[0].result.as_ref().is_some_and(|value| value.get("indexWarning").is_some()));
-        assert!(completed[0].error.as_deref().is_some_and(|error| error.contains("permission denied")));
+        assert!(completed[0].error.is_none(), "archive warnings must not mark a committed import as failed");
+        let warnings =
+            completed[0].result.as_ref().and_then(|value| value.get("warnings")).and_then(Value::as_array).expect("retained import warnings");
+        assert!(warnings.iter().filter_map(Value::as_str).any(|warning| {
+            warning.contains("permission denied") && warning.contains("/library/Interop/lightroom-index.json") && warning.contains("import committed")
+        }));
+        assert!(tasks.take_notices().iter().any(|notice| notice.contains("permission denied")));
     }
 }
