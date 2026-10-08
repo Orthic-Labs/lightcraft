@@ -20,7 +20,7 @@ Temporary runner exception: candidate admission uses `macos-15` because publishe
 
 | Lane | Actual work |
 | --- | --- |
-| Workspace CI, macOS arm64 | Source contracts, React typecheck/build, then existing Rust fmt, clippy, tests, parity, layers, assets & WASM gates; Windows workspace gates follow Mac delivery |
+| Workspace CI, Windows x64 | Source contracts, React typecheck/build, then existing Rust fmt, clippy, tests, parity, layers, assets & WASM gates; Windows follows verified Mac workspace gates |
 | Native candidate, macOS arm64 & Windows x64 | Right Release development build, Cargo compiler-artifact records, embedded frontend, Tauri app/DMG or NSIS package, hash verification, installation on CI runner & hidden native QA |
 
 First CI resolves missing Rust dependencies, emits bounded Cargo.lock bytes & SHA-256, then fails until verified lock is committed. Subsequent gates use `--locked`. Cargo commands go through `@rightkit/release/managed-cargo.mjs`.
