@@ -166,6 +166,20 @@ impl Segmenter {
         false
     }
 
+    /// Verify a user-selected model folder before making it active.
+    pub fn select_model_dir(&mut self, dir: PathBuf) -> Result<(), String> {
+        if !Self::AVAILABLE {
+            return Err("AI masks are not available in this build".into());
+        }
+        if dir.as_os_str().is_empty() || dir.to_string_lossy().len() > 8_192 || dir.to_string_lossy().contains('\0') {
+            return Err("invalid SAM 3 model folder".into());
+        }
+        #[cfg(feature = "sam")]
+        lightcraft_segment::validate_model_dir(&dir).map_err(|e| e.to_string())?;
+        self.dir = Some(dir);
+        Ok(())
+    }
+
     /// Whether requests are queued or running (loading, analyzing the photo, a click…).
     pub fn busy(&self) -> bool {
         #[cfg(feature = "sam")]

@@ -871,6 +871,75 @@ function InfoDialog({ kind, desktop, d }: { kind: string; desktop: DesktopContex
 function FormDialog({ kind, d, desktop }: { kind: string; d: DialogState; desktop: DesktopContextValue }) { const formKind = kind.toLowerCase(); const p = d.params || {}; const [values, setValues] = useState<AnyRecord>({ ...p }); const update = (key: string, value: unknown) => setValues((old) => ({ ...old, [key]: value })); const config: AnyRecord = { rename: ['Rename Photos', 'photo.rename', [['template', 'Name template'], ['start', 'Start number']]], renamealbum: ['Rename Album', 'album.rename', [['id', 'Album ID'], ['name', 'Name']]], capturetime: ['Edit Capture Time', 'photo.setCaptureTime', [['time', 'Capture time'], ['shift', 'Shift seconds'], ['hours', 'Time-zone shift hours']]], autostack: ['Auto-Stack by Capture Time', 'stack.auto', [['gap', 'Maximum gap (seconds)']]], createpreset: ['Create Preset', 'preset.create', [['name', 'Preset name'], ['group', 'Group']]], copysettings: ['Copy Edit Settings', 'develop.copy', []], pastesettings: ['Paste Edit Settings', 'develop.paste', []], labelnames: ['Color Label Names', 'label.setNames', [['red', 'Red'], ['yellow', 'Yellow'], ['green', 'Green'], ['blue', 'Blue'], ['purple', 'Purple']]], savemetadatapreset: ['Save Metadata Preset', 'metadata.savePreset', [['name', 'Preset name']]], cull: ['Assisted Culling', 'photo.analyze', [['rejectBelow', 'Reject below focus score']]], textprompt: [text(p.title, 'Enter a value'), text(p.command), [[text(p.key, 'value'), text(p.hint, 'Value')]]], metadatapreset: ['Metadata Preset', 'metadata.applyPreset', [['name', 'Preset name']]], renamekeyword: ['Rename Keyword', 'keyword.rename', [['from', 'Current keyword'], ['to', 'New keyword']]], mergekeywords: ['Merge Keywords', 'keyword.merge', [['from', 'Keywords to merge (comma-separated)'], ['into', 'Merge into']]] }; const c = config[formKind]; const submit = async () => { try { let payload: AnyRecord = { ...values }; if (formKind === 'labelnames') payload = { names: Object.fromEntries(['red', 'yellow', 'green', 'blue', 'purple'].map((label) => [label, text(values[label]) || null])) }; else if (formKind === 'capturetime') { payload = {}; if (Array.isArray(values.ids)) payload.ids = values.ids; if (text(values.time)) payload.time = text(values.time); else if (values.shift !== undefined && text(values.shift) !== '') payload.shift = num(values.shift); else if (values.hours !== undefined && text(values.hours) !== '') payload.hours = num(values.hours); if (bool(values.each)) payload.each = true; } else if (formKind === 'rename') payload = { template: text(values.template), start: num(values.start, 1), ...(Array.isArray(values.ids) ? { ids: values.ids } : {}) }; else if (formKind === 'renamealbum') payload = { id: num(values.id), name: text(values.name) }; else if (formKind === 'autostack') payload = { gap: num(values.gap), ...(bool(values.preview) ? { preview: true } : {}) }; else if (formKind === 'createpreset') payload = { name: text(values.name), ...(text(values.group) ? { group: text(values.group) } : {}) }; else if (formKind === 'copysettings' || formKind === 'pastesettings') payload = { ...(Array.isArray(values.groups) ? { groups: values.groups } : {}) }; else if (formKind === 'metadatapreset') payload = { name: text(values.name) }; else if (formKind === 'savemetadatapreset') payload = { name: text(values.name), ...(values.fields ? { fields: values.fields } : {}) }; else if (formKind === 'renamekeyword') payload = { from: text(values.from), to: text(values.to) }; else if (formKind === 'mergekeywords') payload = { from: text(values.from).split(',').map((item) => item.trim()).filter(Boolean), into: text(values.into) }; else if (formKind === 'cull') payload = { ...(Array.isArray(values.ids) ? { ids: values.ids } : {}), rejectBelow: num(values.rejectBelow), pickBest: bool(values.pickBest, true) }; else if (formKind === 'textprompt') { const promptKey = text(p.key, 'value'); payload = { ...(typeof values.path === 'string' ? { path: values.path } : {}), [promptKey]: text(values[promptKey]) }; } await desktop.run(c[1], payload); desktop.setDialog(null); } catch (e) { desktop.setNotice(String(e)); } }; return <Frame title={c[0]} onClose={() => desktop.setDialog(null)} actions={<><Button onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary onClick={() => void submit()}>Apply</Button></>}><div className="lc-form-stack">{arr(c[2]).map((field: any[]) => <Field key={field[0]} label={field[1]} value={typeof values[field[0]] === 'number' ? values[field[0]] : text(values[field[0]])} type={typeof values[field[0]] === 'number' ? 'number' : 'text'} onChange={(v) => update(field[0], typeof values[field[0]] === 'number' ? Number(v) : v)} />)}{formKind === 'capturetime' && <Check checked={bool(values.each)} onChange={(v) => update('each', v)}>Set this time on every selected photo</Check>}{['copysettings', 'pastesettings'].includes(formKind) && <Note>Choose groups in Inspector before applying settings.</Note>}{formKind === 'cull' && <Check checked={bool(values.pickBest, true)} onChange={(v) => update('pickBest', v)}>Keep best frame in each burst</Check>}</div></Frame>; }
 
 const EXPLICIT_FORM_KINDS = new Set(['rename', 'renamealbum', 'capturetime', 'autostack', 'createpreset', 'copysettings', 'pastesettings', 'labelnames', 'savemetadatapreset', 'cull', 'textprompt', 'metadatapreset', 'renamekeyword', 'mergekeywords']);
+function SamModelSetupDialogHost({ desktop }: { desktop: DesktopContextValue }) {
+  const licenseUrl = 'https://github.com/facebookresearch/sam3/blob/main/LICENSE';
+  const [status, setStatus] = useState<AnyRecord | null>(null);
+  const [accepted, setAccepted] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const load = async () => {
+    try { setStatus((await desktop.run('segment.model.status', {})) as AnyRecord); }
+    catch (reason) { setError(errorText(reason)); }
+  };
+  useEffect(() => {
+    void load();
+    const timer = window.setInterval(() => { void load(); }, 750);
+    return () => window.clearInterval(timer);
+  }, []);
+  const download = async () => {
+    if (!accepted || busy) return;
+    setBusy(true); setError('');
+    try { await desktop.run('segment.model.download', { acknowledged: true }); await load(); }
+    catch (reason) { setError(errorText(reason)); }
+    finally { setBusy(false); }
+  };
+  const cancelDownload = async () => {
+    setBusy(true); setError('');
+    try { await desktop.run('segment.model.cancel', {}); await load(); }
+    catch (reason) { setError(errorText(reason)); }
+    finally { setBusy(false); }
+  };
+  const chooseFolder = async () => {
+    setBusy(true); setError('');
+    try {
+      const selected = await desktop.native('selectFolder', {});
+      const path = typeof selected === 'string' ? selected : selected && typeof selected === 'object' && 'path' in selected ? text((selected as AnyRecord).path) : '';
+      if (!path) return;
+      await desktop.run('segment.model.selectFolder', { path });
+      await load();
+    } catch (reason) { setError(errorText(reason)); }
+    finally { setBusy(false); }
+  };
+  const openFolder = async () => {
+    const path = text(status?.dir);
+    if (!path) return;
+    try { await desktop.native('openFolder', { path }); }
+    catch (reason) { setError(errorText(reason)); }
+  };
+  const downloadState = (status?.download && typeof status.download === 'object') ? status.download as AnyRecord : {};
+  const running = bool(downloadState.running);
+  const installed = bool(status?.installed);
+  const mirrors = num(status?.mirrors);
+  const done = num(downloadState.done);
+  const total = num(downloadState.total);
+  const percent = total > 0 ? Math.min(100, Math.round(done / total * 100)) : 0;
+  const sizeGb = (num(status?.sizeBytes, 3439938512) / 1e9).toFixed(1);
+  return <Frame title="SAM 3 Model Setup" busy={busy} onClose={() => desktop.setDialog(null)} dismissible={!running} actions={<><Button disabled={busy} onClick={() => desktop.setDialog(null)}>{running ? 'Close' : 'Cancel'}</Button>{installed ? <Button primary onClick={() => desktop.setDialog(null)}>Continue</Button> : running ? <Button disabled={busy} onClick={() => void cancelDownload()}>Cancel Download</Button> : <Button primary disabled={busy || !accepted || mirrors === 0} onClick={() => void download()}>Download</Button>}</>}>
+    <Note>Object & Describe masks use SAM 3, Meta’s segmentation model. Everything else works without it.</Note>
+    <p>A one-time download of about {sizeGb} GB is saved in:</p>
+    <code className="lc-path-value">{text(status?.dir, 'No model folder configured')}</code>
+    <div className="lc-dialog-toolbar"><Button disabled={busy || !status?.dir} onClick={() => void openFolder()}>Open Model Folder</Button><Button disabled={busy} onClick={() => void chooseFolder()}>Select Existing Model Folder…</Button></div>
+    <p>Licence: SAM License (Meta). Downloading means accepting Meta’s terms.</p>
+    <div className="lc-dialog-toolbar"><Button onClick={() => void desktop.native('openUrl', { url: licenseUrl })}>Read SAM License</Button></div>
+    {!installed && !running && <Check checked={accepted} onChange={setAccepted}>I accept SAM License terms & want to download this model.</Check>}
+    {mirrors === 0 && !installed && <Note tone="warning">No HTTPS download mirror is configured. Set LIGHTCRAFT_SAM3_MIRRORS or install files manually, then select their folder.</Note>}
+    {running && <div className="lc-progress" aria-live="polite"><div className="lc-progress-label"><span>{text(downloadState.file, 'Downloading SAM 3…')}</span><span>{percent}%</span></div><progress max={100} value={percent} /></div>}
+    {installed && <Note>SAM 3 files are installed. Object & Describe masks are ready.</Note>}
+    {error && <Note tone="error">{error}</Note>}
+    {text(downloadState.error) && <Note tone="error">{text(downloadState.error)}</Note>}
+  </Frame>;
+}
+
 function UnsupportedDialog({ desktop }: { kind: string; desktop: DesktopContextValue }) { return <Frame title="Dialog unavailable" onClose={() => desktop.setDialog(null)} actions={<Button primary onClick={() => desktop.setDialog(null)}>Close</Button>}><Note tone="error">Sorry, this action isn’t available in this version.</Note></Frame>; }
 
 function MissingDialog({ desktop, d }: { desktop: DesktopContextValue; d: DialogState }) { const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const run = async () => { const paths = await choose(desktop.native, 'chooseFolder'); if (!paths[0]) return; setBusy(true); try { await desktop.run('library.findMissing', { folder: paths[0] }); desktop.setDialog(null); } catch (e) { setError(String(e)); } finally { setBusy(false); } }; return <Frame title="Find Missing Photos" busy={busy} onClose={() => desktop.setDialog(null)} actions={<><Button onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary disabled={busy} onClick={() => void run()}>Choose Search Folder…</Button></>}>{error && <Note tone="error">{error}</Note>}<Note>LightCraft checks names, sizes & content hashes, then relinks matches in one undoable step.</Note>{d.params?.count != null && <p>{num(d.params.count)} photos are missing.</p>}</Frame>; }
@@ -919,6 +988,7 @@ export default function DialogHost({ desktop: provided }: HostProps = {}) {
   if (kind === 'allmetadata') return <MetadataDialog d={dialog} desktop={context} />;
   if (kind === 'about' || kind === 'systeminfo' || kind === 'shortcuts' || kind === 'whatsnew') return <InfoDialog kind={kind} d={dialog} desktop={context} />;
   if (kind === 'settings') return <SettingsDialog d={dialog} desktop={context} />;
+  if (kind === 'sammodel' || kind === 'sammodelsetup' || kind === 'samsetup') return <SamModelSetupDialogHost desktop={context} />;
   if (kind === 'copysettings') return <GroupsDialog paste={false} d={dialog} desktop={context} />;
   if (kind === 'pastsettings' || kind === 'pastesettings') return <GroupsDialog paste d={dialog} desktop={context} />;
   if (kind === 'presetimport') return <PresetFileDialog exportMode={false} curve={false} d={dialog} desktop={context} />;

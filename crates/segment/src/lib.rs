@@ -85,6 +85,36 @@ pub fn is_model_dir(dir: &Path) -> bool {
     dir.join(WEIGHTS_FILE).is_file() && dir.join("vocab.json").is_file() && dir.join("merges.txt").is_file()
 }
 
+/// Validate a user-selected checkpoint without loading tensors into a device.
+///
+/// The weights header and every tensor range are checked by `Weights::open`; tokenizer files
+/// are size-bounded before parsing. The official checkpoint size is pinned by the fetch manifest.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn validate_model_dir(dir: &Path) -> Result<()> {
+    if !dir.is_dir() {
+        return Err(Error::Missing(dir.to_path_buf()));
+    }
+    let weights_path = dir.join(WEIGHTS_FILE);
+    let weights_size = std::fs::metadata(&weights_path).map_err(|e| Error::Model(format!("{}: {e}", weights_path.display())))?.len();
+    if weights_size != fetch::SAM3_WEIGHTS_SIZE {
+        return Err(Error::Model(format!(
+            "{}: expected official SAM 3 checkpoint size {}, found {weights_size}",
+            weights_path.display(),
+            fetch::SAM3_WEIGHTS_SIZE
+        )));
+    }
+    let _ = weights::Weights::open(&weights_path)?;
+    for name in ["vocab.json", "merges.txt"] {
+        let path = dir.join(name);
+        let size = std::fs::metadata(&path).map_err(|e| Error::Model(format!("{}: {e}", path.display())))?.len();
+        if size > 16 << 20 {
+            return Err(Error::Model(format!("{}: tokenizer file is too large", path.display())));
+        }
+    }
+    let _ = tokenizer::Tokenizer::load(dir)?;
+    Ok(())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 /// The best device here: Metal on macOS (when a GPU is available), else the CPU.
 pub fn best_device() -> Device {

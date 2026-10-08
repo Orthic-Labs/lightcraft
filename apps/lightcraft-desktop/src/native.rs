@@ -243,6 +243,9 @@ mod tauri_commands {
             })
             .await;
         }
+        if matches!(action.as_str(), "openFolder" | "selectFolder") {
+            return blocking(move || model_folder_action(&action, &params)).await;
+        }
         if action == "saveBeforeClose" {
             let host = state.host.clone();
             let startup_error = state.startup_error.clone();
@@ -348,6 +351,21 @@ fn open_library_action(host: Option<DesktopHandle>, startup_error: Option<String
     let host = host.ok_or_else(|| startup_error.unwrap_or_else(|| "desktop host is unavailable".into()))?;
     let result = host.run("library.open".into(), json!({"path": path}))?;
     persist_library_path(&preferences, Some(&host), result, Some(path))
+}
+
+fn model_folder_action(action: &str, params: &Value) -> Result<Value, String> {
+    match action {
+        "selectFolder" => services::run("chooseFolder", params),
+        "openFolder" => {
+            let path = params.get("path").and_then(Value::as_str).ok_or_else(|| "openFolder requires path".to_string())?;
+            if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
+                return Err("invalid model folder path".into());
+            }
+            services::run("openExternal", &json!({"path": path}))?;
+            Ok(json!({"path": path}))
+        }
+        _ => Err(format!("unknown model folder action {action}")),
+    }
 }
 
 fn persist_library_path(preferences: &Preferences, host: Option<&DesktopHandle>, result: Value, fallback: Option<&str>) -> Result<Value, String> {
@@ -641,6 +659,8 @@ fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<Strin
             } else if matches!(action, "secondWindow" | "fullscreen" | "toggleFullscreen" | "confirmClose" | "closeWindow") {
                 let mapped = if action == "fullscreen" { "toggleFullscreen" } else { action };
                 native_window_action(app, mapped, &params, None)?
+            } else if matches!(action, "openFolder" | "selectFolder") {
+                model_folder_action(action, &params)?
             } else if services::is_import_picker(action) {
                 if !services::has_explicit_picker_input(action, &params)? {
                     return Err("interactive import picker unavailable in QA control; supply explicit path(s)".into());
