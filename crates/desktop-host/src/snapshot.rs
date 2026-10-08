@@ -282,6 +282,7 @@ pub fn snapshot(
         "viewGeneration": generation,
         "total": visible.len(),
         "active": active,
+        "activeMask": session.active_mask,
         "activeIndex": active.and_then(|id| visible.iter().position(|photo| photo.0 == id)),
         "selection": selection,
         "source": serde_json::to_value(session.source).unwrap_or(Value::Null),
@@ -350,5 +351,25 @@ fn album_summary(session: &Session, album: &Album) -> AlbumSummary {
         count: session.catalog.album_count(album.id),
         smart: album.is_smart(),
         folder: album.folder,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_mask_snapshot_follows_selection_instead_of_last_mask() {
+        let mut session = Session::with_demo();
+        session.execute("mask.add", &json!({"kind": "radial"})).unwrap();
+        let first = session.active_mask.unwrap();
+        session.execute("mask.add", &json!({"kind": "brush"})).unwrap();
+        assert_ne!(session.active_mask, Some(first));
+        session.execute("mask.select", &json!({"id": first})).unwrap();
+        let value = snapshot(&mut session, &Tasks::new(), &Map::new(), &[], None, &mut CatalogSnapshotCache::default()).unwrap();
+        assert_eq!(value["activeMask"], json!(first));
+        session.active_mask = None;
+        let value = snapshot(&mut session, &Tasks::new(), &Map::new(), &[], None, &mut CatalogSnapshotCache::default()).unwrap();
+        assert!(value["activeMask"].is_null());
     }
 }
