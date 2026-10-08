@@ -50,6 +50,23 @@ enum Event {
         cancelled: bool,
         preserve_selection: bool,
     },
+    LightroomPrepared {
+        id: String,
+        result: Result<lightcraft_engine::lightroom_job::PreparedLightroom, String>,
+        cancelled: bool,
+    },
+    LightroomFinalized {
+        id: String,
+        report: Value,
+        result: Result<(), String>,
+        index_path: Option<String>,
+        commit_error: Option<String>,
+    },
+    LightroomInspection {
+        id: String,
+        result: Result<Value, String>,
+        cancelled: bool,
+    },
 }
 
 pub(crate) struct Tasks {
@@ -150,7 +167,7 @@ impl Tasks {
     }
 
     fn start_import_with_selection(&mut self, session: &mut Session, params: &Value, preserve_selection: bool) -> Result<Value, String> {
-        if self.running_kind("import") {
+        if self.running_import() {
             return Err("an import is already running".into());
         }
         if self.jobs.len() >= MAX_TASKS {
@@ -221,6 +238,81 @@ impl Tasks {
             .map_err(|error| format!("could not start import: {error}"))?;
         self.insert(Task { worker: Some(worker), ..task })?;
         Ok(json!({"taskId": task_id, "total": 0}))
+    }
+
+    pub(crate) fn start_lightroom_import(&mut self, session: &mut Session, params: &Value) -> Result<Value, String> {
+        if self.running_import() {
+            return Err("an import is already running".into());
+        }
+        if self.jobs.len() >= MAX_TASKS {
+            return Err("too many background tasks".into());
+        }
+        let path = lightroom_path(params, "library.importLightroom")?;
+        let update_existing = params.get("updateExisting").and_then(Value::as_bool).unwrap_or(false);
+        let mut job = lightcraft_engine::lightroom_job::LightroomJob::new(session, path, update_existing).map_err(|error| error.to_string())?;
+        let total = job.total_atomic();
+        let completed = job.done_atomic();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let task_id = self.new_id("lightroomImport");
+        let task = Task {
+            id: task_id.clone(),
+            kind: "lightroomImport".into(),
+            label: "Import Lightroom Catalog".into(),
+            total,
+            completed,
+            cancel: cancel.clone(),
+            worker: None,
+        };
+        let tx = self.tx.clone();
+        let id_for_worker = task_id.clone();
+        let worker_cancel = cancel.clone();
+        let worker = std::thread::Builder::new()
+            .name("lightcraft-lightroom-import".into())
+            .spawn(move || {
+                let result = lightcraft_engine::guard::catch("Lightroom import", || job.prepare(&worker_cancel)).unwrap_or_else(Err);
+                let cancelled = worker_cancel.load(Ordering::Relaxed);
+                let _ = tx.send(Event::LightroomPrepared { id: id_for_worker, result, cancelled });
+            })
+            .map_err(|error| format!("could not start Lightroom import: {error}"))?;
+        self.insert(Task { worker: Some(worker), ..task })?;
+        Ok(json!({"taskId": task_id, "kind": "lightroomImport", "total": 0}))
+    }
+
+    pub(crate) fn start_lightroom_inspection(&mut self, _session: &mut Session, params: &Value) -> Result<Value, String> {
+        if self.jobs.len() >= MAX_TASKS {
+            return Err("too many background tasks".into());
+        }
+        let path = lightroom_path(params, "library.inspectLightroom")?;
+        let total = Arc::new(AtomicUsize::new(16));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let task_id = self.new_id("lightroomInspect");
+        let task = Task {
+            id: task_id.clone(),
+            kind: "lightroomInspect".into(),
+            label: "Inspect Lightroom Catalog".into(),
+            total: total.clone(),
+            completed: completed.clone(),
+            cancel: cancel.clone(),
+            worker: None,
+        };
+        let tx = self.tx.clone();
+        let id_for_worker = task_id.clone();
+        let worker_cancel = cancel.clone();
+        let worker = std::thread::Builder::new()
+            .name("lightcraft-lightroom-inspect".into())
+            .spawn(move || {
+                let result = lightcraft_engine::guard::catch("Lightroom inspection", || {
+                    lightcraft_engine::lightroom_catalog::read_with_progress(&path, &worker_cancel, &total, &completed)
+                        .map(|data| lightroom_inspection_report(&data))
+                })
+                .unwrap_or_else(Err);
+                let cancelled = worker_cancel.load(Ordering::Relaxed);
+                let _ = tx.send(Event::LightroomInspection { id: id_for_worker, result, cancelled });
+            })
+            .map_err(|error| format!("could not start Lightroom inspection: {error}"))?;
+        self.insert(Task { worker: Some(worker), ..task })?;
+        Ok(json!({"taskId": task_id, "kind": "lightroomInspect", "total": 16}))
     }
 
     pub(crate) fn start_merge(&mut self, session: &mut Session, command: &str, params: &Value) -> Result<Value, String> {
@@ -318,7 +410,127 @@ impl Tasks {
                     }
                     self.finish(id, result, "import", cancelled);
                 }
+                Event::LightroomPrepared { id, result, cancelled } => self.poll_lightroom_prepared(session, id, result, cancelled),
+                Event::LightroomFinalized { id, report, result, index_path, commit_error } => {
+                    self.finish_lightroom(id, report, result, index_path, commit_error)
+                }
+                Event::LightroomInspection { id, result, cancelled } => self.finish(id, result, "lightroomInspect", cancelled),
             }
+        }
+    }
+
+    fn poll_lightroom_prepared(
+        &mut self,
+        session: &mut Session,
+        id: String,
+        result: Result<lightcraft_engine::lightroom_job::PreparedLightroom, String>,
+        worker_cancelled: bool,
+    ) {
+        if let Some(task) = self.jobs.get_mut(&id)
+            && let Some(worker) = task.worker.take()
+        {
+            let _ = worker.join();
+        }
+        let cancelled = worker_cancelled || self.jobs.get(&id).is_some_and(|task| task.cancel.load(Ordering::Relaxed));
+        let prepared = match result {
+            Ok(prepared) if !cancelled => prepared,
+            Ok(prepared) => {
+                prepared.rollback();
+                self.finish(id, Err("cancelled".into()), "lightroomImport", true);
+                return;
+            }
+            Err(error) => {
+                self.finish(id, Err(error), "lightroomImport", cancelled);
+                return;
+            }
+        };
+        let mut completion_out = None;
+        let commit_result = session.execute_fn("library.importLightroom", |owner| {
+            let completion = lightcraft_engine::lightroom_job::commit_prepared(owner, prepared)?;
+            let report = completion.report.clone();
+            completion_out = Some(completion);
+            Ok(report)
+        });
+        let Some(completion) = completion_out else {
+            self.finish(id, commit_result.map_err(|error| error.to_string()), "lightroomImport", false);
+            return;
+        };
+        let commit_error = commit_result.err().map(|error| error.to_string());
+        let report = completion.report;
+        let index_path = completion.finalization.path().map(|path| path.to_string_lossy().to_string());
+        let report_for_worker = report.clone();
+        let index_path_for_worker = index_path.clone();
+        let commit_error_for_worker = commit_error.clone();
+        let tx = self.tx.clone();
+        let id_for_worker = id.clone();
+        let worker = std::thread::Builder::new().name("lightcraft-lightroom-index".into()).spawn(move || {
+            let result = lightcraft_engine::guard::catch("Lightroom archive index", || completion.finalization.finish()).unwrap_or_else(Err);
+            let _ = tx.send(Event::LightroomFinalized {
+                id: id_for_worker,
+                report: report_for_worker,
+                result,
+                index_path: index_path_for_worker,
+                commit_error: commit_error_for_worker,
+            });
+        });
+        match worker {
+            Ok(worker) => {
+                if let Some(task) = self.jobs.get_mut(&id) {
+                    task.completed.store(task.total.load(Ordering::Relaxed), Ordering::Relaxed);
+                    task.worker = Some(worker);
+                } else {
+                    let _ = worker.join();
+                }
+            }
+            Err(error) => {
+                self.finish_lightroom(id, report, Err(format!("could not start Lightroom archive finalization: {error}")), index_path, commit_error);
+            }
+        }
+    }
+
+    fn finish_lightroom(
+        &mut self,
+        id: String,
+        mut report: Value,
+        result: Result<(), String>,
+        index_path: Option<String>,
+        commit_error: Option<String>,
+    ) {
+        let Some(mut job) = self.jobs.remove(&id) else {
+            self.notices.push("unknown lightroomImport task completed".into());
+            return;
+        };
+        if let Some(worker) = job.worker.take() {
+            let _ = worker.join();
+        }
+        job.completed.store(job.total.load(Ordering::Relaxed), Ordering::Relaxed);
+        let archive_error = match result {
+            Ok(()) => None,
+            Err(error) => {
+                let warning = match &index_path {
+                    Some(path) => format!("Lightroom import committed, but archive index could not be written at {path}: {error}"),
+                    None => format!("Lightroom import committed, but archive index could not be finalized: {error}"),
+                };
+                append_warning(&mut report, warning.clone());
+                append_index_warning(&mut report);
+                Some(warning)
+            }
+        };
+        let error =
+            commit_error.map(|error| format!("Lightroom import was applied in memory, but library save failed: {error}; retry saving the library"));
+        if let Some(commit_error) = &error {
+            append_warning(&mut report, commit_error.clone());
+        }
+        let state = if error.is_some() { "failed" } else { "done" };
+        let notice = error.clone().or(archive_error).unwrap_or_else(|| format!("{} finished", job.label));
+        self.completed.push_back(TerminalTask { id: job.id, kind: job.kind, label: job.label, state: state.into(), result: Some(report), error });
+        while self.completed.len() > MAX_COMPLETED_TASKS {
+            self.completed.pop_front();
+        }
+        self.notices.push(notice);
+        if self.notices.len() > 32 {
+            let drop_count = self.notices.len() - 32;
+            self.notices.drain(..drop_count);
         }
     }
 
@@ -353,7 +565,11 @@ impl Tasks {
     }
 
     pub(crate) fn running_kind(&self, kind: &str) -> bool {
-        self.jobs.values().any(|job| job.kind == kind)
+        self.jobs.values().any(|job| if kind == "import" { job.kind == "import" || job.kind == "lightroomImport" } else { job.kind == kind })
+    }
+
+    fn running_import(&self) -> bool {
+        self.running_kind("import")
     }
     pub(crate) fn running(&self) -> bool {
         !self.jobs.is_empty()
@@ -456,6 +672,51 @@ fn merge_label(command: &str) -> String {
 
 fn merge_cancelled(worker_cancelled: bool, task: Option<&Task>) -> bool {
     worker_cancelled || task.is_some_and(|task| task.cancel.load(Ordering::Relaxed))
+}
+
+fn lightroom_path(params: &Value, command: &str) -> Result<std::path::PathBuf, String> {
+    let path = params.get("path").and_then(Value::as_str).ok_or_else(|| format!("{command} requires path"))?;
+    if path.is_empty() || path.len() > 8_192 || path.contains('\0') {
+        return Err(format!("invalid {command} path"));
+    }
+    Ok(std::path::PathBuf::from(path))
+}
+
+fn lightroom_inspection_report(data: &lightcraft_engine::lightroom_catalog::CatalogImport) -> Value {
+    let collections = data.collections.iter().filter(|row| row.get("systemOnly").and_then(Value::as_f64).unwrap_or(0.0) == 0.0).count();
+    let virtual_copies = data.photos.iter().filter(|photo| photo.image.get("masterImage").and_then(Value::as_i64).unwrap_or(0) != 0).count();
+    let missing = data
+        .photos
+        .iter()
+        .filter(|photo| !std::path::Path::new(&photo.path).is_file())
+        .map(|photo| Value::String(photo.path.clone()))
+        .collect::<Vec<_>>();
+    json!({
+        "source": data.source,
+        "photos": data.photos.len(),
+        "collections": collections,
+        "virtualCopies": virtual_copies,
+        "missing": missing,
+        "warnings": data.warnings,
+    })
+}
+
+fn append_warning(report: &mut Value, warning: String) {
+    let Some(object) = report.as_object_mut() else { return };
+    match object.get_mut("warnings") {
+        Some(Value::Array(warnings)) => warnings.push(Value::String(warning)),
+        _ => {
+            object.insert("warnings".into(), json!([warning]));
+        }
+    }
+}
+
+fn append_index_warning(report: &mut Value) {
+    let Some(object) = report.as_object_mut() else { return };
+    object.insert(
+        "indexWarning".into(),
+        Value::String("archive index finalization failed; retry import after checking file permissions and free space".into()),
+    );
 }
 
 fn normalize_export_params(params: &mut Value) {
@@ -614,5 +875,79 @@ mod tests {
         session.last_export = Some(json!({"dir": "/previous"}));
         assert_eq!(export_directory(&session, &json!({})).expect("previous export folder"), "/previous");
         assert_eq!(export_directory(&session, &json!({"dir": "  "})).expect_err("blank export destination must be rejected"), expected);
+    }
+
+    #[test]
+    fn lightroom_inspection_report_counts_virtual_copies_and_preserves_schema() {
+        let data = lightcraft_engine::lightroom_catalog::CatalogImport {
+            source: "catalog.lrcat".into(),
+            photos: vec![
+                lightcraft_engine::lightroom_catalog::CatalogPhoto {
+                    source_id: 1,
+                    uuid: "master".into(),
+                    path: "/missing/master.raw".into(),
+                    image: serde_json::from_value(json!({"id_local": 1})).unwrap_or_default(),
+                    settings: String::new(),
+                    xmp: String::new(),
+                    keywords: Vec::new(),
+                    history: Vec::new(),
+                    snapshots: Vec::new(),
+                },
+                lightcraft_engine::lightroom_catalog::CatalogPhoto {
+                    source_id: 2,
+                    uuid: "copy".into(),
+                    path: "/missing/master.raw".into(),
+                    image: serde_json::from_value(json!({"id_local": 2, "masterImage": 1})).unwrap_or_default(),
+                    settings: String::new(),
+                    xmp: String::new(),
+                    keywords: Vec::new(),
+                    history: Vec::new(),
+                    snapshots: Vec::new(),
+                },
+            ],
+            collections: vec![
+                serde_json::from_value(json!({"name": "Visible"})).unwrap_or_default(),
+                serde_json::from_value(json!({"systemOnly": 1})).unwrap_or_default(),
+            ],
+            members: Vec::new(),
+            collection_content: Vec::new(),
+            warnings: vec!["metadata warning".into()],
+        };
+        let report = lightroom_inspection_report(&data);
+        assert_eq!(report["source"], "catalog.lrcat");
+        assert_eq!(report["photos"], 2);
+        assert_eq!(report["collections"], 1);
+        assert_eq!(report["virtualCopies"], 1);
+        assert_eq!(report["missing"].as_array().map(Vec::len), Some(2));
+        assert_eq!(report["warnings"][0], "metadata warning");
+    }
+
+    #[test]
+    fn lightroom_archive_failure_keeps_committed_report_and_actionable_warning() {
+        let mut tasks = Tasks::new();
+        tasks.jobs.insert(
+            "lightroomImport-1".into(),
+            Task {
+                id: "lightroomImport-1".into(),
+                kind: "lightroomImport".into(),
+                label: "Import Lightroom Catalog".into(),
+                total: Arc::new(AtomicUsize::new(1)),
+                completed: Arc::new(AtomicUsize::new(0)),
+                cancel: Arc::new(AtomicBool::new(false)),
+                worker: None,
+            },
+        );
+        tasks.finish_lightroom(
+            "lightroomImport-1".into(),
+            json!({"source": "catalog.lrcat", "photos": 2, "warnings": []}),
+            Err("permission denied".into()),
+            Some("/library/Interop/lightroom-index.json".into()),
+            None,
+        );
+        let completed = tasks.completed_jobs();
+        assert_eq!(completed[0].state, "done");
+        assert_eq!(completed[0].result.as_ref().and_then(|value| value.get("photos")).and_then(Value::as_u64), Some(2));
+        assert!(completed[0].result.as_ref().is_some_and(|value| value.get("indexWarning").is_some()));
+        assert!(completed[0].error.as_deref().is_some_and(|error| error.contains("permission denied")));
     }
 }

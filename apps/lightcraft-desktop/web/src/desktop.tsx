@@ -406,9 +406,11 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
         if (id === 'file.importLightroom') {
           const path = firstPath(params.path) || firstPath(await nativeAction('pickLightroomCatalog', params));
           if (!path) return null;
-          const report = await runCommand('library.inspectLightroom', { path });
-          setDialog({ kind: 'lightroom', params: { path, report } });
-          return report;
+          const task = await runCommand('library.inspectLightroom', { path }) as JsonObject;
+          const taskId = typeof task.taskId === 'string' ? task.taskId : '';
+          if (!taskId) throw new Error('Lightroom inspection did not return a task ID.');
+          setDialog({ kind: 'lightroomInspectProgress', params: { taskId, path } });
+          return task;
         }
         if (id === 'file.findMissing') {
           const folder = firstPath(params.folder) || firstPath(await nativeAction('chooseFolder', params));

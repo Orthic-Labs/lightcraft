@@ -107,7 +107,8 @@ function Progress({ job, label, onCancel, cancelling = false }: { job: AnyRecord
 }
 
 function JobDialog({ kind, desktop, d }: { kind: string; desktop: DesktopContextValue; d: DialogState }) {
-  const jobKind = kind.includes('import') ? 'import' : kind.includes('merge') ? 'merge' : 'export';
+  const lightroomInspect = kind.includes('lightroominspect');
+  const lightroomImport = kind.includes('lightroomimport');
   const taskId = text(d.params?.taskId);
   const [job, setJob] = useState<AnyRecord | null>(null);
   const [terminal, setTerminal] = useState<JobTerminal | null>(null);
@@ -119,7 +120,7 @@ function JobDialog({ kind, desktop, d }: { kind: string; desktop: DesktopContext
   const terminalRef = useRef<JobTerminal | null>(null);
   const cancelRequested = useRef(false);
   snapshotRef.current = desktop.snapshot;
-  const label = kind.includes('import') ? 'Import photos' : kind.includes('merge') ? 'Build merged photo' : 'Export photos';
+  const label = lightroomInspect ? 'Inspect Lightroom catalog' : lightroomImport ? 'Import Lightroom catalog' : kind.includes('import') ? 'Import photos' : kind.includes('merge') ? 'Build merged photo' : 'Export photos';
   const markTerminal = (value: JobTerminal) => { if (!terminalRef.current) { terminalRef.current = value; setTerminal(value); } };
   useEffect(() => {
     let live = true;
@@ -137,9 +138,16 @@ function JobDialog({ kind, desktop, d }: { kind: string; desktop: DesktopContext
       }
       const completed = taskId ? current?.status?.completedJobs?.find((candidate) => candidate.id === taskId) : undefined;
       if (completed) {
-        setCompletion(completed.result && typeof completed.result === 'object' ? completed.result as AnyRecord : null);
-        setJob({ id: completed.id, label: completed.label, completed: 1, total: 1, cancellable: false, ...(completed.error ? { error: completed.error } : {}) });
+        const result = completed.result && typeof completed.result === 'object' && !Array.isArray(completed.result) ? completed.result as AnyRecord : null;
+        const completionError = text(completed.error, text(result?.error));
+        setCompletion(result);
+        setJob({ id: completed.id, label: completed.label, completed: 1, total: 1, cancellable: false, ...(completionError ? { error: completionError } : {}) });
         markTerminal(completed.state);
+        if (completed.state === 'done' && (lightroomInspect || lightroomImport)) {
+          const terminalResult = { ...(result || {}), ...(completionError && !result?.error ? { error: completionError } : {}) };
+          if (lightroomInspect) desktop.setDialog({ kind: 'lightroom', params: { path: text(d.params?.path), report: terminalResult } });
+          else desktop.setDialog({ kind: 'lightroomResult', params: { path: text(d.params?.path), updateExisting: bool(d.params?.updateExisting), result: terminalResult } });
+        }
         return;
       }
       if (seenRef.current && current?.status?.error) setPollError(text(current.status.error));
@@ -160,9 +168,14 @@ function JobDialog({ kind, desktop, d }: { kind: string; desktop: DesktopContext
     } catch (reason) { cancelRequested.current = false; setPollError(errorText(reason)); }
     finally { setCancelling(false); }
   };
+  const retryLightroom = () => {
+    if (!lightroomInspect && !lightroomImport) return;
+    desktop.setDialog({ kind: 'lightroom', params: { path: text(d.params?.path), updateExisting: bool(d.params?.updateExisting), ...(d.params?.report ? { report: d.params.report } : {}) } });
+  };
   const successful = terminal === 'done';
   const imported = completion ? (Array.isArray(completion.imported) ? completion.imported.length : num(completion.imported)) : 0;
-  return <Frame title={kind.includes('import') ? 'Importing Photos' : kind.includes('merge') ? 'Merging Photos' : 'Exporting Photos'} dismissible={terminal !== null} onClose={() => terminal && desktop.setDialog(null)} actions={<><Button disabled={!terminal} onClick={() => desktop.setDialog(null)}>Close</Button>{kind.includes('export') && successful && <Button primary onClick={() => void reveal()}>Show in Folder</Button>}</>}><Progress job={job} label={label} onCancel={terminal ? undefined : () => void cancel()} cancelling={cancelling} />{pollError && <Note tone="error">{pollError}</Note>}{terminal === 'done' && <Note>Operation complete. Changes are recorded in library history.{imported > 0 ? ` ${imported} photos imported.` : ''}</Note>}{terminal === 'cancelled' && <Note tone="warning">Operation cancelled.</Note>}{terminal === 'failed' && <Note tone="error">{text(job?.error, 'Operation failed.')}</Note>}</Frame>;
+  const title = lightroomInspect ? 'Inspecting Lightroom Catalog' : lightroomImport ? 'Importing Lightroom Catalog' : kind.includes('import') ? 'Importing Photos' : kind.includes('merge') ? 'Merging Photos' : 'Exporting Photos';
+  return <Frame title={title} dismissible={terminal !== null} onClose={() => terminal && desktop.setDialog(null)} actions={<>{terminal === 'failed' && (lightroomInspect || lightroomImport) && <Button primary onClick={retryLightroom}>Retry</Button>}<Button disabled={!terminal} onClick={() => desktop.setDialog(null)}>Close</Button>{kind.includes('export') && successful && <Button primary onClick={() => void reveal()}>Show in Folder</Button>}</>}><Progress job={job} label={label} onCancel={terminal ? undefined : () => void cancel()} cancelling={cancelling} />{pollError && <Note tone="error">{pollError}</Note>}{terminal === 'done' && <Note>Operation complete. Changes are recorded in library history.{imported > 0 ? ` ${imported} photos imported.` : ''}</Note>}{terminal === 'cancelled' && <Note tone="warning">Operation cancelled.</Note>}{terminal === 'failed' && <Note tone="error">{text(job?.error, 'Operation failed.')}</Note>}</Frame>;
 }
 
 function UnsavedQuitDialog({ desktop, d }: { desktop: DesktopContextValue; d: DialogState }) {
@@ -229,9 +242,10 @@ function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
 function folderTemplateError(template: string): string | null { const value = template.trim(); if (!value) return 'Enter a folder template.'; if (value.startsWith('/') || value.startsWith('\\') || value.startsWith('~') || /^[A-Za-z]:/.test(value)) return 'Folder template must stay inside destination folder.'; if (value.split(/[\\/]/).some((part) => part.trim() === '.' || part.trim() === '..')) return 'Folder template cannot contain . or .. folders.'; return null; }
 
 function LightroomDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextValue }) {
-  const [path, setPath] = useState(text(d.params?.path)); const [report, setReport] = useState<AnyRecord | null>((d.params?.report as AnyRecord) || null); const [updateExisting, setUpdateExisting] = useState(bool(d.params?.updateExisting)); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
-  const inspect = async (chosen?: string) => { const catalog = chosen || path; if (!catalog) return; setPath(catalog); setBusy(true); setError(''); try { setReport(await desktop.run('library.inspectLightroom', { path: catalog }) as AnyRecord); } catch (e) { setError(String(e)); } finally { setBusy(false); } };
-  const importCatalog = async () => { if (!path) return; setBusy(true); setError(''); try { const result = await desktop.run('library.importLightroom', { path, updateExisting }); desktop.setDialog({ kind: 'lightroomResult', params: { path, updateExisting, result: (result as AnyRecord) || {} } }); } catch (e) { setError(String(e)); } finally { setBusy(false); } };
+  const [path, setCatalogPath] = useState(text(d.params?.path)); const [report, setReport] = useState<AnyRecord | null>((d.params?.report as AnyRecord) || null); const [updateExisting, setUpdateExisting] = useState(bool(d.params?.updateExisting)); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  const setPath = (value: string) => { setCatalogPath(value); setReport(null); setError(''); };
+  const inspect = async (chosen?: string) => { const catalog = chosen || path; if (!catalog) return; setPath(catalog); setReport(null); setBusy(true); setError(''); try { const task = await desktop.run('library.inspectLightroom', { path: catalog }) as AnyRecord; const taskId = text(task.taskId); if (!taskId) throw new Error('Lightroom inspection did not return a task ID.'); desktop.setDialog({ kind: 'lightroomInspectProgress', params: { taskId, path: catalog } }); } catch (e) { setError(String(e)); setBusy(false); } };
+  const importCatalog = async () => { if (!path) return; setBusy(true); setError(''); try { const task = await desktop.run('library.importLightroom', { path, updateExisting }) as AnyRecord; const taskId = text(task.taskId); if (!taskId) throw new Error('Lightroom import did not return a task ID.'); desktop.setDialog({ kind: 'lightroomImportProgress', params: { taskId, path, updateExisting, report: report || undefined } }); } catch (e) { setError(String(e)); setBusy(false); } };
   return <Frame title="Import Lightroom Catalog" wide busy={busy} onClose={() => desktop.setDialog(null)} actions={<><Button onClick={() => desktop.setDialog(null)}>Cancel</Button><Button primary disabled={!report || busy} onClick={() => void importCatalog()}>Import Catalog</Button></>}><div className="lc-dialog-toolbar"><Button onClick={async () => { const paths = await choose(desktop.native, 'pickLightroomCatalog'); if (paths[0]) void inspect(paths[0]); }}>Choose .lrcat…</Button></div><Field label="Catalog" value={path} onChange={setPath} placeholder="Select a Lightroom .lrcat catalog" />{error && <Note tone="error">{error}</Note>}{report ? <><div className="lc-summary-grid"><div><strong>{num(report.photos)}</strong><span>Photos</span></div><div><strong>{num(report.collections)}</strong><span>Collections</span></div><div><strong>{arr(report.missing).length}</strong><span>Missing originals</span></div><div><strong>{arr(report.warnings).length}</strong><span>Warnings</span></div></div><Check checked={updateExisting} onChange={setUpdateExisting}>Update existing edits when source catalog has changes</Check>{arr(report.missing).length > 0 && <Note tone="warning">Missing originals stay in catalog for later relinking.</Note>}{arr(report.warnings).length > 0 && <details className="lc-details"><summary>Review warnings</summary><ul>{arr(report.warnings).map((warning, i) => <li key={i}>{displayValue(warning)}</li>)}</ul></details>}</> : <Note>LightCraft reads catalog data without changing source catalog. Inspect first to review missing originals & warnings.</Note>}</Frame>;
 }
 
@@ -637,9 +651,9 @@ function LocalRootDialog({ desktop }: { desktop: DesktopContextValue }) { const 
 function LightroomResult({ d, desktop }: { d: DialogState; desktop: DesktopContextValue }) {
   const [result, setResult] = useState<AnyRecord>((d.params?.result as AnyRecord) || {});
   const [busy, setBusy] = useState(false); const [error, setError] = useState('');
-  const catalog = text(d.params?.path); const missing = arr(result.missing); const failed = arr(result.failed); const warnings = arr(result.warnings); const unmapped = result.unmapped && typeof result.unmapped === 'object' ? Object.entries(result.unmapped as AnyRecord) : [];
+  const catalog = text(d.params?.path); const missing = arr(result.missing); const failed = arr(result.failed); const warnings = arr(result.warnings); const unmapped = result.unmapped && typeof result.unmapped === 'object' ? Object.entries(result.unmapped as AnyRecord) : []; const indexWarning = displayValue(result.indexWarning); const indexError = displayValue(result.error);
   const run = async (operation: () => Promise<unknown>, close = false, updateResult = false) => { setBusy(true); setError(''); try { const value = await operation(); if (close) desktop.setDialog(null); else if (updateResult && value && typeof value === 'object') setResult(value as AnyRecord); } catch (reason) { setError(errorText(reason)); } finally { setBusy(false); } };
-  const reimport = () => catalog ? run(async () => desktop.run('library.importLightroom', { path: catalog, updateExisting: bool(d.params?.updateExisting) }), false, true) : setError('Original catalog path is unavailable.');
+  const reimport = async () => { if (!catalog) { setError('Original catalog path is unavailable.'); return; } setBusy(true); setError(''); try { const task = await desktop.run('library.importLightroom', { path: catalog, updateExisting: bool(d.params?.updateExisting) }) as AnyRecord; const taskId = text(task.taskId); if (!taskId) throw new Error('Lightroom import did not return a task ID.'); desktop.setDialog({ kind: 'lightroomImportProgress', params: { taskId, path: catalog, updateExisting: bool(d.params?.updateExisting), report: result } }); } catch (reason) { setError(errorText(reason)); setBusy(false); } };
   const undo = () => run(() => desktop.run('edit.undo'), true);
   const reveal = () => { const archive = text(result.archive); return archive ? run(() => desktop.native('reveal', { path: archive })) : setError('No recovery archive was created for this library.'); };
   const imported = Array.isArray(result.imported) ? result.imported.length : num(result.imported); const photos = num(result.photos, imported); const archive = text(result.archive);
@@ -647,6 +661,8 @@ function LightroomResult({ d, desktop }: { d: DialogState; desktop: DesktopConte
     <div className="lc-summary-grid"><div><strong>{photos}</strong><span>Photos in catalog</span></div><div><strong>{imported}</strong><span>Files imported</span></div><div><strong>{num(result.collections)}</strong><span>Collections</span></div><div><strong>{missing.length}</strong><span>Missing originals</span></div><div><strong>{num(result.preservedExistingEdits)}</strong><span>Edits preserved</span></div></div>
     {error && <Note tone="error">{error}</Note>}
     <Note>Source catalog stayed read-only. LightCraft saved import identity & recovery data for this catalog.</Note>
+    {result.indexWarning != null && <Note tone="warning">Recovery index warning: {indexWarning}</Note>}
+    {result.error != null && <Note tone="warning">Recovery index error: {indexError}</Note>}
     {archive ? <div className="lc-dialog-toolbar"><span className="lc-path">Recovery archive: {archive}</span><Button disabled={busy} onClick={() => void reveal()}>Show Recovery Archive</Button></div> : <Note>No recovery archive was created for this library.</Note>}
     {missing.length > 0 && <details className="lc-details" open><summary>Missing originals ({missing.length})</summary><ul>{missing.map((path, i) => <li key={i}>{displayValue(path)}</li>)}</ul></details>}
     {warnings.length > 0 && <details className="lc-details"><summary>Warnings ({warnings.length})</summary><ul>{warnings.map((warning, i) => <li key={i}>{displayValue(warning)}</li>)}</ul></details>}

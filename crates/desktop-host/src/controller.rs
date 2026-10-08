@@ -170,6 +170,8 @@ impl Controller {
                 self.tasks.start_export(&mut self.session, &previous)
             }
             "library.import" => self.tasks.start_import(&mut self.session, params),
+            "library.importLightroom" => self.tasks.start_lightroom_import(&mut self.session, params),
+            "library.inspectLightroom" => self.tasks.start_lightroom_inspection(&mut self.session, params),
             "merge.hdr" | "merge.panorama" | "merge.hdrPanorama" => {
                 if params.get("preview").and_then(Value::as_bool).unwrap_or(false) {
                     self.session.execute(id, params).map_err(|error| error.to_string())
@@ -783,7 +785,7 @@ mod tests {
     }
 
     #[test]
-    fn equal_revision_catalog_switch_gets_fresh_generation() {
+    fn catalog_switch_gets_fresh_generation_and_revision() {
         let old = temp_library("same-old");
         let next = temp_library("same-next");
         let model_dir = temp_library("sam3-model");
@@ -808,6 +810,10 @@ mod tests {
         let Ok(before) = before_result else { return };
         let Some(before_generation) = before.get("viewGeneration").and_then(Value::as_u64) else { return };
         let before_revision = before.get("revision").and_then(Value::as_u64);
+        let repeated_before_result = controller.snapshot();
+        assert!(repeated_before_result.is_ok());
+        let Ok(repeated_before) = repeated_before_result else { return };
+        assert_eq!(repeated_before.get("revision").and_then(Value::as_u64), before_revision);
         let before_slice_result = controller.slice(Some(before_generation), 0, 1);
         assert!(before_slice_result.is_ok());
         let Ok(before_slice) = before_slice_result else { return };
@@ -823,7 +829,9 @@ mod tests {
         let after_result = controller.snapshot();
         assert!(after_result.is_ok());
         let Ok(after) = after_result else { return };
-        assert_eq!(after.get("revision").and_then(Value::as_u64), before_revision);
+        // Loaded libraries receive a process-unique revision range. Equal revisions are only
+        // stable while the same library remains open; switching libraries must invalidate caches.
+        assert_ne!(after.get("revision").and_then(Value::as_u64), before_revision);
         assert_ne!(after.get("viewGeneration").and_then(Value::as_u64), Some(before_generation));
         let Some(after_generation) = after.get("viewGeneration").and_then(Value::as_u64) else { return };
         let after_slice_result = controller.slice(Some(after_generation), 0, 1);
