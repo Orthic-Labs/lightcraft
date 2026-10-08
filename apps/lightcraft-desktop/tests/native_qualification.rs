@@ -80,7 +80,19 @@ fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, catal
     };
     let control = launch(&spec, &ws, scenario.tracker()).expect("hidden native app must expose rightkit-control");
     // Control becomes available before React mounts its command subscriptions.
-    wait_for_dom(&control, "return document.querySelector('.lc-content') !== null;");
+    let ready = catch_unwind(AssertUnwindSafe(|| {
+        wait_for_dom(&control, "return document.querySelector('.lc-content') !== null;");
+    }));
+    if let Err(payload) = ready {
+        let dom = control.eval("return {url: location.href, readyState: document.readyState, title: document.title, body: document.body?.innerText, root: document.getElementById('root')?.innerHTML, width: innerWidth, height: innerHeight};");
+        if let Ok(value) = dom {
+            if let Ok(bytes) = serde_json::to_vec_pretty(&value) {
+                let _ = fs::write(scenario.dir().join("startup-dom.json"), bytes);
+            }
+        }
+        let _ = control.screenshot_to(&scenario.dir().join("startup-native.png"));
+        resume_unwind(payload);
+    }
     let focused = control
         .eval("document.activeElement?.blur(); document.body.tabIndex = -1; document.body.focus(); return document.activeElement === document.body;")
         .expect("native shortcut target must focus after renderer readiness");
