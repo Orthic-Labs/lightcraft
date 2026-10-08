@@ -231,6 +231,17 @@ mod tests {
     }
 
     #[test]
+    fn repeated_stem_matches_capture_time_before_path_order() {
+        let files = [
+            p("/shots/IMG_001.CR3", MediaKind::Raw, Some("first")),
+            p("/shots/IMG_001.DNG", MediaKind::Raw, Some("second")),
+            p("/shots/IMG_001.JPG", MediaKind::Image, Some("second")),
+            p("/shots/IMG_001.jpeg", MediaKind::Image, Some("first")),
+        ];
+        assert_eq!(classify(&files), [PairMatch { raw: 0, jpeg: 3, relation: "sameFolder" }, PairMatch { raw: 1, jpeg: 2, relation: "sameFolder" },]);
+    }
+
+    #[test]
     fn multiple_jpeg_variants_pair_with_same_raw() {
         let files = [
             p("/shots/IMG_001.CR3", MediaKind::Raw, Some("t")),

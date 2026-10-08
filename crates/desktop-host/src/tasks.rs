@@ -6,7 +6,7 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use serde_json::{Value, json};
 
 use lightcraft_catalog::PhotoId;
-use lightcraft_engine::import::{ImportJob, ImportOptions, Prepared, ScanInput, ScanOutput, ScanProgress};
+use lightcraft_engine::import::{ImportJob, ImportOptions, Prepared, RawJpegImportPolicy, ScanInput, ScanOutput, ScanProgress};
 use lightcraft_engine::merge::{MergeJob, MergeOutput};
 use lightcraft_engine::{Selection, Session};
 
@@ -314,11 +314,18 @@ impl Tasks {
 
         let scan_options =
             lightcraft_engine::cmd::library::import_scan_options(params, "library.importPreview").map_err(|error| error.to_string())?;
+        let raw_jpeg_policy = match params.get("rawJpegPolicy").and_then(Value::as_str) {
+            Some(value) => {
+                RawJpegImportPolicy::parse(value).ok_or_else(|| "library.importPreview: unknown rawJpegPolicy (keepBoth|rawOnly)".to_string())?
+            }
+            None => RawJpegImportPolicy::default(),
+        };
 
         // ScanInput::new drains the review cache into its detached snapshot. Restore the owner
         // cache immediately; a review must leave owner state unchanged until it completes.
         let restore_probes = session.import_probes.clone();
-        let (input, paths) = ScanInput::new_with_options(session, &paths, scan_options);
+        let (mut input, paths) = ScanInput::new_with_options(session, &paths, scan_options);
+        input.raw_jpeg_policy = raw_jpeg_policy;
         session.import_probes = restore_probes.clone();
         let progress = Arc::new(ScanProgress::default());
         let total = Arc::new(AtomicUsize::new(0));
