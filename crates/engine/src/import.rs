@@ -36,6 +36,35 @@ pub const EXTENSIONS: &[&str] = &[
     "gif", "bmp", "heic", "avif",
 ];
 
+/// File-system choices used by import review. Empty extension lists retain all supported formats.
+/// Explicit file paths are always retained; options only filter files discovered in folders.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ImportScanOptions {
+    pub include_subfolders: bool,
+    pub allowed_extensions: Vec<String>,
+    pub excluded_extensions: Vec<String>,
+}
+
+impl Default for ImportScanOptions {
+    fn default() -> Self {
+        Self { include_subfolders: true, allowed_extensions: Vec::new(), excluded_extensions: Vec::new() }
+    }
+}
+
+impl ImportScanOptions {
+    fn allows_extension(&self, path: &Path) -> bool {
+        let extension = path.extension().map(|value| value.to_string_lossy().to_ascii_lowercase());
+        let matches = |values: &[String]| {
+            extension.as_deref().is_some_and(|ext| values.iter().any(|value| value.trim().trim_start_matches('.').eq_ignore_ascii_case(ext)))
+        };
+        if matches(&self.excluded_extensions) {
+            return false;
+        }
+        self.allowed_extensions.is_empty() || matches(&self.allowed_extensions)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ImportMode {
     /// Reference the files where they are.
@@ -74,6 +103,8 @@ impl OnDeleted {
 /// What an import does besides adding the photos.
 #[derive(Clone, Debug, Default)]
 pub struct ImportOptions {
+    /// Folder expansion choices shared by import review & direct imports.
+    pub scan: ImportScanOptions,
     /// A file that is in Recently Deleted: skip (default), restore, or import afresh.
     pub on_deleted: OnDeleted,
     pub mode: ImportMode,
@@ -319,26 +350,35 @@ pub fn is_supported(path: &Path) -> bool {
 /// Expand files and folders (recursively) into supported files. `skip` (e.g. the library folder)
 /// is never descended into.
 pub fn expand(paths: &[String], skip: Option<&Path>) -> Vec<String> {
-    fn walk(p: &Path, skip: Option<&Path>, out: &mut Vec<String>, top: bool) {
+    expand_with_options(paths, skip, &ImportScanOptions::default())
+}
+
+/// Expand using import review options. Directory children are filtered before probing; explicitly
+/// named files remain candidates even when extension filters would exclude them.
+pub fn expand_with_options(paths: &[String], skip: Option<&Path>, options: &ImportScanOptions) -> Vec<String> {
+    fn walk(p: &Path, skip: Option<&Path>, out: &mut Vec<String>, top: bool, options: &ImportScanOptions) {
         let hidden = p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'));
         if (hidden && !top) || skip.is_some_and(|s| p == s) {
             return;
         }
         if p.is_dir() {
+            if !top && !options.include_subfolders {
+                return;
+            }
             let Ok(rd) = std::fs::read_dir(p) else { return };
             let mut v: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
             v.sort();
             for c in v {
-                walk(&c, skip, out, false);
+                walk(&c, skip, out, false, options);
             }
-        } else if top || is_supported(p) {
+        } else if top || (is_supported(p) && options.allows_extension(p)) {
             // explicitly named files are attempted even with an unknown extension (sniffed)
             out.push(p.to_string_lossy().to_string());
         }
     }
     let mut out = Vec::new();
     for p in paths {
-        walk(Path::new(p), skip, &mut out, true);
+        walk(Path::new(p), skip, &mut out, true, options);
     }
     let mut seen = std::collections::HashSet::new();
     out.retain(|p| seen.insert(p.clone()));
@@ -427,6 +467,7 @@ pub struct ScanInput {
     by_path: HashMap<PathBuf, (PhotoId, ImportCandidate)>,
     by_hash: HashMap<String, PhotoId>,
     cache: HashMap<String, ProbeInfo>,
+    pub scan_options: ImportScanOptions,
 }
 
 /// Progress and cancellation of a running [`scan_with`].
@@ -446,6 +487,10 @@ pub struct ScanOutput {
 
 impl ScanInput {
     pub fn new(s: &mut Session, paths: &[String]) -> (Self, Vec<String>) {
+        Self::new_with_options(s, paths, ImportScanOptions::default())
+    }
+
+    pub fn new_with_options(s: &mut Session, paths: &[String], scan_options: ImportScanOptions) -> (Self, Vec<String>) {
         let skip = s.library.as_ref().filter(|l| l.on_disk).map(|l| l.dir.clone());
         let mut by_path = HashMap::new();
         let mut by_hash = HashMap::new();
@@ -469,7 +514,8 @@ impl ScanInput {
                 by_hash.insert(h.clone(), p.id);
             }
         }
-        let input = ScanInput { probe: s.media.file_probe.clone(), skip, by_path, by_hash, cache: std::mem::take(&mut s.import_probes) };
+        let input =
+            ScanInput { probe: s.media.file_probe.clone(), skip, by_path, by_hash, cache: std::mem::take(&mut s.import_probes), scan_options };
         (input, paths.to_vec())
     }
 }
@@ -488,7 +534,7 @@ pub fn scan(s: &mut Session, paths: &[String]) -> Vec<ImportCandidate> {
 /// has) when `progress.cancel` is set.
 pub fn scan_with(mut input: ScanInput, paths: &[String], progress: &ScanProgress) -> ScanOutput {
     use std::sync::atomic::Ordering::Relaxed;
-    let files = expand(paths, input.skip.as_deref());
+    let files = expand_with_options(paths, input.skip.as_deref(), &input.scan_options);
     let todo: Vec<String> = files.iter().filter(|f| !input.by_path.contains_key(Path::new(f))).cloned().collect();
     progress.total.store(todo.len(), Relaxed);
     // probes from a preceding `scan` are reused when the file is unchanged (same size)
@@ -753,7 +799,7 @@ impl ImportJob {
     /// Expand `paths` (folders recursively, the library's own folder skipped) into the files an
     /// import would handle; counted in [`ImportJob::total`].
     pub fn expand(&self, paths: &[String]) -> Vec<String> {
-        let files = expand(paths, self.lib_dir.as_deref());
+        let files = expand_with_options(paths, self.lib_dir.as_deref(), &self.opts.scan);
         self.total.fetch_add(files.len(), std::sync::atomic::Ordering::Relaxed);
         files
     }
@@ -1163,5 +1209,31 @@ mod prepared_tests {
         prepared.revalidate_add(&s);
         assert!(matches!(prepared.items.first(), Some(PreparedItem::Duplicate { reason: "path", .. })));
         assert!(matches!(prepared.items.get(1), Some(PreparedItem::Ready(_))));
+    }
+
+    #[test]
+    fn scan_options_filter_extensions_case_insensitively_before_probe() {
+        let root = std::env::temp_dir().join(format!("lightcraft-import-filter-{}", std::process::id()));
+        let nested = root.join("nested");
+        let _ = std::fs::create_dir_all(&nested);
+        let _ = std::fs::write(root.join("raw.CR3"), b"raw");
+        let _ = std::fs::write(root.join("render.JPG"), b"jpg");
+        let _ = std::fs::write(nested.join("nested.CR3"), b"raw");
+        let options = ImportScanOptions { include_subfolders: false, allowed_extensions: vec![".cr3".into()], excluded_extensions: Vec::new() };
+        let files = expand_with_options(&[root.to_string_lossy().into()], None, &options);
+        assert_eq!(files, vec![root.join("raw.CR3").to_string_lossy().to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_options_keep_explicit_files_even_when_extension_excluded() {
+        let root = std::env::temp_dir().join(format!("lightcraft-import-explicit-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&root);
+        let explicit = root.join("photo.JPG");
+        let _ = std::fs::write(&explicit, b"jpg");
+        let options = ImportScanOptions { include_subfolders: true, allowed_extensions: vec!["cr3".into()], excluded_extensions: vec!["JPG".into()] };
+        let files = expand_with_options(&[explicit.to_string_lossy().into()], None, &options);
+        assert_eq!(files, vec![explicit.to_string_lossy().to_string()]);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

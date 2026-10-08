@@ -312,10 +312,13 @@ impl Tasks {
             paths.push(path.to_string());
         }
 
+        let scan_options =
+            lightcraft_engine::cmd::library::import_scan_options(params, "library.importPreview").map_err(|error| error.to_string())?;
+
         // ScanInput::new drains the review cache into its detached snapshot. Restore the owner
         // cache immediately; a review must leave owner state unchanged until it completes.
         let restore_probes = session.import_probes.clone();
-        let (input, paths) = ScanInput::new(session, &paths);
+        let (input, paths) = ScanInput::new_with_options(session, &paths, scan_options);
         session.import_probes = restore_probes.clone();
         let progress = Arc::new(ScanProgress::default());
         let total = Arc::new(AtomicUsize::new(0));

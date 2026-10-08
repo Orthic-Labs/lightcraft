@@ -267,11 +267,16 @@ function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
   const [preset, setPreset] = useState(text(p.preset));
   const [metadataPreset, setMetadataPreset] = useState(text(p.metadataPreset));
   const [dng, setDng] = useState(bool(p.dng));
+  const [includeSubfolders, setIncludeSubfolders] = useState(bool(p.includeSubfolders, true));
+  const extensionText = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').join(', ') : text(value);
+  const [allowedExtensions, setAllowedExtensions] = useState(extensionText(p.allowedExtensions));
+  const [excludedExtensions, setExcludedExtensions] = useState(extensionText(p.excludedExtensions));
   const [candidates, setCandidates] = useState<AnyRecord[]>(initialCandidates);
   const [checked, setChecked] = useState<boolean[]>(arr(p.checked).length ? arr(p.checked).map(Boolean) : initialCandidates.map((c) => !c.duplicate && !c.error));
   const [busy, setBusy] = useState(false);
   const [phase, setPhase] = useState<'idle' | 'choosing' | 'scanning' | 'submitting'>('idle');
   const [error, setError] = useState('');
+  const [scanPaths, setScanPaths] = useState<string[]>(initialPaths);
   const liveRef = useRef(true);
   const busyRef = useRef(false);
   const scanSequenceRef = useRef(0);
@@ -281,14 +286,16 @@ function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
     return () => { liveRef.current = false; scanSequenceRef.current += 1; };
   }, []);
 
+  const scanOptions = () => ({ includeSubfolders, allowedExtensions: allowedExtensions.split(',').map((v) => v.trim()).filter(Boolean), excludedExtensions: excludedExtensions.split(',').map((v) => v.trim()).filter(Boolean) });
   const preview = async (paths: string[], kind: string, sequence: number) => {
     if (!paths.length) return;
     setPhase('scanning');
+    setScanPaths(paths);
     setSource(paths.join(', '));
     if (kind) setSourceType(kind);
     setError('');
     try {
-      const result = (await desktop.run('library.importPreview', { paths })) as AnyRecord;
+      const result = (await desktop.run('library.importPreview', { paths, ...scanOptions() })) as AnyRecord;
       if (!liveRef.current || sequence !== scanSequenceRef.current) return;
       const taskId = text(result?.taskId);
       if (taskId) {
@@ -310,6 +317,9 @@ function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
           preset,
           metadataPreset,
           dng,
+          includeSubfolders,
+          allowedExtensions,
+          excludedExtensions,
         };
         delete params.candidates;
         delete params.checked;
@@ -371,6 +381,17 @@ function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
     }
   };
 
+  const rescan = () => {
+    if (busyRef.current || !scanPaths.length) return;
+    busyRef.current = true;
+    setBusy(true);
+    const sequence = ++scanSequenceRef.current;
+    void preview(scanPaths, sourceType, sequence).finally(() => {
+      busyRef.current = false;
+      setBusy(false);
+    });
+  };
+
   const submit = async () => {
     if (busyRef.current) return;
     const paths = candidates.filter((_, i) => checked[i]).map((c) => c.path).filter((path): path is string => typeof path === 'string' && path.length > 0);
@@ -383,7 +404,7 @@ function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
     setPhase('submitting');
     setError('');
     try {
-      const payload: AnyRecord = { ...p, paths, mode, album: album ? Number(album) : undefined, albumName: newAlbum.trim() || undefined, keywords: keywords.split(',').map((v) => v.trim()).filter(Boolean), preset: preset || undefined, metadataPreset: metadataPreset || undefined, destination: destination || undefined, organize: mode === 'add' ? undefined : organize === 'custom' ? custom : organize || undefined, rename: rename || undefined, renameStart: renameStart ? Number(renameStart) : undefined, dng: dng && mode === 'copy' };
+      const payload: AnyRecord = { ...p, paths, mode, includeSubfolders, allowedExtensions: scanOptions().allowedExtensions, excludedExtensions: scanOptions().excludedExtensions, album: album ? Number(album) : undefined, albumName: newAlbum.trim() || undefined, keywords: keywords.split(',').map((v) => v.trim()).filter(Boolean), preset: preset || undefined, metadataPreset: metadataPreset || undefined, destination: destination || undefined, organize: mode === 'add' ? undefined : organize === 'custom' ? custom : organize || undefined, rename: rename || undefined, renameStart: renameStart ? Number(renameStart) : undefined, dng: dng && mode === 'copy' };
       delete payload.candidates;
       delete payload.checked;
       delete payload.taskId;
@@ -410,7 +431,7 @@ function ImportDialog({ d, desktop }: { d: DialogState; desktop: DesktopContextV
     desktop.setDialog(null);
   };
   const sourceLabel = sourceType === 'folder' ? 'Folder' : sourceType === 'device' ? 'Camera or card' : 'Photos';
-  return <Frame title="Import Photos" wide busy={busy} onClose={close} actions={<><Button disabled={busy} onClick={close}>Cancel</Button><Button primary disabled={busy || !candidates.length} onClick={() => void submit()}>Import {candidates.filter((_, i) => checked[i]).length || ''} Photos</Button></>}><div className="lc-dialog-toolbar"><Button disabled={busy} onClick={() => void pick('files')}>Choose Photos…</Button><Button disabled={busy} onClick={() => void pick('folder')}>Choose Folder…</Button><Button disabled={busy} onClick={() => void pick('device')}>Camera or Card…</Button></div>{source && <Note>Source: {sourceLabel} — {source}</Note>}{phase === 'scanning' && <Note>Reviewing photos…</Note>}{error && <Note tone="error">{error}</Note>}<div className="lc-import-layout"><div className="lc-candidate-list"><div className="lc-section-heading"><strong>Review</strong><span>{candidates.length} found</span></div>{candidates.length ? candidates.map((c, i) => <label className={`lc-candidate ${c.duplicate || c.error ? 'lc-candidate-muted' : ''}`} key={`${c.path || c.name || i}-${i}`}><input type="checkbox" checked={checked[i] ?? false} disabled={busy || Boolean(c.duplicate || c.error)} onChange={(e) => setChecked((old) => old.map((v, n) => n === i ? e.target.checked : v))} /><span className="lc-thumb-placeholder" aria-hidden="true">{text(c.format, 'IMG').slice(0, 3).toUpperCase()}</span><span className="lc-candidate-copy"><strong>{text(c.name, text(c.path, 'Photo'))}</strong><small>{text(c.path)}{c.duplicate ? ` · Duplicate (${c.duplicate})` : c.error ? ` · ${c.error}` : ''}</small></span></label>) : <Note>Choose photos or a folder to review files before adding them.</Note>}</div><div className="lc-form-stack"><Select label="Add photos" value={mode} options={[["add", 'In place'], ['copy', 'Copy into library'], ['move', 'Move into library']]} onChange={setMode} disabled={busy} /><Field label="Existing album ID" value={album} onChange={setAlbum} placeholder="Optional" disabled={busy} /><Field label="New album" value={newAlbum} onChange={setNewAlbum} placeholder="Optional" disabled={busy} /><Field label="Keywords" value={keywords} onChange={setKeywords} placeholder="Comma-separated" disabled={busy} />{mode !== 'add' && <><Field label="Destination folder" value={destination} onChange={setDestination} placeholder="Library Originals by default" disabled={busy} /><Select label="Organize copies" value={organize} options={[["date", 'By capture date'], ['month', 'By month'], ['flat', 'One folder'], ['custom', 'Custom template']]} onChange={setOrganize} disabled={busy} />{organize === 'custom' && <><Field label="Folder template" value={folderTemplate} onChange={setFolderTemplate} placeholder="{date:%Y}/{date:%Y%m%d}" disabled={busy} /><Note>Use relative folders & photo tags such as {`{date:%Y}`}; no drive or parent folders.</Note></>}<Field label="File naming" value={rename} onChange={setRename} placeholder="Keep original names" disabled={busy} /><Check checked={dng} onChange={setDng} disabled={busy || mode !== 'copy'}>Copy raw files as DNG</Check></>}<Field label="Develop preset ID" value={preset} onChange={setPreset} placeholder="Optional" disabled={busy} /><Field label="Metadata preset" value={metadataPreset} onChange={setMetadataPreset} placeholder="Optional" disabled={busy} /></div></div></Frame>;
+  return <Frame title="Import Photos" wide busy={busy} onClose={close} actions={<><Button disabled={busy} onClick={close}>Cancel</Button><Button primary disabled={busy || !candidates.length} onClick={() => void submit()}>Import {candidates.filter((_, i) => checked[i]).length || ''} Photos</Button></>}><div className="lc-dialog-toolbar"><Button disabled={busy} onClick={() => void pick('files')}>Choose Photos…</Button><Button disabled={busy} onClick={() => void pick('folder')}>Choose Folder…</Button><Button disabled={busy} onClick={() => void pick('device')}>Camera or Card…</Button><Button disabled={busy || !scanPaths.length} onClick={rescan}>Rescan</Button></div>{source && <Note>Source: {sourceLabel} — {source}</Note>}{phase === 'scanning' && <Note>Reviewing photos…</Note>}{error && <Note tone="error">{error}</Note>}<div className="lc-import-layout"><div className="lc-candidate-list"><div className="lc-section-heading"><strong>Review</strong><span>{candidates.length} found</span></div>{candidates.length ? candidates.map((c, i) => <label className={`lc-candidate ${c.duplicate || c.error ? 'lc-candidate-muted' : ''}`} key={`${c.path || c.name || i}-${i}`}><input type="checkbox" checked={checked[i] ?? false} disabled={busy || Boolean(c.duplicate || c.error)} onChange={(e) => setChecked((old) => old.map((v, n) => n === i ? e.target.checked : v))} /><span className="lc-thumb-placeholder" aria-hidden="true">{text(c.format, 'IMG').slice(0, 3).toUpperCase()}</span><span className="lc-candidate-copy"><strong>{text(c.name, text(c.path, 'Photo'))}</strong><small>{text(c.path)}{c.duplicate ? ` · Duplicate (${c.duplicate})` : c.error ? ` · ${c.error}` : ''}</small></span></label>) : <Note>Choose photos or a folder to review files before adding them.</Note>}</div><div className="lc-form-stack"><Check checked={includeSubfolders} onChange={setIncludeSubfolders} disabled={busy}>Include subfolders</Check><Field label="Only extensions" value={allowedExtensions} onChange={setAllowedExtensions} placeholder="raw, dng (optional)" disabled={busy} /><Field label="Exclude extensions" value={excludedExtensions} onChange={setExcludedExtensions} placeholder="jpg, jpeg (optional)" disabled={busy} /><Select label="Add photos" value={mode} options={[["add", 'In place'], ['copy', 'Copy into library'], ['move', 'Move into library']]} onChange={setMode} disabled={busy} /><Field label="Existing album ID" value={album} onChange={setAlbum} placeholder="Optional" disabled={busy} /><Field label="New album" value={newAlbum} onChange={setNewAlbum} placeholder="Optional" disabled={busy} /><Field label="Keywords" value={keywords} onChange={setKeywords} placeholder="Comma-separated" disabled={busy} />{mode !== 'add' && <><Field label="Destination folder" value={destination} onChange={setDestination} placeholder="Library Originals by default" disabled={busy} /><Select label="Organize copies" value={organize} options={[["date", 'By capture date'], ['month', 'By month'], ['flat', 'One folder'], ['custom', 'Custom template']]} onChange={setOrganize} disabled={busy} />{organize === 'custom' && <><Field label="Folder template" value={folderTemplate} onChange={setFolderTemplate} placeholder="{date:%Y}/{date:%Y%m%d}" disabled={busy} /><Note>Use relative folders & photo tags such as {`{date:%Y}`}; no drive or parent folders.</Note></>}<Field label="File naming" value={rename} onChange={setRename} placeholder="Keep original names" disabled={busy} /><Check checked={dng} onChange={setDng} disabled={busy || mode !== 'copy'}>Copy raw files as DNG</Check></>}<Field label="Develop preset ID" value={preset} onChange={setPreset} placeholder="Optional" disabled={busy} /><Field label="Metadata preset" value={metadataPreset} onChange={setMetadataPreset} placeholder="Optional" disabled={busy} /></div></div></Frame>;
 }
 
 function folderTemplateError(template: string): string | null { const value = template.trim(); if (!value) return 'Enter a folder template.'; if (!value.includes('{') && !value.includes('/') && !value.includes('\\')) return 'Folder template must contain {, / or \\.'; if (value.startsWith('/') || value.startsWith('\\') || value.startsWith('~') || /^[A-Za-z]:/.test(value)) return 'Folder template must stay inside destination folder.'; if (value.split(/[\\/]/).some((part) => part.trim() === '.' || part.trim() === '..')) return 'Folder template cannot contain . or .. folders.'; return null; }

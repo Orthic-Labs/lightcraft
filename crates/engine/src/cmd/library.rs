@@ -29,6 +29,24 @@ pub struct ImportRequest {
     pub album_name: Option<String>,
 }
 
+pub fn import_scan_options(p: &Value, command: &str) -> Result<crate::import::ImportScanOptions> {
+    if let Some(value) = p.get("includeSubfolders")
+        && !value.is_boolean()
+    {
+        return Err(bad(command, "`includeSubfolders` must be a boolean"));
+    }
+    let extensions = |key: &str| -> Result<Vec<String>> {
+        let Some(value) = p.get(key) else { return Ok(Vec::new()) };
+        let Some(values) = value.as_array() else { return Err(bad(command, format!("`{key}` must be an array of extensions"))) };
+        values.iter().map(|value| value.as_str().map(str::to_string).ok_or_else(|| bad(command, format!("`{key}` must contain strings")))).collect()
+    };
+    Ok(crate::import::ImportScanOptions {
+        include_subfolders: bool_or(p, "includeSubfolders", true),
+        allowed_extensions: extensions("allowedExtensions")?,
+        excluded_extensions: extensions("excludedExtensions")?,
+    })
+}
+
 /// Parse and check `library.import`'s params (the app's import task runs the import itself, on a
 /// worker thread, with the same options).
 pub fn import_params(s: &Session, p: &Value) -> Result<ImportRequest> {
@@ -73,6 +91,7 @@ pub fn import_params(s: &Session, p: &Value) -> Result<ImportRequest> {
         None => Default::default(),
     };
     let opts = crate::import::ImportOptions {
+        scan: import_scan_options(p, "library.import")?,
         on_deleted,
         mode,
         preset,
@@ -1086,14 +1105,18 @@ pub fn specs() -> Vec<CommandSpec> {
             "Review Import",
             [],
             None,
-            "{paths: [file or folder (recursive)]} → {candidates: [{path, name, format, kind, width, height, fileSize, captured, duplicate?: path|content, existing?, error?, previewOnly?: why a raw can only be shown from its embedded preview}], duplicates, scanned} — nothing is added",
+            "{paths: [file or folder (recursive)], includeSubfolders?: bool (default true), allowedExtensions?: [extensions], excludedExtensions?: [extensions]} → {candidates: [{path, name, format, kind, width, height, fileSize, captured, duplicate?: path|content, existing?, error?, previewOnly?: why a raw can only be shown from its embedded preview}], duplicates, scanned} — nothing is added",
             always,
             |s, p| {
                 let paths = strs(p, "paths");
                 if paths.is_empty() {
                     return Err(bad("library.importPreview", "no paths"));
                 }
-                let c = crate::import::scan(s, &paths);
+                let options = import_scan_options(p, "library.importPreview")?;
+                let (input, paths) = crate::import::ScanInput::new_with_options(s, &paths, options);
+                let output = crate::import::scan_with(input, &paths, &crate::import::ScanProgress::default());
+                s.import_probes = output.probes;
+                let c = output.candidates;
                 let dups = c.iter().filter(|c| c.duplicate.is_some()).count();
                 Ok(json!({"scanned": c.len(), "duplicates": dups, "candidates": c}))
             }
