@@ -6,8 +6,9 @@ use std::fs;
 use std::io::Cursor;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rightkit_qa::control::{LaunchSpec, Mode, launch};
 use rightkit_qa::harness::Harness;
@@ -42,7 +43,10 @@ fn qa_harness(binary: &Path, evidence: &Path, revision: &str, platform: &str, ar
 
 fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, _catalog: &Path) -> (rightkit_qa::control::Control, PathBuf) {
     let cache = scenario.dir().join("control-workspace");
-    let run_id = format!("lightcraft-{}", scenario.name());
+    static NEXT_RUN: AtomicU64 = AtomicU64::new(0);
+    let sequence = NEXT_RUN.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
+    let run_id = format!("lightcraft-{}-{}-{}-{sequence}", scenario.name(), std::process::id(), timestamp);
     let ws = workspace::create(&cache, Some(&run_id), "lightcraft").expect("isolated RightKit workspace must initialize");
     let data = ws.data_dir.clone();
     let env = ws
