@@ -38,10 +38,19 @@
       "restoredExposure": 1.25,
       "backupUnchanged": true,
       "freshCopyOpened": true,
-      "applicationRestartTested": false
+      "applicationRestartTested": true,
+      "processes": 3,
+      "reopenedExposure": 1.25,
+      "persistedMutationExposure": -1.25
     },
     "strictNativeCI": "failed:foreground identity guard & native1280x800 viewport clamp to1280x684",
-    "launchServices": "startup stalled in socket unlink/bind; direct bundled executable launch passed with isolated QA suite/data; no OS permissions changed"
+    "launchServices": "startup stalled in socket unlink/bind; direct bundled executable launch passed with isolated QA suite/data; no OS permissions changed",
+    "coexistence": {
+      "verdict": "pass",
+      "originalStoppedAfterCheck": true,
+      "previewStillRunning": true,
+      "productionSettingsUnchanged": true
+    }
   },
   "windows": {
     "nativeCI": "pass",
@@ -77,7 +86,6 @@
   "notQualified": [
     "Mac strict hidden CI",
     "Mac LaunchServices normal user launch",
-    "Mac recovery across application restart",
     "Installer rollback",
     "Production visual refresh"
   ]
