@@ -269,7 +269,8 @@ impl Tasks {
         let worker = std::thread::Builder::new()
             .name("lightcraft-lightroom-import".into())
             .spawn(move || {
-                let result = lightcraft_engine::guard::catch("Lightroom import", || job.prepare(&worker_cancel)).unwrap_or_else(Err);
+                let result = lightcraft_engine::guard::catch("Lightroom import", || job.prepare(&worker_cancel))
+                    .and_then(|result| result.map_err(|error| error.to_string()));
                 let cancelled = worker_cancel.load(Ordering::Relaxed);
                 let _ = tx.send(Event::LightroomPrepared { id: id_for_worker, result, cancelled });
             })
@@ -464,7 +465,8 @@ impl Tasks {
         let tx = self.tx.clone();
         let id_for_worker = id.clone();
         let worker = std::thread::Builder::new().name("lightcraft-lightroom-index".into()).spawn(move || {
-            let result = lightcraft_engine::guard::catch("Lightroom archive index", || completion.finalization.finish()).unwrap_or_else(Err);
+            let result = lightcraft_engine::guard::catch("Lightroom archive index", || completion.finalization.finish())
+                .and_then(|result| result.map_err(|error| error.to_string()));
             let _ = tx.send(Event::LightroomFinalized {
                 id: id_for_worker,
                 report: report_for_worker,
