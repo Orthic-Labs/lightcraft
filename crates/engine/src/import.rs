@@ -432,7 +432,7 @@ fn probe_all_with_cancel(
     };
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, MAX_IMPORT_PROBE_WORKERS).min(paths.len().max(1));
+        let n = workers(paths.len());
         if n > 1 {
             let mut results: Vec<Option<Result<ProbeInfo, String>>> = vec![None; paths.len()];
             let next = std::sync::atomic::AtomicUsize::new(0);
@@ -1092,7 +1092,6 @@ impl ImportJob {
         for f in files {
             match self.by_path.get(f.as_str()).copied() {
                 Some((id, true)) if !opts.local => {
-                    // a file that was only browsed (Local) joins the library when it is imported for real
                     self.by_path.insert(f, (id, false));
                     out.items.push(PreparedItem::Promote(id));
                     self.done.fetch_add(1, Relaxed);
@@ -1105,7 +1104,8 @@ impl ImportJob {
             }
         }
 
-        // files a preceding scan already probed are not read again (a network share is slow to read)
+        // Files a preceding scan already probed are not read again; native stamps reject stale
+        // entries before they can participate in deduplication or copying.
         let cached: Vec<Option<ProbeInfo>> = todo
             .iter()
             .map(|f| {
@@ -1125,6 +1125,9 @@ impl ImportJob {
         let probed: Vec<Result<ProbeInfo, String>> =
             cached.into_iter().map(|c| c.map(Ok).unwrap_or_else(|| fresh.next().unwrap_or_else(|| Err("not probed".into())))).collect();
         crate::memory::release();
+
+        // Sidecars are prefetched in bounded workers, indexed by source order. This keeps metadata
+        // and capture-time decisions deterministic while transfer workers run independently.
         let mut sidecar_hashes: std::collections::HashSet<String> = self.by_hash.keys().cloned().collect();
         let sidecar_eligible: Vec<bool> = probed
             .iter()
@@ -1135,40 +1138,50 @@ impl ImportJob {
             })
             .collect();
         let sidecars = read_sidecars(&todo, &probed, &sidecar_eligible, self.naming, cancel, &self.metrics);
+
+        // Plan metadata and deduplication in source order. Transfer jobs run in bounded workers;
+        // family barriers keep suffix allocation deterministic for same-named files.
+        let mut plan = Plan::default();
         for ((path, info), sidecar) in todo.into_iter().zip(probed).zip(sidecars) {
             if cancel.load(Relaxed) {
                 self.metrics.cancelled.store(true, Relaxed);
                 break;
             }
-            self.done.fetch_add(1, Relaxed);
             let mut info = match info {
                 Ok(i) => i,
                 Err(e) => {
                     log::warn!("import {path}: {e}");
-                    out.items.push(PreparedItem::Failed(path, e));
+                    self.done.fetch_add(1, Relaxed);
+                    plan.slots.push(Slot::Item(PreparedItem::Failed(path, e)));
                     continue;
                 }
             };
+            if !opts.local
+                && let Some(h) = &info.content_hash
+                && plan.transfers.iter().any(|t| t.info.content_hash.as_ref() == Some(h))
+            {
+                self.run_plan(&mut plan, &mut out, cancel);
+                if cancel.load(Relaxed) {
+                    self.metrics.cancelled.store(true, Relaxed);
+                    break;
+                }
+            }
             if let Some(h) = &info.content_hash
                 && !opts.local
                 && let Some(existing) = self.by_hash.get(h)
             {
-                out.items.push(PreparedItem::Duplicate { path, existing: *existing, reason: "content", hash: Some(h.clone()) });
+                self.done.fetch_add(1, Relaxed);
+                plan.slots.push(Slot::Item(PreparedItem::Duplicate { path, existing: *existing, reason: "content", hash: Some(h.clone()) }));
                 continue;
             }
-            // the XMP sidecar (or a raw's embedded XMP), read before copying: its capture time files
-            // and names the copy when the file itself has none
             if info.captured.is_none() {
                 info.captured = sidecar.as_ref().and_then(|sc| sc.captured.clone());
             }
-            let transfer_started = web_time::Instant::now();
-            let mut placed = None;
             let stored = match (mode, &self.copy_root) {
                 (ImportMode::Copy | ImportMode::Move, Some(root))
                     if !crate::import_move::inside(Path::new(&path), root)
                         && !self.lib_dir.as_ref().is_some_and(|l| crate::import_move::inside(Path::new(&path), l)) =>
                 {
-                    // the templates see the photo as it will be catalogued (undated: the import time)
                     let own = Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                     let mut q = Photo::new(PhotoId(0), Source::File { path: path.clone() }, &own, &info.format, 0, 0, &self.now);
                     q.captured = info.captured.clone();
@@ -1179,73 +1192,218 @@ impl ImportJob {
                         n
                     });
                     let folders = opts.organize.folders(&q);
-                    if mode == ImportMode::Move && !crate::import_move::is_symlink(Path::new(&path)) {
-                        let dir = folders.iter().fold(root.to_path_buf(), |d, f| d.join(f));
-                        let name = name.unwrap_or(own);
-                        match crate::import_move::place(Path::new(&path), &dir, &name) {
-                            Ok(pl) => {
-                                let dst = pl.dst.to_string_lossy().to_string();
-                                placed = Some(pl);
-                                dst
-                            }
-                            Err(e) => {
-                                self.metrics.transfer_failures.fetch_add(1, Relaxed);
-                                self.metrics.transfer_ns.fetch_add(transfer_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
-                                out.items.push(PreparedItem::Failed(path, e));
-                                continue;
-                            }
+                    let dir = folders.iter().fold(root.to_path_buf(), |d, f| d.join(f));
+                    let as_named = name.as_deref().unwrap_or(if own.is_empty() { "photo" } else { own.as_str() });
+                    let family = (dir.to_string_lossy().to_lowercase(), name_family(as_named));
+                    if plan.transfers.iter().any(|t| t.family == family) {
+                        self.run_plan(&mut plan, &mut out, cancel);
+                        if cancel.load(Relaxed) {
+                            self.metrics.cancelled.store(true, Relaxed);
+                            break;
                         }
+                    }
+                    let how = if mode == ImportMode::Move && !crate::import_move::is_symlink(Path::new(&path)) {
+                        How::Place { name: name.unwrap_or(own) }
                     } else {
                         if mode == ImportMode::Move {
                             let reason = "a symbolic link: the file it points to was copied, the link and its target stay";
-                            out.items.push(PreparedItem::Kept(Kept { path: path.clone(), reason: reason.into() }));
+                            plan.slots.push(Slot::Item(PreparedItem::Kept(Kept { path: path.clone(), reason: reason.into() })));
                         }
-                        match copy_into(root, &path, &folders, name.as_deref(), info.content_hash.as_deref()) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                self.metrics.transfer_failures.fetch_add(1, Relaxed);
-                                self.metrics.transfer_ns.fetch_add(transfer_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
-                                out.items.push(PreparedItem::Failed(path, e));
-                                continue;
-                            }
-                        }
-                    }
+                        How::Copy { name }
+                    };
+                    let dng = opts.convert_dng && mode == ImportMode::Copy && info.kind == MediaKind::Raw && !info.format.eq_ignore_ascii_case("DNG");
+                    plan.slots.push(Slot::Transfer);
+                    plan.transfers.push(Transfer { path, info, sidecar, dir, how, dng, family });
+                    continue;
                 }
                 (ImportMode::Move, _) => {
                     let reason = "already inside the destination or the library: added where it is";
-                    out.items.push(PreparedItem::Kept(Kept { path: path.clone(), reason: reason.into() }));
+                    plan.slots.push(Slot::Item(PreparedItem::Kept(Kept { path: path.clone(), reason: reason.into() })));
                     path.clone()
                 }
                 _ => path.clone(),
             };
-            if matches!(mode, ImportMode::Copy | ImportMode::Move) {
-                self.metrics.transfers.fetch_add(1, Relaxed);
-                self.metrics.transfer_ns.fetch_add(transfer_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
-            }
             if let Some(h) = &info.content_hash {
                 self.by_hash.insert(h.clone(), None);
             }
-            // Copy as DNG: the copied raw becomes a DNG (the copy is ours to replace)
-            let mut stored = stored;
-            if opts.convert_dng
-                && mode == ImportMode::Copy
-                && stored != path
-                && info.kind == MediaKind::Raw
-                && !info.format.eq_ignore_ascii_case("DNG")
-            {
-                match crate::cmd::convert::write_dng_with(self.file_bytes.as_ref(), &stored, String::new()) {
-                    Ok(dng) => {
-                        let _ = std::fs::remove_file(&stored);
-                        stored = dng;
-                        info.format = "DNG".into();
-                    }
-                    Err(e) => log::warn!("import {path}: copy as DNG: {e}"),
-                }
-            }
-            out.items.push(PreparedItem::Ready(Box::new(ReadyFile { path, stored, info, sidecar, placed })));
+            self.done.fetch_add(1, Relaxed);
+            plan.slots.push(Slot::Item(PreparedItem::Ready(Box::new(ReadyFile { path, stored, info, sidecar, placed: None }))));
         }
+        self.run_plan(&mut plan, &mut out, cancel);
         out
     }
+
+    /// Run planned transfers in bounded workers, restoring results to source order.
+    fn run_plan(&mut self, plan: &mut Plan, out: &mut Prepared, cancel: &std::sync::atomic::AtomicBool) {
+        let mut done = run_transfers(std::mem::take(&mut plan.transfers), self.file_bytes.as_ref(), cancel, &self.done, &self.metrics).into_iter();
+        for slot in std::mem::take(&mut plan.slots) {
+            let item = match slot {
+                Slot::Item(it) => it,
+                Slot::Transfer => match done.next().flatten() {
+                    Some(it) => it,
+                    None => continue,
+                },
+            };
+            if let PreparedItem::Ready(r) = &item
+                && let Some(h) = &r.info.content_hash
+            {
+                self.by_hash.insert(h.clone(), None);
+            }
+            out.items.push(item);
+        }
+    }
+}
+
+/// A batch's items in file order while its transfers are pending.
+#[derive(Default)]
+struct Plan {
+    slots: Vec<Slot>,
+    transfers: Vec<Transfer>,
+}
+
+enum Slot {
+    Item(PreparedItem),
+    Transfer,
+}
+
+struct Transfer {
+    path: String,
+    info: ProbeInfo,
+    sidecar: Option<crate::sidecar::SidecarData>,
+    dir: PathBuf,
+    how: How,
+    dng: bool,
+    family: (String, String),
+}
+
+enum How {
+    Copy { name: Option<String> },
+    Place { name: String },
+}
+
+fn name_family(name: &str) -> String {
+    let mut stem = match name.rsplit_once('.') {
+        Some((s, _)) if !s.is_empty() => s,
+        _ => name,
+    };
+    while let Some((head, tail)) = stem.rsplit_once('-')
+        && !head.is_empty()
+        && !tail.is_empty()
+        && tail.bytes().all(|b| b.is_ascii_digit())
+    {
+        stem = head;
+    }
+    stem.to_lowercase()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn workers(jobs: usize) -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, MAX_IMPORT_PROBE_WORKERS).min(jobs.max(1))
+}
+
+pub fn batch_size() -> usize {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        workers(usize::MAX).saturating_mul(2).clamp(8, 16)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        8
+    }
+}
+
+fn run_transfers(
+    transfers: Vec<Transfer>,
+    file_bytes: Option<&crate::merge::ByteReader>,
+    cancel: &std::sync::atomic::AtomicBool,
+    done: &std::sync::atomic::AtomicUsize,
+    metrics: &ImportMetrics,
+) -> Vec<Option<PreparedItem>> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let one = |t: Transfer| {
+        if cancel.load(Relaxed) {
+            return None;
+        }
+        let path = t.path.clone();
+        let started = web_time::Instant::now();
+        let item = crate::guard::catch("import", || run_transfer(t, file_bytes)).unwrap_or_else(|e| PreparedItem::Failed(path, e));
+        metrics.transfers.fetch_add(1, Relaxed);
+        if matches!(&item, PreparedItem::Failed(_, _)) {
+            metrics.transfer_failures.fetch_add(1, Relaxed);
+        }
+        metrics.transfer_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+        done.fetch_add(1, Relaxed);
+        Some(item)
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let n = workers(transfers.len());
+        if n > 1 {
+            let mut results: Vec<Option<PreparedItem>> = std::iter::repeat_with(|| None).take(transfers.len()).collect();
+            let queue = std::sync::Mutex::new(transfers.into_iter().enumerate());
+            let out = std::sync::Mutex::new(&mut results);
+            #[cfg(test)]
+            let fault = crate::import_move::injected_fault();
+            let work = &|| {
+                #[cfg(test)]
+                crate::import_move::inject(fault);
+                loop {
+                    let next = queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner).next();
+                    let Some((i, t)) = next else { break };
+                    let r = one(t);
+                    if let Some(slot) = out.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(i) {
+                        *slot = r;
+                    }
+                }
+            };
+            std::thread::scope(|scope| {
+                let handles: Vec<_> =
+                    (0..n).filter_map(|i| std::thread::Builder::new().name(format!("lc-import-copy-{i}")).spawn_scoped(scope, work).ok()).collect();
+                if handles.is_empty() {
+                    work();
+                }
+                for handle in handles {
+                    if handle.join().is_err() {
+                        log::error!("import: a copy worker stopped unexpectedly");
+                    }
+                }
+            });
+            return results;
+        }
+    }
+    transfers.into_iter().map(one).collect()
+}
+
+fn run_transfer(t: Transfer, file_bytes: Option<&crate::merge::ByteReader>) -> PreparedItem {
+    let Transfer { path, mut info, sidecar, dir, how, dng, .. } = t;
+    let mut placed = None;
+    let mut stored = match how {
+        How::Place { name } => match crate::import_move::place(Path::new(&path), &dir, &name) {
+            Ok(pl) => {
+                let dst = pl.dst.to_string_lossy().to_string();
+                placed = Some(pl);
+                dst
+            }
+            Err(e) => return PreparedItem::Failed(path, e),
+        },
+        How::Copy { name } => match copy_into(&dir, &path, &[], name.as_deref(), info.content_hash.as_deref()) {
+            Ok(p) => p,
+            Err(e) => return PreparedItem::Failed(path, e),
+        },
+    };
+    if dng {
+        let weight = usize::try_from(info.file_size).unwrap_or(usize::MAX).saturating_mul(6);
+        let _permit = crate::memory::work_gate().acquire(weight);
+        match crate::cmd::convert::write_dng_with(file_bytes, &stored, String::new()) {
+            Ok(dng) => {
+                let _ = std::fs::remove_file(&stored);
+                stored = dng;
+                info.format = "DNG".into();
+            }
+            Err(e) => log::warn!("import {path}: copy as DNG: {e}"),
+        }
+    }
+    PreparedItem::Ready(Box::new(ReadyFile { path, stored, info, sidecar, placed }))
 }
 
 /// The catalog half of an import: add the photos [`ImportJob::prepare`] readied (one undoable op;

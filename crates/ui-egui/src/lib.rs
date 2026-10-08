@@ -34,11 +34,15 @@ mod tests_filmstrip;
 #[cfg(test)]
 mod tests_grid;
 #[cfg(test)]
+mod tests_keymap;
+#[cfg(test)]
 mod tests_labels;
 #[cfg(test)]
 mod tests_library_problem;
 #[cfg(test)]
 mod tests_masking;
+#[cfg(test)]
+mod tests_masking_layout;
 #[cfg(test)]
 mod tests_offline;
 #[cfg(test)]
@@ -149,6 +153,9 @@ pub struct LightcraftApp {
     /// Shortcuts the native menu bar currently handles (`Cmd+Z`, `G`…): the egui shortcut handler
     /// leaves them alone so nothing fires twice.
     pub native_shortcuts: std::collections::HashSet<String>,
+    /// The keyboard shortcuts editor is waiting for a key press for this command: no shortcut
+    /// fires (the native menu bar drops its accelerators too) until it gets one or is cancelled.
+    pub recording_shortcut: Option<String>,
     /// The host is [`headless::Headless`] (it answers viewport screenshot commands itself).
     pub headless_host: bool,
     /// Warnings to show one at a time (damaged settings files…, issue #103).
@@ -232,6 +239,7 @@ impl LightcraftApp {
             integrated_titlebar: false,
             native_menu: false,
             native_shortcuts: Default::default(),
+            recording_shortcut: None,
             headless_host: false,
             notices: vec![],
             quit_prompt: None,
