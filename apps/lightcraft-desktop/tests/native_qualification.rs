@@ -876,8 +876,16 @@ fn native_hidden_control_journeys() {
                     }
                     click_dom(control, "[data-command=\"app.settings\"]", "settings hydration command must open");
                     wait_for_dom(control, "return document.querySelector('.lc-dialog h2')?.textContent === 'Settings';");
+                    wait_for_dom(control, "return document.querySelector('.lc-dialog-actions .lc-button-primary')?.disabled === false;");
+                    let import_tab_top = control
+                        .eval("return document.querySelector('[data-settings-section=\"import\"]')?.getBoundingClientRect().top;")
+                        .expect("Settings navigation geometry must be readable");
                     click_dom(control, "[data-settings-section=\"import\"]", "settings Import tab must open");
                     wait_for_dom(control, "return ['Raw photos','Default copyright','Default creator','Metadata preset'].every((label) => [...document.querySelectorAll('.lc-settings-panel .lc-field span')].some((node) => node.textContent === label)) && document.querySelector('.lc-dialog-actions .lc-button-primary')?.disabled === false;");
+                    let import_tab_top_after = control
+                        .eval("return document.querySelector('[data-settings-section=\"import\"]')?.getBoundingClientRect().top;")
+                        .expect("Settings navigation geometry must remain readable");
+                    assert_eq!(import_tab_top_after, import_tab_top, "switching Settings sections must keep navigation stationary");
                     let hydrated = control
                         .eval("return Object.fromEntries([...document.querySelectorAll('.lc-settings-panel .lc-field')].map((field) => [field.querySelector('span')?.textContent, field.querySelector('input,select')?.value]));")
                         .expect("settings hydration fields must be readable");
