@@ -764,11 +764,13 @@ fn gpu_marker_path(primary: bool, qa: bool, config: &Path) -> Option<PathBuf> {
 fn gpu_crash_check(marker: Option<PathBuf>) -> Option<String> {
     let left = marker.as_deref().and_then(lightcraft_engine::gpu::backend::take_init_marker);
     lightcraft_engine::gpu::backend::set_init_marker(marker);
-    left.map(|what| {
-        format!(
-            "LightCraft closed unexpectedly while starting the GPU last time ({what}), so GPU rendering is now off and photos render on the CPU. To try the GPU again, turn on Settings ▸ Performance ▸ Use the GPU for rendering; to try another graphics backend, start LightCraft with LIGHTCRAFT_GPU_BACKEND=dx12, vulkan or off."
-        )
-    })
+    left.map(|what| gpu_crash_notice(&what))
+}
+
+fn gpu_crash_notice(what: &str) -> String {
+    format!(
+        "LightCraft closed unexpectedly while starting the GPU last time ({what}), so GPU rendering is now off and photos render on the CPU. To try the GPU again, turn on Settings ▸ Performance ▸ Use the GPU for rendering; to try another graphics backend, start LightCraft with LIGHTCRAFT_GPU_BACKEND=dx12, vulkan or off."
+    )
 }
 
 fn prepare_primary_preferences(path: &Path) -> Option<String> {
@@ -874,6 +876,9 @@ pub fn run() {
                         startup_warnings: startup_warnings.clone(),
                         closing: Arc::new(AtomicBool::new(false)),
                     });
+                    // Host/library setup succeeded; guard native window presentation and its
+                    // first frame with the shared GPU marker from this point onward.
+                    lightcraft_engine::gpu::backend::begin_startup_marker(lightcraft_engine::gpu::backend::window_backends());
                     None
                 }
                 Err(error) => {
@@ -901,6 +906,9 @@ pub fn run() {
             use tauri::Emitter;
             match event {
                 tauri::WindowEvent::Focused(focused) => {
+                    if focused && window.label() == "main" {
+                        lightcraft_engine::gpu::backend::startup_succeeded();
+                    }
                     let _ = window.emit("lc://window-focus", json!({"label": window.label(), "owner": window.label() == "main", "focused": focused}));
                 }
                 tauri::WindowEvent::CloseRequested { .. } if window.label() != "main" => {}
@@ -928,6 +936,9 @@ pub fn run() {
                     let _ = window.emit("lc://native-drop", json!({"paths": paths}));
                 }
                 tauri::WindowEvent::Destroyed => {
+                    if window.label() == "main" {
+                        lightcraft_engine::gpu::backend::startup_succeeded();
+                    }
                     if window.label() == "main"
                         && let Some(state) = window.app_handle().try_state::<AppState>()
                         && let Some(host) = state.host.clone()
@@ -945,6 +956,7 @@ pub fn run() {
     let builder =
         if qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_BACKGROUND").as_deref()) { builder.activate_ignoring_other_apps(false) } else { builder };
     if let Err(error) = builder.run(tauri::generate_context!()) {
+        lightcraft_engine::gpu::backend::startup_failed();
         eprintln!("lightcraft desktop failed: {error}");
     }
 }
@@ -983,5 +995,25 @@ mod tests {
         assert!(qa_hidden_enabled(Some(OsStr::new("true"))));
         assert!(qa_hidden_enabled(Some(OsStr::new(" TRUE "))));
         assert!(!qa_hidden_enabled(None));
+    }
+
+    #[test]
+    fn gpu_startup_marker_recovers_on_second_launch_without_staying_armed() {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let marker = std::env::temp_dir().join(format!("lightcraft-native-gpu-{stamp}.marker"));
+        let _ = fs::remove_file(&marker);
+        lightcraft_engine::gpu::backend::set_init_marker(Some(marker.clone()));
+        assert!(lightcraft_engine::gpu::backend::begin_startup_marker(lightcraft_engine::gpu::backend::Backends::DX12));
+        assert!(marker.exists());
+
+        // Simulate a process dying during first launch: next launch consumes marker & enters CPU
+        // recovery, then arms a fresh guard for its own window startup.
+        let notice = gpu_crash_check(Some(marker.clone())).expect("uncleared marker is reported");
+        assert!(notice.contains("GPU rendering is now off"));
+        assert!(!marker.exists());
+        assert!(lightcraft_engine::gpu::backend::begin_startup_marker(lightcraft_engine::gpu::backend::Backends::DX12));
+        lightcraft_engine::gpu::backend::startup_succeeded();
+        assert!(!marker.exists(), "successful recovery launch must clear its marker");
+        lightcraft_engine::gpu::backend::set_init_marker(None);
     }
 }

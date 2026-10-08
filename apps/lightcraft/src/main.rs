@@ -45,28 +45,40 @@ fn app_icon() -> egui::IconData {
     eframe::icon_data::from_png_bytes(png).unwrap_or_default()
 }
 
-struct App(LightcraftApp, PrefsWriter, #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>);
+struct App {
+    app: LightcraftApp,
+    prefs: PrefsWriter,
+    #[cfg(target_os = "macos")]
+    menu: Option<native_menu::NativeMenu>,
+    startup_frame_pending: bool,
+}
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        #[cfg(target_os = "macos")]
-        if let Some(m) = self.2.as_mut() {
-            m.update(&mut self.0, ctx);
+        if self.startup_frame_pending {
+            self.startup_frame_pending = false;
+        } else {
+            lightcraft_engine::gpu::backend::startup_succeeded();
         }
-        self.0.logic(ctx);
-        self.1.tick(&mut self.0, ctx);
+        #[cfg(target_os = "macos")]
+        if let Some(m) = self.menu.as_mut() {
+            m.update(&mut self.app, ctx);
+        }
+        self.app.logic(ctx);
+        self.prefs.tick(&mut self.app, ctx);
     }
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
-        self.0.raw_input_hook(raw);
+        self.app.raw_input_hook(raw);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.0.ui(ui);
+        self.app.ui(ui);
     }
     fn on_exit(&mut self) {
-        if let Err(e) = self.1.save(&self.0) {
+        lightcraft_engine::gpu::backend::startup_succeeded();
+        if let Err(e) = self.prefs.save(&self.app) {
             log::error!("{e}");
         }
-        if let Err(e) = self.0.session.close_library() {
+        if let Err(e) = self.app.session.close_library() {
             log::error!("saving the library failed: {e}");
         }
     }
@@ -75,16 +87,26 @@ impl eframe::App for App {
 /// The window's renderer (egui-wgpu): eframe's defaults, with LightCraft's backend choice — DX12
 /// alone on Windows unless `LIGHTCRAFT_GPU_BACKEND` / `WGPU_BACKEND` say otherwise (issue #136:
 /// with Vulkan in the set, wgpu loads the Vulkan driver even when it then picks DX12).
-fn window_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+fn window_backend(recovery: bool) -> eframe::wgpu::Backends {
+    if recovery {
+        // A stale marker means a previous process died while touching a driver. Ignore any
+        // persisted/ambient override for this launch and use platform default backend.
+        lightcraft_engine::gpu::backend::default_window_backends(std::env::consts::OS)
+    } else {
+        lightcraft_engine::gpu::backend::window_backends()
+    }
+}
+
+fn window_wgpu_options(recovery: bool) -> eframe::egui_wgpu::WgpuConfiguration {
     let mut c = eframe::egui_wgpu::WgpuConfiguration::default();
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(n) = &mut c.wgpu_setup {
-        n.instance_descriptor.backends = lightcraft_engine::gpu::backend::window_backends();
+        n.instance_descriptor.backends = window_backend(recovery);
     }
     c
 }
 
-/// Written while the GPU compute device is created, removed once that returned
-/// (`lightcraft_gpu::backend::set_init_marker`). Not with `LIGHTCRAFT_NO_PREFS` (tests, scripts).
+/// Shared marker for GPU device creation, window setup and first frame. Not with
+/// `LIGHTCRAFT_NO_PREFS` (tests, scripts).
 fn gpu_marker_path() -> Option<std::path::PathBuf> {
     if std::env::var_os("LIGHTCRAFT_NO_PREFS").is_some() {
         return None;
@@ -564,6 +586,7 @@ fn main() -> eframe::Result {
     let gpu_crash = gpu_crash_check(in_memory);
     let gpu_on = prefs.as_ref().is_none_or(|u| u.settings.gpu) && gpu_crash.is_none();
     lightcraft_engine::gpu::set_enabled(gpu_on);
+    let startup_recovery = gpu_crash.is_some();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("LightCraft")
@@ -576,13 +599,19 @@ fn main() -> eframe::Result {
             .with_icon(app_icon())
             // Wayland matches the window to packaging/linux/ai.storyteller.lightcraft.desktop by this id
             .with_app_id(APP_ID),
-        wgpu_options: window_wgpu_options(),
+        wgpu_options: window_wgpu_options(startup_recovery),
         ..Default::default()
     };
+    if !in_memory {
+        lightcraft_engine::gpu::backend::begin_startup_marker(window_backend(startup_recovery));
+    }
     let started = eframe::run_native(
         "LightCraft",
         options,
         Box::new(move |cc| {
+            // Window/device setup is complete when eframe invokes creator. Do not misclassify a
+            // normal catalog/library failure as a GPU crash; arm again for first-frame safety.
+            lightcraft_engine::gpu::backend::startup_succeeded();
             let (mut session, problem) = open_session(in_memory, library_dir, seed_demo && files.is_empty());
             // AI masks: the SAM 3 checkpoint (facebook/sam3) in <config>/models/sam3, or LIGHTCRAFT_SAM3_DIR
             // (never required: without it, AI masks offer to download it; see docs/ai-masks.md)
@@ -626,15 +655,20 @@ fn main() -> eframe::Result {
             // drawn in the window's top bar). LIGHTCRAFT_NO_NATIVE_MENU=1 keeps the in-window menus.
             #[cfg(target_os = "macos")]
             let menu = (std::env::var_os("LIGHTCRAFT_NO_NATIVE_MENU").is_none()).then(|| native_menu::NativeMenu::install(&mut app, &cc.egui_ctx));
-            Ok(Box::new(App(
+            if !in_memory {
+                lightcraft_engine::gpu::backend::begin_startup_marker(window_backend(startup_recovery));
+            }
+            Ok(Box::new(App {
                 app,
-                writer,
+                prefs: writer,
                 #[cfg(target_os = "macos")]
                 menu,
-            )))
+                startup_frame_pending: true,
+            }))
         }),
     );
     if let Err(e) = &started {
+        lightcraft_engine::gpu::backend::startup_failed();
         startup_failed(&e.to_string(), log_file.as_deref());
     }
     started
@@ -775,10 +809,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[test]
+    fn gpu_startup_marker_survives_first_frame_then_clears_on_second_launch() {
+        let d = dir("gpu-startup");
+        let m = d.join("gpu-init.marker");
+        lightcraft_engine::gpu::backend::set_init_marker(Some(m.clone()));
+        assert!(lightcraft_engine::gpu::backend::begin_startup_marker(lightcraft_engine::gpu::backend::Backends::DX12));
+        assert!(m.exists());
+        let notice = gpu_crash_check_at(Some(m.clone()), false).expect("second launch sees uncleared marker");
+        assert!(notice.contains("GPU rendering is now off"));
+        assert!(!m.exists(), "recovery consumes previous marker");
+        assert!(lightcraft_engine::gpu::backend::begin_startup_marker(lightcraft_engine::gpu::backend::Backends::DX12));
+        lightcraft_engine::gpu::backend::startup_succeeded();
+        assert!(!m.exists(), "successful recovery launch clears marker");
+        lightcraft_engine::gpu::backend::set_init_marker(None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// Issue #136: Windows windows render with DX12 alone (no Vulkan driver loaded) by default.
     #[test]
     fn window_backends_follow_the_platform_default() {
-        let eframe::egui_wgpu::WgpuSetup::CreateNew(n) = window_wgpu_options().wgpu_setup else { panic!("expected CreateNew") };
+        let eframe::egui_wgpu::WgpuSetup::CreateNew(n) = window_wgpu_options(false).wgpu_setup else { panic!("expected CreateNew") };
         let b = n.instance_descriptor.backends;
         if std::env::var_os("LIGHTCRAFT_GPU_BACKEND").is_none() && std::env::var_os("WGPU_BACKEND").is_none() {
             if cfg!(windows) {
