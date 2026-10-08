@@ -548,8 +548,12 @@ fn native_hidden_control_journeys() {
         "lightroomImport",
         "catalogRecovery",
     ];
+    let mut failures = Vec::new();
     for name in scenario_names {
-        let outcome = harness.scenario(name, "fast", &[], |scenario| {
+        // Keep collecting native evidence after a failed journey. Every failure
+        // still fails this test, without hiding later platform defects.
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            harness.scenario(name, "fast", &[], |scenario| {
             let baseline_capture = scenario.dir().join("baseline.png");
             if name == "preferences" {
                 with_control(&binary, scenario, &inputs.catalog, |control, _data| {
@@ -929,8 +933,13 @@ fn native_hidden_control_journeys() {
                 });
             }
             scenario.note(format!("executed hidden {platform} control journey: {name}"));
-        });
-        assert!(!outcome.is_skipped(), "native journey {name} must execute, not skip");
+        })
+        }));
+        match outcome {
+            Ok(outcome) => assert!(!outcome.is_skipped(), "native journey {name} must execute, not skip"),
+            Err(_) => failures.push(name),
+        }
         assert_sources_unchanged(&source_paths, &source_hashes);
     }
+    assert!(failures.is_empty(), "native journeys failed: {}", failures.join(", "));
 }

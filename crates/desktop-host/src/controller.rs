@@ -34,13 +34,13 @@ impl Controller {
         let segmenter_mirrors_file =
             sam3_mirrors_file.or_else(|| lightcraft_engine::camera_profiles::config_dir().map(|dir| dir.join("models").join("sam3-mirrors.txt")));
         let mut session = if let Some(path) = library_path {
-            let mut session = Session::new().with_system_clock();
+            let mut session = Session::new().with_fs().with_system_clock();
             session.open_library(&path, demo).map_err(|error| error.to_string())?;
             session
         } else if demo {
-            Session::with_demo().with_system_clock()
+            Session::with_demo().with_fs().with_system_clock()
         } else {
-            Session::new().with_system_clock()
+            Session::new().with_fs().with_system_clock()
         };
         configure_segmenter(&mut session, &segmenter_dir, &segmenter_mirrors_file);
         if demo_count > 0 {
@@ -280,7 +280,7 @@ impl Controller {
 
         self.persist().map_err(|error| format!("current library must be saved before opening another library: {error}"))?;
 
-        let mut fresh = Session::new().with_system_clock();
+        let mut fresh = Session::new().with_fs().with_system_clock();
         fresh.open_library(&path, false).map_err(|error| format!("could not open library: {error}"))?;
         configure_segmenter(&mut fresh, &self.segmenter_dir, &self.segmenter_mirrors_file);
         let notices = fresh.take_library_warnings();
@@ -538,6 +538,83 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(controller.shutdown().is_ok());
+    }
+
+    #[test]
+    fn filesystem_hooks_import_png_and_render_preview() {
+        let library = temp_library("png-library");
+        let source = temp_library("procedural-rgb-01").with_extension("png");
+        let image = lightcraft_raster::Rgba8::from_fn(4, 3, |x, y| [(x * 40) as u8, (y * 60) as u8, 120, 255]);
+        let encoded = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&image), &lightcraft_codecs::EncodeMeta::default());
+        assert!(encoded.is_ok(), "procedural PNG should encode: {:?}", encoded.as_ref().err());
+        let Ok(encoded) = encoded else { return };
+        assert!(fs::write(&source, encoded).is_ok(), "procedural PNG should be written");
+
+        let controller_result =
+            Controller::new(HostOptions { library_path: Some(library.clone()), ..HostOptions::default() }, PreviewStore::default());
+        assert!(controller_result.is_ok(), "PNG host controller should start: {:?}", controller_result.as_ref().err());
+        let Ok(mut controller) = controller_result else { return };
+        let imported = controller.run("library.import", &json!({"paths": [source.to_string_lossy()]}));
+        assert!(imported.is_ok(), "PNG import should start: {:?}", imported.err());
+        for _ in 0..2_000 {
+            controller.poll();
+            if !controller.tasks.running() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!controller.tasks.running(), "PNG import worker should finish");
+        assert!(controller.notices.iter().any(|notice| notice == "Import Photos finished"), "PNG import should finish: {:?}", controller.notices);
+
+        let snapshot = controller.snapshot();
+        assert!(snapshot.is_ok(), "PNG snapshot should succeed: {:?}", snapshot.as_ref().err());
+        let Ok(snapshot) = snapshot else { return };
+        let generation = snapshot.get("viewGeneration").and_then(Value::as_u64).expect("PNG snapshot must expose view generation");
+        let slice = controller.slice(Some(generation), 0, 1);
+        assert!(slice.is_ok(), "PNG slice should succeed: {:?}", slice.as_ref().err());
+        let Ok(slice) = slice else { return };
+        let Some(photo) = slice.get("photos").and_then(Value::as_array).and_then(|photos| photos.first()) else {
+            assert!(slice.get("photos").and_then(Value::as_array).is_some_and(|photos| !photos.is_empty()), "PNG import should create a photo");
+            return;
+        };
+        let photo_id = photo.get("id").and_then(Value::as_u64).expect("PNG import must expose photo identity");
+        assert_eq!(photo.get("w").and_then(Value::as_u64), Some(4));
+        assert_eq!(photo.get("h").and_then(Value::as_u64), Some(3));
+
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let request = PreviewRequest {
+            photo_id,
+            slot: "png-regression".into(),
+            view_generation: generation,
+            width: 64,
+            height: 64,
+            quality: crate::PreviewQuality::Draft,
+            before: false,
+            sequence: 1,
+        };
+        let _ = controller.preview(request, reply_tx);
+        let mut preview = None;
+        for _ in 0..2_000 {
+            controller.poll();
+            match reply_rx.try_recv() {
+                Ok(result) => {
+                    preview = Some(result);
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(1)),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+        assert!(preview.is_some(), "PNG preview should reply");
+        let Some(preview) = preview else { return };
+        assert!(preview.is_ok(), "PNG preview should render: {:?}", preview.as_ref().err());
+        let Ok(preview) = preview else { return };
+        assert_eq!(preview.photo_id, photo_id);
+        assert_eq!(preview.encoding, "png");
+        assert!(controller.renderer.store().get(&preview.handle).is_some(), "PNG preview bytes should be published");
+        assert!(controller.shutdown().is_ok());
+        let _ = fs::remove_dir_all(library);
+        let _ = fs::remove_file(source);
     }
 
     #[test]

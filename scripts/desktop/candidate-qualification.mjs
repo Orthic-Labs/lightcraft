@@ -4,6 +4,44 @@ import { createHash } from 'node:crypto';
 import { runCargoSync } from '@rightkit/release/managed-cargo.mjs';
 import { fail, loadReleaseConfig, repoRoot } from './lib.mjs';
 import path from 'node:path';
+
+function runLsappinfo(args) {
+  const result = spawnSync('/usr/bin/lsappinfo', args, {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  return {
+    command: ['lsappinfo', ...args],
+    status: result.status,
+    signal: result.signal,
+    stdout: result.stdout || '',
+    stderr: result.stderr || '',
+    error: result.error?.message || null,
+  };
+}
+
+function collectMacForegroundBaseline(root, record) {
+  const front = runLsappinfo(['front']);
+  const asn = front.stdout.trim().replace(/:$/, '');
+  const pid = asn ? runLsappinfo(['info', '-only', 'pid', asn]) : null;
+  const name = asn ? runLsappinfo(['info', '-only', 'name', asn]) : null;
+  const pidMatch = pid?.stdout.match(/pid\s*=\s*(\d+)/);
+  const nameMatch = name?.stdout.match(/"([^"]+)"/);
+  const report = {
+    schema: 1,
+    sourceRevision: record.sourceRevision,
+    platform: record.platform,
+    architecture: record.architecture,
+    readOnly: true,
+    asn: asn || null,
+    parsed: { pid: pidMatch ? Number(pidMatch[1]) : null, name: nameMatch?.[1] || null },
+    commands: { front, pid, name },
+  };
+  const output = path.join(root, 'mac-foreground-baseline.json');
+  writeFileSync(output, JSON.stringify(report, null, 2) + '\n');
+  console.log(`[candidate] Mac foreground baseline: asn=${report.asn || 'unavailable'} pid=${report.parsed.pid || 'unavailable'} name=${report.parsed.name || 'unavailable'} diagnostic=${output}`);
+}
+
 export async function qualify(record, root) {
   if (process.env.GITHUB_ACTIONS !== 'true') fail('candidate qualification requires generated Actions');
   const executable = record.artifacts.find(artifact => artifact.target === 'lightcraft-desktop' && artifact.kind === 'executable');
@@ -16,6 +54,7 @@ export async function qualify(record, root) {
   if (installation.schema !== 1 || installation.sourceRevision !== record.sourceRevision || installation.platform !== record.platform || installation.architecture !== record.architecture || installation.path !== installed) fail('installed candidate identity does not match qualified source & target');
   const installedHash = createHash('sha256').update(readFileSync(installed)).digest('hex');
   if (installation.sha256 !== installedHash) fail('installed candidate changed after Right Release installation');
+  if (record.platform === 'macos') collectMacForegroundBaseline(root, record);
   const env = { ...process.env, CRAFT_FONTS_DIR: path.join(process.env.RUNNER_TEMP, 'lightcraft-build-fonts'), CRAFT_FONTS_REQUIRED: '1', RIGHTKIT_QA_HIDDEN: '1', RIGHTKIT_QA_UI_BINARY: installed, RIGHTKIT_QA_EVIDENCE: path.join(root, 'qa-evidence'), RIGHTKIT_QA_SOURCE_REVISION: record.sourceRevision, RIGHTKIT_QA_ARCHITECTURE: record.architecture, RIGHTKIT_QA_INSTALLED_ARTIFACT_SHA256: installedHash };
   // Match candidate target/profile/features so qualification reuses native engine
   // compilation instead of rebuilding it under Cargo's default debug profile.
