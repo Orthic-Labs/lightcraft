@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use lightcraft_engine::Session;
 
@@ -805,6 +805,7 @@ mod tests {
             Controller::new(HostOptions { demo: true, sam3_dir: Some(current.clone()), ..HostOptions::default() }, PreviewStore::default());
         assert!(controller_result.is_ok());
         let Ok(mut controller) = controller_result else { return };
+        assert!(controller.preferences(Some(json!({"sam3Dir": current.to_string_lossy()}))).is_ok());
         let started = Instant::now();
         let pending = controller.run("segment.model.selectFolder", &json!({"path": selected.to_string_lossy()}));
         assert!(pending.is_ok());
