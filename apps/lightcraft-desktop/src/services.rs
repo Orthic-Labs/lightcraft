@@ -241,10 +241,12 @@ fn open_external(params: &Value) -> Result<(), String> {
             command.args(["-a", app]);
         }
         command
-    } else if cfg!(target_os = "windows") {
+    } else if cfg!(target_os = "windows") && app.is_empty() {
         let mut command = Command::new("cmd");
         command.args(["/C", "start", ""]);
         command
+    } else if cfg!(target_os = "windows") {
+        Command::new(app)
     } else if app.is_empty() {
         Command::new("xdg-open")
     } else {

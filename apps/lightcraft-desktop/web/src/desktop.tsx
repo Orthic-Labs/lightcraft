@@ -1,8 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { getSnapshot, nativeAction, runCommand, savePreferences } from './api';
+import { getSnapshot, nativeAction, openSecondWindow, runCommand, savePreferences } from './api';
 import { applyUiCommand, UI_COMMAND_IDS } from './commands';
-import type { DesktopContextValue, DesktopSnapshot, DialogState, JsonObject, UiState } from './types';
+import type { DesktopContextValue, DesktopSnapshot, DialogState, JsonObject, UiState, ViewMode, WindowBootstrap } from './types';
 
 const MIN_STAGE = 360;
 const DEFAULT_UI: UiState = {
@@ -187,6 +187,33 @@ function pathsFrom(value: unknown): string[] {
 
 function firstPath(value: unknown): string | undefined { return pathsFrom(value)[0]; }
 
+function idsFrom(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0);
+}
+
+function externalEditId(value: unknown): number | null {
+  const result = objectOf(value);
+  if (!result) return null;
+  const id = finiteNumber(result.id);
+  return id !== null && Number.isSafeInteger(id) && id > 0 ? id : idsFrom(result.ids)[0] ?? null;
+}
+
+const BOOTSTRAP_VIEWS: readonly ViewMode[] = ['photoGrid', 'squareGrid', 'detail', 'compare', 'survey', 'people', 'reference'];
+const MAX_EXTERNAL_EDIT_IDS = 256;
+
+function windowBootstrap(): WindowBootstrap {
+  if (typeof window === 'undefined') return { secondary: false, view: null, active: null };
+  const query = new URLSearchParams(window.location.search);
+  const view = query.get('view');
+  const active = Number(query.get('active'));
+  return {
+    secondary: query.get('window') === 'second',
+    view: view && (BOOTSTRAP_VIEWS as readonly string[]).includes(view) ? view as ViewMode : null,
+    active: Number.isSafeInteger(active) && active > 0 ? active : null,
+  };
+}
+
 const HELP_URLS: Record<string, string> = {
   'app.help': 'https://lightcraft.photo/help',
   'app.discord': 'https://discord.gg/artcraft',
@@ -197,6 +224,8 @@ const HELP_URLS: Record<string, string> = {
 };
 
 export function DesktopProvider({ children }: { children: ReactNode }) {
+  const bootstrap = useMemo(windowBootstrap, []);
+  const isSecondary = bootstrap.secondary;
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
   const [ui, setUiState] = useState<UiState>(DEFAULT_UI);
   const [dialog, setDialog] = useState<DialogState | null>(null);
@@ -210,6 +239,10 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   const refreshInFlight = useRef<Promise<void> | null>(null);
   const noticeQueue = useRef<string[] | null>(null);
   const liveNotice = useRef<string | null>(null);
+  const bootstrapSelectionApplied = useRef(false);
+  const externalEditIds = useRef<Set<number>>(new Set());
+  const externalReloadInFlight = useRef(false);
+  const nativeFocused = useRef(typeof document === 'undefined' || document.hasFocus());
 
   snapshotRef.current = snapshot;
   dialogRef.current = dialog;
@@ -221,7 +254,11 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
       setError(null);
       if (!prefHydrated.current) {
         prefHydrated.current = true;
-        setUiState((current) => ({ ...current, ...preferenceUi(next.preferences) }));
+        setUiState((current) => ({
+          ...current,
+          ...preferenceUi(next.preferences),
+          ...(isSecondary ? { view: bootstrap.view ?? 'detail' } : {}),
+        }));
       }
       const notices = Array.isArray(next.status?.notices) ? next.status.notices.filter((value): value is string => typeof value === 'string') : [];
       const previous = noticeQueue.current;
@@ -243,13 +280,14 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
     });
     refreshInFlight.current = operation;
     return operation;
-  }, []);
+  }, [bootstrap.view, isSecondary]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
   // Host snapshot is authoritative, but app-level rendering preferences are engine commands;
   // apply them once after persisted UI settings hydrate, before preview requests begin.
   useEffect(() => {
+    if (isSecondary) return;
     if (!snapshot || !prefHydrated.current) return;
     const previous = enginePrefsApplied.current;
     if (previous?.gpu === ui.gpu && previous.memoryMb === ui.memoryMb) return;
@@ -262,7 +300,7 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
       const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
       if (rejected) setError(messageOf(rejected.reason));
     });
-  }, [snapshot, ui.gpu, ui.memoryMb]);
+  }, [isSecondary, snapshot, ui.gpu, ui.memoryMb]);
 
   useEffect(() => {
     let timer: number | undefined;
@@ -278,10 +316,19 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   }, [refresh, snapshot?.status.exporting, snapshot?.status.importing, snapshot?.status.jobs.length, snapshot?.status.previewBuild]);
 
   useEffect(() => {
-    if (!prefHydrated.current) return;
+    if (isSecondary || !prefHydrated.current) return;
     const timer = window.setTimeout(() => { void savePreferences({ ui: ui as unknown as JsonObject }).catch((reason: unknown) => setError(messageOf(reason))); }, 350);
     return () => window.clearTimeout(timer);
-  }, [ui]);
+  }, [isSecondary, ui]);
+
+  useEffect(() => {
+    if (!isSecondary || bootstrap.active === null || !snapshot || bootstrapSelectionApplied.current) return;
+    bootstrapSelectionApplied.current = true;
+    if (snapshot.active === bootstrap.active && snapshot.selection.includes(bootstrap.active)) return;
+    void runCommand('library.select', { ids: [bootstrap.active], active: bootstrap.active, mode: 'replace' })
+      .then(() => refresh())
+      .catch((reason: unknown) => setError(messageOf(reason)));
+  }, [bootstrap.active, isSecondary, refresh, snapshot]);
 
   const setUi = useCallback((patch: Partial<UiState> | ((current: UiState) => Partial<UiState>)) => {
     setUiState((current) => {
@@ -290,6 +337,28 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  const reloadExternalEdits = useCallback(async () => {
+    if (externalReloadInFlight.current || externalEditIds.current.size === 0) return;
+    externalReloadInFlight.current = true;
+    const ids = [...externalEditIds.current];
+    try {
+      const result = await runCommand('photo.reload', { ids });
+      const payload = objectOf(result);
+      if (!payload || !Array.isArray(payload.reloaded) || !payload.reloaded.every((id) => typeof id === 'number' && Number.isSafeInteger(id) && id > 0)) {
+        throw new Error('photo.reload returned an invalid result');
+      }
+      const reloaded = new Set(payload.reloaded as number[]);
+      reloaded.forEach((id) => externalEditIds.current.delete(id));
+      await refresh();
+      const changed = [...reloaded].filter((id) => ids.includes(id)).length;
+      setNotice(changed ? `Reloaded ${changed} external edit${changed === 1 ? '' : 's'}` : 'Checked external edits');
+    } catch (reason: unknown) {
+      setError(messageOf(reason));
+    } finally {
+      externalReloadInFlight.current = false;
+    }
+  }, [refresh]);
+
   const run = useCallback(async (id: string, params: JsonObject = {}): Promise<unknown> => {
     try {
       if ((id === 'photo.delete' || id === 'photo.deletePermanently') && ui.confirmDelete && params.confirmed !== true) {
@@ -297,10 +366,16 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
         return null;
       }
       if ((UI_COMMAND_IDS as readonly string[]).includes(id)) {
+        if (id === 'view.secondWindow') {
+          const active = typeof params.active === 'number' ? params.active : snapshotRef.current?.active ?? null;
+          const view = typeof params.view === 'string' && (BOOTSTRAP_VIEWS as readonly string[]).includes(params.view)
+            ? params.view as ViewMode
+            : 'detail';
+          return openSecondWindow(view, active);
+        }
         const nextDialog = dialogForCommand(id);
         if (nextDialog) setDialog(nextDialog);
         setUi((current) => applyUiCommand(id, current) ?? {});
-        if (id === 'view.secondWindow') return nativeAction('secondWindow', params);
         if (id === 'view.fullScreenPreview') return nativeAction('toggleFullscreen', { ...params, enabled: params.enabled });
         if (id === 'view.enterFullScreen') return nativeAction('fullscreen', params);
         if (id === 'app.quit') return nativeAction('closeWindow', params);
@@ -351,6 +426,15 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
         }
         if (id === 'photo.editInExternal') {
           const result = await runCommand('photo.editExternal', params) as JsonObject;
+          const editId = externalEditId(result);
+          if (editId !== null) {
+            externalEditIds.current.add(editId);
+            while (externalEditIds.current.size > MAX_EXTERNAL_EDIT_IDS) {
+              const oldest = externalEditIds.current.values().next().value;
+              if (typeof oldest !== 'number') break;
+              externalEditIds.current.delete(oldest);
+            }
+          }
           const path = firstPath(result?.path);
           const requestedEditor = typeof params.app === 'string' && params.app.trim() ? params.app : ui.externalEditor;
           if (path) await nativeAction('openExternalEditor', { path, app: requestedEditor || undefined });
@@ -468,7 +552,23 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
 
   const native = useCallback(async (action: string, params: JsonObject = {}): Promise<unknown> => {
     try {
-      const result = await nativeAction(action, params);
+      if (isSecondary && action === 'preferences.patch') {
+        // Secondary windows have private UI preferences; never write their changes
+        // into main window's persisted host preferences.
+        const local = { ui: params.ui };
+        setUi(preferenceUi(local));
+        return local;
+      }
+      const nativeParams = action === 'secondWindow'
+        ? {
+            ...params,
+            view: typeof params.view === 'string' && (BOOTSTRAP_VIEWS as readonly string[]).includes(params.view) ? params.view : 'detail',
+            ...(typeof params.active === 'number' ? {} : snapshotRef.current?.active == null ? {} : { active: snapshotRef.current.active }),
+          }
+        : params;
+      const result = action === 'secondWindow'
+        ? await openSecondWindow(nativeParams.view as ViewMode, typeof nativeParams.active === 'number' ? nativeParams.active : null)
+        : await nativeAction(action, nativeParams);
       if (action === 'preferences.patch' && result && typeof result === 'object' && !Array.isArray(result)) {
         const patch = preferenceUi(result as JsonObject);
         if (Object.keys(patch).length) setUi(patch);
@@ -480,11 +580,26 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
       setError(text);
       throw reason;
     }
-  }, [setUi]);
+  }, [isSecondary, setUi]);
 
   useEffect(() => {
     let live = true;
     let unlisten: Array<() => void> = [];
+    const expectedLabel = isSecondary ? 'second-main' : 'main';
+    const focusChanged = (focused: boolean, label?: unknown) => {
+      if (typeof label === 'string' && label !== expectedLabel) return;
+      if (!focused) {
+        nativeFocused.current = false;
+        return;
+      }
+      const returned = !nativeFocused.current;
+      nativeFocused.current = true;
+      if (returned) void reloadExternalEdits();
+    };
+    const onBlur = () => focusChanged(false);
+    const onFocus = () => focusChanged(true);
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('focus', onFocus);
     void Promise.all([
       listen<JsonObject>('lc://native-drop', (event) => {
         if (!live) return;
@@ -502,6 +617,10 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
         liveNotice.current = message;
         setNotice(message);
       }),
+      listen<JsonObject>('lc://window-focus', (event) => {
+        if (!live) return;
+        focusChanged(event.payload?.focused === true, event.payload?.label);
+      }),
       listen<JsonObject>('lc://close-requested', (event) => {
         if (!live) return;
         if (event.payload?.unsaved === true) {
@@ -518,8 +637,13 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
         }
       }),
     ]).then((stops) => { if (live) unlisten = stops; else stops.forEach((stop) => stop()); }).catch(() => undefined);
-    return () => { live = false; unlisten.forEach((stop) => stop()); };
-  }, [run]);
+    return () => {
+      live = false;
+      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('focus', onFocus);
+      unlisten.forEach((stop) => stop());
+    };
+  }, [isSecondary, reloadExternalEdits, run]);
 
   const value = useMemo<DesktopContextValue>(() => ({ snapshot, ui, setUi, run, native, refresh, dialog, setDialog, error, notice, setNotice, histogram, setHistogram }), [dialog, error, histogram, native, notice, refresh, run, setUi, snapshot, ui]);
   return <DesktopContext.Provider value={value}>{children}</DesktopContext.Provider>;

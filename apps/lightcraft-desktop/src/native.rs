@@ -15,7 +15,6 @@ use std::{fs, path::Path};
 
 use lightcraft_desktop_host::{DesktopHandle, HostOptions, PreviewRequest};
 use serde_json::{Value, json};
-#[cfg(feature = "qa-native")]
 use tauri::WebviewWindow;
 use tauri::http::{Request, Response};
 #[cfg(feature = "qa-native")]
@@ -112,10 +111,11 @@ mod tauri_commands {
     }
 
     #[tauri::command]
-    pub(super) async fn lc_preferences(state: State<'_, AppState>, patch: Option<Value>) -> Result<Value, String> {
+    pub(super) async fn lc_preferences(state: State<'_, AppState>, patch: Option<Value>, window: WebviewWindow<Wry>) -> Result<Value, String> {
         let preferences = state.preferences.clone();
         let host = state.host.clone();
         let startup_error = state.startup_error.clone();
+        let patch = preference_patch_for_window(&window, patch);
         blocking(move || {
             let value = preferences.patch(patch)?;
             if let Some(host) = host {
@@ -130,7 +130,14 @@ mod tauri_commands {
     }
 
     #[tauri::command]
-    pub(super) async fn lc_native(action: String, params: Value, app: AppHandle<Wry>, state: State<'_, AppState>) -> Result<Value, String> {
+    pub(super) async fn lc_native(
+        action: String,
+        params: Value,
+        app: AppHandle<Wry>,
+        window: WebviewWindow<Wry>,
+        state: State<'_, AppState>,
+    ) -> Result<Value, String> {
+        let caller_label = window.label().to_string();
         if action == "openLibrary" {
             let host = state.host.clone();
             let startup_error = state.startup_error.clone();
@@ -164,8 +171,9 @@ mod tauri_commands {
         if action == "preferences.patch" {
             let preferences = state.preferences.clone();
             let host = state.host.clone();
+            let patch = preference_patch_for_window(&window, Some(params));
             return blocking(move || {
-                let value = preferences.patch(Some(params))?;
+                let value = preferences.patch(patch)?;
                 if let Some(host) = host { host.preferences(Some(value.clone())) } else { Ok(value) }
             })
             .await;
@@ -173,15 +181,19 @@ mod tauri_commands {
         if action == "saveBeforeClose" {
             let host = state.host.clone();
             let startup_error = state.startup_error.clone();
-            let label = params.get("label").and_then(Value::as_str).unwrap_or("main").to_string();
+            let label =
+                if caller_label == "main" { params.get("label").and_then(Value::as_str).unwrap_or("main").to_string() } else { caller_label.clone() };
+            let owns_session = caller_label == "main";
             let app_handle = app.clone();
             return blocking(move || {
-                let host = host.as_ref().ok_or_else(|| startup_error.unwrap_or_else(|| "desktop host is unavailable".into()))?;
-                let snapshot = host.snapshot()?;
-                if let Some(reason) = active_close_reason(&snapshot) {
-                    return Err(reason);
+                if owns_session {
+                    let host = host.as_ref().ok_or_else(|| startup_error.unwrap_or_else(|| "desktop host is unavailable".into()))?;
+                    let snapshot = host.snapshot()?;
+                    if let Some(reason) = active_close_reason(&snapshot) {
+                        return Err(reason);
+                    }
+                    host.persist()?;
                 }
-                host.persist()?;
                 let window = app_handle.get_webview_window(&label).ok_or_else(|| format!("window {label} is unavailable"))?;
                 window.close().map_err(|error| format!("closing window: {error}"))?;
                 Ok(json!({"closed": true}))
@@ -190,7 +202,7 @@ mod tauri_commands {
         }
         if matches!(action.as_str(), "secondWindow" | "fullscreen" | "toggleFullscreen" | "confirmClose" | "closeWindow") {
             let action = if action == "fullscreen" { "toggleFullscreen" } else { action.as_str() };
-            return native_window_action(&app, action, &params);
+            return native_window_action(&app, action, &params, Some(&caller_label));
         }
         blocking(move || services::run(&action, &params)).await
     }
@@ -219,6 +231,16 @@ fn merge_startup_warnings(mut snapshot: Value, warnings: &[String]) -> Value {
         }
     }
     snapshot
+}
+
+fn preference_patch_for_window(window: &WebviewWindow<Wry>, patch: Option<Value>) -> Option<Value> {
+    if window.label() == "main" {
+        return patch;
+    }
+    let Some(Value::Object(mut values)) = patch else { return patch };
+    values.remove("ui");
+    values.remove("layout");
+    Some(Value::Object(values))
 }
 
 fn open_library_action(host: Option<DesktopHandle>, startup_error: Option<String>, preferences: Preferences, params: Value) -> Result<Value, String> {
@@ -252,13 +274,29 @@ fn persist_library_path(preferences: &Preferences, host: Option<&DesktopHandle>,
     Ok(result)
 }
 
-fn native_window_action(app: &AppHandle<Wry>, action: &str, params: &Value) -> Result<Value, String> {
-    let label = params.get("label").and_then(Value::as_str).unwrap_or("main");
+fn native_window_action(app: &AppHandle<Wry>, action: &str, params: &Value, caller_label: Option<&str>) -> Result<Value, String> {
+    let label = match caller_label {
+        Some(caller) if caller != "main" => caller,
+        _ => params.get("label").and_then(Value::as_str).or(caller_label).unwrap_or("main"),
+    };
     let window = app.get_webview_window(label).ok_or_else(|| format!("window {label} is unavailable"))?;
     match action {
         "secondWindow" => {
             if app.get_webview_window("second-main").is_none() {
-                WebviewWindowBuilder::new(app, "second-main", WebviewUrl::App("index.html".into()))
+                let mut route = String::from("index.html?window=second");
+                if let Some(view) = params
+                    .get("view")
+                    .and_then(Value::as_str)
+                    .filter(|view| matches!(*view, "photoGrid" | "squareGrid" | "detail" | "compare" | "survey" | "people" | "reference"))
+                {
+                    route.push_str("&view=");
+                    route.push_str(view);
+                }
+                if let Some(active) = params.get("active").and_then(Value::as_u64) {
+                    route.push_str("&active=");
+                    route.push_str(&active.to_string());
+                }
+                WebviewWindowBuilder::new(app, "second-main", WebviewUrl::App(route.into()))
                     .title("LightCraft")
                     .inner_size(1200.0, 800.0)
                     .min_inner_size(800.0, 560.0)
@@ -274,11 +312,17 @@ fn native_window_action(app: &AppHandle<Wry>, action: &str, params: &Value) -> R
         }
         "confirmClose" | "closeWindow" => {
             let force = params.get("force").and_then(Value::as_bool).unwrap_or(false);
-            if force && let Some(state) = app.try_state::<AppState>() {
+            if force
+                && label == "main"
+                && let Some(state) = app.try_state::<AppState>()
+            {
                 state.closing.store(true, Ordering::SeqCst);
             }
             if let Err(error) = window.close() {
-                if force && let Some(state) = app.try_state::<AppState>() {
+                if force
+                    && label == "main"
+                    && let Some(state) = app.try_state::<AppState>()
+                {
                     state.closing.store(false, Ordering::SeqCst);
                 }
                 return Err(format!("closing window: {error}"));
@@ -459,7 +503,7 @@ fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<Strin
                 json!({"closed": true})
             } else if matches!(action, "secondWindow" | "fullscreen" | "toggleFullscreen" | "confirmClose" | "closeWindow") {
                 let mapped = if action == "fullscreen" { "toggleFullscreen" } else { action };
-                native_window_action(app, mapped, &params)?
+                native_window_action(app, mapped, &params, None)?
             } else {
                 services::run(action, &params)?
             }
@@ -749,6 +793,10 @@ pub fn run() {
         .on_window_event(|window, event| {
             use tauri::Emitter;
             match event {
+                tauri::WindowEvent::Focused(focused) => {
+                    let _ = window.emit("lc://window-focus", json!({"label": window.label(), "owner": window.label() == "main", "focused": focused}));
+                }
+                tauri::WindowEvent::CloseRequested { .. } if window.label() != "main" => {}
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     let Some(state) = window.app_handle().try_state::<AppState>() else { return };
                     let force = state.closing.swap(false, Ordering::SeqCst);
