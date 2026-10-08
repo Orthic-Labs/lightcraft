@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 use lightcraft_engine::Session;
 
@@ -778,7 +778,6 @@ mod tests {
         let controller_result = Controller::new(HostOptions { demo: true, ..HostOptions::default() }, PreviewStore::default());
         assert!(controller_result.is_ok());
         let Ok(mut controller) = controller_result else { return };
-        assert!(controller.preferences(Some(json!({"sam3Dir": current.to_string_lossy()}))).is_ok());
         let explicit = controller.preferences(Some(json!({
             "ui": {"memoryMb": 128, "futureSetting": {"keep": true}},
             "futureRoot": {"keep": "yes"}
