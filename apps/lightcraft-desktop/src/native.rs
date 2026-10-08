@@ -768,7 +768,9 @@ fn qa_hidden_enabled(value: Option<&OsStr>) -> bool {
 
 fn runtime_modes(args: &[String]) -> (bool, Option<PathBuf>) {
     #[cfg(feature = "qa-native")]
-    let qa_env = std::env::var_os("LIGHTCRAFT_DESKTOP_QA").is_some() || qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_HIDDEN").as_deref());
+    let qa_env = std::env::var_os("LIGHTCRAFT_DESKTOP_QA").is_some()
+        || qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_HIDDEN").as_deref())
+        || qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_BACKGROUND").as_deref());
     #[cfg(not(feature = "qa-native"))]
     let qa_env = false;
     let qa = args.iter().any(|arg| arg == "--qa") || qa_env;
@@ -982,7 +984,8 @@ fn build_shell() -> rightkit_shell::Shell {
     let args: Vec<String> = std::env::args().collect();
     let qa = args.iter().any(|arg| arg == "--qa")
         || std::env::var_os("LIGHTCRAFT_DESKTOP_QA").is_some()
-        || qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_HIDDEN").as_deref());
+        || qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_HIDDEN").as_deref())
+        || qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_BACKGROUND").as_deref());
     let (_, qa_data_dir) = runtime_modes(&args);
     let mut builder =
         rightkit_shell::Shell::builder("lightcraft-preview").app_name("LightCraft").main_label("main").hardening(hardening).show_on_ready(!qa);

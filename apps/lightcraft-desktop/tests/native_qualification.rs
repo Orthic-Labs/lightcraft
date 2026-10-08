@@ -65,7 +65,7 @@ fn scenario_workspace(scenario: &rightkit_qa::harness::Scenario) -> rightkit_qa:
 fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, _catalog: &Path) -> (rightkit_qa::control::Control, PathBuf) {
     let ws = scenario_workspace(scenario);
     let data = ws.data_dir.clone();
-    let mut env = ws
+    let env = ws
         .env
         .iter()
         .filter(|(key, _)| {
@@ -85,9 +85,8 @@ fn launch_hidden(binary: &Path, scenario: &rightkit_qa::harness::Scenario, _cata
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect::<Vec<_>>();
-    // Keep the actual app window invisible without globally hiding NSApplication,
-    // which can suspend WKWebView layout. This app flag also disables Shell reveal.
-    env.push(("LIGHTCRAFT_DESKTOP_QA".into(), "1".into()));
+    // SDK launch supplies RIGHTKIT_QA_BACKGROUND for both background/hidden modes.
+    // App QA handling keeps its actual window invisible without hiding NSApplication.
     #[cfg(target_os = "macos")]
     let launch_binary = binary
         .ancestors()
