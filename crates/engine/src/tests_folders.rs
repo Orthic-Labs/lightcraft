@@ -230,6 +230,9 @@ fn following_a_folder_reads_both_spellings_the_same_way() {
     s.filter.library_folder = Some("/a/x/../b/sub".into());
     crate::cmd::browse::follow_folder(&mut s, "/a/b", "/a/c");
     assert_eq!(s.filter.library_folder.as_deref(), Some("/a/c/sub"), "a subfolder stays a subfolder, never widens to its parent");
+    s.filter.library_folder = Some(r"C:\a\b\sub".into());
+    crate::cmd::browse::follow_folder(&mut s, r"C:\a\b", r"C:\a\c");
+    assert_eq!(s.filter.library_folder.as_deref(), Some(r"C:\a\c\sub"), "a Windows subfolder keeps native separators");
     s.filter.library_folder = Some("/elsewhere/b".into());
     crate::cmd::browse::follow_folder(&mut s, "/a/b", "/a/c");
     assert_eq!(s.filter.library_folder.as_deref(), Some("/elsewhere/b"), "other folders are left alone");

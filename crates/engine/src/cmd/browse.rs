@@ -274,7 +274,9 @@ fn follow_library_folder(chosen: &mut Option<String>, from: &str, to: &str) {
     }
     if let Some(rest) = ck.strip_prefix(fk.as_str()).filter(|r| r.is_empty() || r.starts_with('/') || fk.ends_with('/')) {
         let rest = rest.trim_start_matches('/');
-        *chosen = Some(if rest.is_empty() { to.to_string() } else { format!("{}/{rest}", to.trim_end_matches(['/', '\\'])) });
+        let separator = if to.contains('\\') || (cfg!(windows) && to.as_bytes().get(1) == Some(&b':')) { '\\' } else { '/' };
+        let rest = if separator == '\\' { rest.replace('/', "\\") } else { rest.to_string() };
+        *chosen = Some(if rest.is_empty() { to.to_string() } else { format!("{}{separator}{rest}", to.trim_end_matches(['/', '\\'])) });
     }
 }
 
