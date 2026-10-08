@@ -980,6 +980,7 @@ fn native_hidden_control_journeys() {
                     assert!(decoded["height"].as_u64().is_some_and(|height| height > 0));
                     let decoded_handle = decoded["handle"].as_str().expect("merged preview handle must be text").to_string();
                     control.command("lc_preview_ack", &json!({"handle": decoded_handle})).expect("merged preview handle must be acknowledged");
+                    wait_for_dom(control, "return [...document.querySelectorAll('.lc-dialog-actions button')].some((button) => button.textContent === 'Close' && !button.disabled);");
                     click_dom(control, ".lc-dialog-actions .lc-button", "completed HDR dialog must close");
                     wait_for_dom(control, "return document.querySelector('.lc-dialog') === null;");
                     control.key("D").expect("merged DNG develop route must execute");
