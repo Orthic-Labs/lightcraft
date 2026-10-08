@@ -262,7 +262,7 @@ impl Controller {
         let worker = std::thread::Builder::new()
             .name("sam3-validate".into())
             .spawn(move || {
-                let result = lightcraft_engine::segment::Segmenter::validate_model_dir_with_progress(&worker_path, |done, total| {
+                let result = lightcraft_engine::segment::Segmenter::validate_model_dir_with_progress(&worker_path, |done, _total| {
                     worker_progress.store(done, Ordering::Relaxed);
                     !worker_cancel.load(Ordering::Relaxed)
                 });
@@ -288,6 +288,7 @@ impl Controller {
         if let Some(status) = self.sam_validation_status.as_mut() {
             status.done = task.progress.load(Ordering::Relaxed).min(status.total);
         }
+        let cancelled = task.cancel.load(Ordering::Relaxed);
         let result = match task.result.try_recv() {
             Ok(result) => result,
             Err(std::sync::mpsc::TryRecvError::Empty) => return,
@@ -299,12 +300,18 @@ impl Controller {
         }
         let path = task.path;
         match result {
-            Ok(()) => {
+            Ok(()) if !cancelled => {
                 self.segmenter_dir = Some(path.clone());
                 self.session.segmenter.configure_model_dir(Some(path.clone()));
                 if let Some(status) = self.sam_validation_status.as_mut() {
                     status.done = status.total;
                     status.error = None;
+                    status.finished = true;
+                }
+            }
+            Ok(()) => {
+                if let Some(status) = self.sam_validation_status.as_mut() {
+                    status.error = Some("SAM 3 model validation cancelled".into());
                     status.finished = true;
                 }
             }
@@ -786,6 +793,63 @@ mod tests {
         let automatic = controller.preferences(Some(json!({"ui": {"memoryMb": 0}})));
         assert!(automatic.is_ok());
         assert_eq!(controller.session.memory_report().budget, lightcraft_engine::memory::default_budget());
+        assert!(controller.shutdown().is_ok());
+    }
+
+    #[test]
+    fn malformed_sam_folder_validation_is_async_and_does_not_switch_directory() {
+        let current = temp_library("sam3-current");
+        let selected = temp_library("sam3-malformed");
+        let controller_result =
+            Controller::new(HostOptions { demo: true, sam3_dir: Some(current.clone()), ..HostOptions::default() }, PreviewStore::default());
+        assert!(controller_result.is_ok());
+        let Ok(mut controller) = controller_result else { return };
+        let started = Instant::now();
+        let pending = controller.run("segment.model.selectFolder", &json!({"path": selected.to_string_lossy()}));
+        assert!(pending.is_ok());
+        assert!(started.elapsed() < Duration::from_secs(1), "selection must return before validation finishes");
+        let status = controller.run("segment.model.status", &json!({}));
+        assert!(status.is_ok());
+        assert!(status.as_ref().ok().and_then(|value| value.get("validation")).is_some());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            controller.poll();
+            let status = controller.sam_validation_json();
+            if !status.get("running").and_then(Value::as_bool).unwrap_or(false) {
+                assert!(status.get("error").and_then(Value::as_str).is_some(), "malformed folder must report validation error");
+                break;
+            }
+            assert!(Instant::now() < deadline, "malformed folder validation did not finish");
+            std::thread::yield_now();
+        }
+        assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&current));
+        assert!(controller.shutdown().is_ok());
+    }
+
+    #[test]
+    fn cancelled_sam_validation_cannot_commit_a_successful_result() {
+        let current = temp_library("sam3-cancel-current");
+        let selected = temp_library("sam3-cancel-selected");
+        let controller_result =
+            Controller::new(HostOptions { demo: true, sam3_dir: Some(current.clone()), ..HostOptions::default() }, PreviewStore::default());
+        assert!(controller_result.is_ok());
+        let Ok(mut controller) = controller_result else { return };
+        let cancel = std::sync::Arc::new(AtomicBool::new(true));
+        let progress = std::sync::Arc::new(AtomicU64::new(0));
+        let (tx, result) = std::sync::mpsc::sync_channel(1);
+        assert!(tx.send(Ok(())).is_ok());
+        controller.sam_validation_status = Some(SamValidationStatus {
+            path: selected.clone(),
+            done: 0,
+            total: lightcraft_engine::segment::MODEL_BYTES,
+            error: None,
+            finished: false,
+        });
+        controller.sam_validation = Some(SamValidationTask { path: selected, cancel, progress, result, worker: None });
+        controller.poll_sam_validation();
+        let status = controller.sam_validation_json();
+        assert!(status.get("error").and_then(Value::as_str).is_some_and(|error| error.contains("cancelled")));
+        assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&current));
         assert!(controller.shutdown().is_ok());
     }
 
