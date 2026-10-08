@@ -1499,6 +1499,9 @@ fn native_hidden_control_journeys() {
                         click_dom(control, ".stage-toolstrip button[aria-label='Edit']", "Edit panel must open before histogram & curve checks");
                         wait_for_dom(control, "return document.querySelector('.lc-histogram svg path[stroke=\"#df6464\"]')?.getAttribute('d')?.includes('L') === true && document.querySelector('.lc-histogram__footer')?.textContent.includes('samples') === true;");
                         let curve_before = snapshot(control)["develop"]["curve"].clone();
+                        let scrolled = control.eval("return (() => { const button = document.querySelector('.lc-curve-picker > button'); if (!button) return false; button.scrollIntoView({block: 'center', inline: 'nearest'}); return true; })();").expect("curve preset control must scroll into view");
+                        assert_eq!(scrolled.as_bool(), Some(true));
+                        wait_for_dom(control, "return (() => { const button = document.querySelector('.lc-curve-picker > button'); if (!button) return false; const rect = button.getBoundingClientRect(); return rect.top >= 0 && rect.bottom <= innerHeight && rect.left >= 0 && rect.right <= innerWidth; })();");
                         click_dom(control, ".lc-curve-picker > button", "curve preset picker must open");
                         wait_for_dom(control, "return document.querySelector('[aria-label=\"Tone curve presets\"]') !== null;");
                         click_dom(control, ".lc-curve-picker__menu [role=menuitemradio]:nth-child(3)", "Strong Contrast preset must apply");
