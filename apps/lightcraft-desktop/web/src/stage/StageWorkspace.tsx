@@ -4,12 +4,14 @@ import { PhotoPreview } from "../preview/PhotoPreview";
 import Filmstrip from "../library/Filmstrip";
 import { useDesktop } from "../desktop";
 import type { DesktopSnapshot, PhotoSummary, UiState, ViewMode } from "../types";
+import { longToNormalized, normalizedPhotoPoint, normalizedToLong, orientedAspectFor, radialHandleAt, radialHandles, radialShapeFromDrag, rotateNormalizedPoint } from "./maskGeometry";
+import type { DevelopShape, Point } from "./maskGeometry";
 import "./StageWorkspace.css";
 
-type Point = { x: number; y: number };
 type Box = { x0: number; y0: number; x1: number; y1: number };
-type DevelopShape = Record<string, unknown>;
 type MaskShapeView = { shape: DevelopShape; id: number; component: number; visible: boolean };
+
+export { longToNormalized, normalizedPhotoPoint, normalizedToLong, orientedAspectFor, radialHandleAt, radialHandles, radialShapeFromDrag, rotateNormalizedPoint } from "./maskGeometry";
 
 const views: Array<{ id: ViewMode; label: string; key: string }> = [
   { id: "detail", label: "Detail", key: "D" },
@@ -64,146 +66,10 @@ function cropOf(develop: DevelopShape): { rect: Box; angle: number } {
   return { rect, angle: number(geometry.angle ?? crop.angle) };
 }
 
-/** Oriented image aspect used by Rust mask geometry (width / height after EXIF orientation). */
-export function orientedAspectFor(develop: DevelopShape, sourceAspect: number): number {
-  const orientation = String(develop.orientation ?? "normal").toLowerCase();
-  const aspect = Math.max(0.001, Number.isFinite(sourceAspect) ? sourceAspect : 1);
-  return ["rotate90", "rotate270", "transpose", "transverse"].includes(orientation) ? 1 / aspect : aspect;
-}
-
-/** Convert normalized oriented coordinates into Rust's long-edge coordinate units. */
-export function normalizedToLong(value: Point, aspect: number): Point {
-  const safeAspect = Math.max(0.001, Number.isFinite(aspect) ? aspect : 1);
-  const longEdge = Math.max(1, safeAspect);
-  return { x: value.x * safeAspect / longEdge, y: value.y / longEdge };
-}
-
-/** Convert Rust long-edge coordinate units back into normalized oriented coordinates. */
-export function longToNormalized(value: Point, aspect: number): Point {
-  const safeAspect = Math.max(0.001, Number.isFinite(aspect) ? aspect : 1);
-  const longEdge = Math.max(1, safeAspect);
-  return { x: value.x * longEdge / safeAspect, y: value.y * longEdge };
-}
-
-function radialOffset(value: Point, aspect: number): Point {
-  return normalizedToLong(value, aspect);
-}
-
-function radialHandlePoint(center: Point, radius: Point, angle: number, aspect: number): Point {
-  const centerLong = radialOffset(center, aspect);
-  const radiusLong = radius;
-  const next = {
-    x: radiusLong.x * Math.cos(angle) - radiusLong.y * Math.sin(angle),
-    y: radiusLong.x * Math.sin(angle) + radiusLong.y * Math.cos(angle),
-  };
-  return longToNormalized({ x: centerLong.x + next.x, y: centerLong.y + next.y }, aspect);
-}
-
-function rotateNormalizedPoint(value: Point, degrees: number, aspect: number): Point {
-  const radians = (degrees * Math.PI) / 180;
-  const center = normalizedToLong({ x: 0.5, y: 0.5 }, aspect);
-  const source = normalizedToLong(value, aspect);
-  const dx = source.x - center.x;
-  const dy = source.y - center.y;
-  return longToNormalized({
-    x: center.x + dx * Math.cos(radians) - dy * Math.sin(radians),
-    y: center.y + dx * Math.sin(radians) + dy * Math.cos(radians),
-  }, aspect);
-}
-
-/** Convert a client point into uncropped, oriented image coordinates.
- *
- * Stage transforms are applied around the image centre. Undoing them here keeps
- * brush, gradient, object and colour samples aligned at every zoom, pan, crop,
- * flip and straighten angle.
- */
-export function normalizedPhotoPoint(
-  clientX: number,
-  clientY: number,
-  bounds: Pick<DOMRect, "left" | "top" | "width" | "height">,
-  develop: DevelopShape,
-  sourceAspect: number,
-  zoom = 1,
-  pan: Point = { x: 0, y: 0 },
-): Point {
-  const crop = cropOf(develop);
-  const orientedAspect = orientedAspectFor(develop, sourceAspect);
-  const outputAspect = orientedAspect * Math.max(0.001, crop.rect.x1 - crop.rect.x0) / Math.max(0.001, crop.rect.y1 - crop.rect.y0);
-  const boxAspect = bounds.height > 0 ? bounds.width / bounds.height : outputAspect;
-  const drawWidth = boxAspect > outputAspect ? bounds.height * outputAspect : bounds.width;
-  const drawHeight = boxAspect > outputAspect ? bounds.height : bounds.width / outputAspect;
-  const drawLeft = bounds.left + (bounds.width - drawWidth) / 2;
-  const drawTop = bounds.top + (bounds.height - drawHeight) / 2;
-
-  // Undo stage transform in same order CSS applies functions. Rotation is in
-  // rendered box pixels; rotating normalized x/y directly skews non-square panes.
-  const safeZoom = Math.max(0.001, Number.isFinite(zoom) ? zoom : 1);
-  let tx = bounds.width > 0 ? (clientX - bounds.left) / bounds.width : 0.5;
-  let ty = bounds.height > 0 ? (clientY - bounds.top) / bounds.height : 0.5;
-  tx -= Number.isFinite(pan.x) ? pan.x : 0;
-  ty -= Number.isFinite(pan.y) ? pan.y : 0;
-  tx = (tx - 0.5) / safeZoom + 0.5;
-  ty = (ty - 0.5) / safeZoom + 0.5;
-  const stageRadians = (-crop.angle * Math.PI) / 180;
-  const stageDx = tx * bounds.width - bounds.width / 2;
-  const stageDy = ty * bounds.height - bounds.height / 2;
-  const screenX = bounds.left + bounds.width / 2 + stageDx * Math.cos(stageRadians) - stageDy * Math.sin(stageRadians);
-  const screenY = bounds.top + bounds.height / 2 + stageDx * Math.sin(stageRadians) + stageDy * Math.cos(stageRadians);
-  let px = drawWidth > 0 ? (screenX - drawLeft) / drawWidth : 0.5;
-  let py = drawHeight > 0 ? (screenY - drawTop) / drawHeight : 0.5;
-  px = Math.max(0, Math.min(1, px));
-  py = Math.max(0, Math.min(1, py));
-  const cropValue = record(develop.crop);
-  if (cropValue.flip_h === true || cropValue.flipH === true) px = 1 - px;
-  if (cropValue.flip_v === true || cropValue.flipV === true) py = 1 - py;
-  const straightX = crop.rect.x0 + px * (crop.rect.x1 - crop.rect.x0);
-  const straightY = crop.rect.y0 + py * (crop.rect.y1 - crop.rect.y0);
-  const rotated = rotateNormalizedPoint({ x: straightX, y: straightY }, -crop.angle, orientedAspect);
-  return { x: Math.max(0, Math.min(1, rotated.x)), y: Math.max(0, Math.min(1, rotated.y)) };
-}
+const rotatePoint = rotateNormalizedPoint;
 
 function invertPhotoPoint(event: PointerEvent<HTMLElement>, element: HTMLElement, develop: DevelopShape, sourceAspect: number, zoom: number, pan: Point): Point {
   return normalizedPhotoPoint(event.clientX, event.clientY, element.getBoundingClientRect(), develop, sourceAspect, zoom, pan);
-}
-
-export function radialShapeFromDrag(start: Point, end: Point, sourceAspect: number, orientation = "normal"): DevelopShape {
-  const rawAspect = Math.max(0.001, sourceAspect);
-  const aspect = ["rotate90", "rotate270", "transpose", "transverse"].includes(String(orientation).toLowerCase()) ? 1 / rawAspect : rawAspect;
-  const longEdge = Math.max(aspect, 1);
-  return {
-    kind: "radial",
-    center: { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 },
-    rx: Math.max(0.001, Math.abs(end.x - start.x) * aspect / longEdge / 2),
-    ry: Math.max(0.001, Math.abs(end.y - start.y) / longEdge / 2),
-    angle: 0,
-    feather: 50,
-    invert: false,
-  };
-}
-
-function radialHandleAt(value: Point, shape: DevelopShape, aspect: number): "move" | "rx" | "ry" | "rotate" | null {
-  const center = shapePoint(shape.center);
-  if (!center) return null;
-  const rx = number(shape.rx);
-  const ry = number(shape.ry);
-  if (!(rx > 0 && ry > 0)) return null;
-  const angle = number(shape.angle) * Math.PI / 180;
-  const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
-  const right = radialHandlePoint(center, { x: rx, y: 0 }, angle, aspect);
-  const bottom = radialHandlePoint(center, { x: 0, y: ry }, angle, aspect);
-  const top = radialHandlePoint(center, { x: 0, y: -(ry + 0.06 / Math.max(1, aspect)) }, angle, aspect);
-  if (distance(value, right) < 0.045) return "rx";
-  if (distance(value, bottom) < 0.045) return "ry";
-  if (distance(value, top) < 0.045) return "rotate";
-  const localAngle = -angle;
-  const localLong = normalizedToLong({ x: value.x - center.x, y: value.y - center.y }, aspect);
-  const local = { x: localLong.x * Math.cos(localAngle) - localLong.y * Math.sin(localAngle), y: localLong.x * Math.sin(localAngle) + localLong.y * Math.cos(localAngle) };
-  if ((local.x * local.x) / (rx * rx) + (local.y * local.y) / (ry * ry) <= 1) return "move";
-  return null;
-}
-
-function rotatePoint(value: Point, degrees: number, aspect = 1): Point {
-  return rotateNormalizedPoint(value, degrees, aspect);
 }
 
 function cropHandleAt(value: Point, rect: Box): number | null {
@@ -419,15 +285,6 @@ function shapePins(shape: DevelopShape): Point[] {
     });
   }
   return [];
-}
-
-function radialHandles(shape: DevelopShape, aspect: number): Point[] {
-  const center = shapePoint(shape.center);
-  const rx = number(shape.rx);
-  const ry = number(shape.ry);
-  if (!center || !(rx > 0 && ry > 0)) return [];
-  const angle = number(shape.angle) * Math.PI / 180;
-  return [{ x: rx, y: 0 }, { x: 0, y: ry }, { x: 0, y: -(ry + 0.06 / Math.max(1, aspect)) }].map((value) => radialHandlePoint(center, value, angle, aspect));
 }
 
 function brushPath(shape: DevelopShape): string | null {
@@ -720,8 +577,11 @@ export function StageWorkspace() {
         const dy = p.y - drag.start.y;
         shape.center = { x: Math.max(0, Math.min(1, center.x + dx)), y: Math.max(0, Math.min(1, center.y + dy)) };
       } else if (drag.radialHandle === "rotate") {
-        const before = Math.atan2(drag.start.y - center.y, drag.start.x - center.x);
-        const after = Math.atan2(p.y - center.y, p.x - center.x);
+        const aspect = orientedAspectFor(develop, sourceAspect);
+        const beforeLong = normalizedToLong({ x: drag.start.x - center.x, y: drag.start.y - center.y }, aspect);
+        const afterLong = normalizedToLong({ x: p.x - center.x, y: p.y - center.y }, aspect);
+        const before = Math.atan2(beforeLong.y, beforeLong.x);
+        const after = Math.atan2(afterLong.y, afterLong.x);
         shape.angle = startAngle + (after - before) * 180 / Math.PI;
       } else {
         const angle = -startAngle * Math.PI / 180;
