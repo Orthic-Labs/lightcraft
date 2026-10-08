@@ -1496,6 +1496,7 @@ fn native_hidden_control_journeys() {
                         let id = imported["active"].as_u64().expect("PNG import must select photo");
                         control.key("D").expect("develop route key must execute for engine export journey");
                         wait_for_dom(control, "return document.querySelector('.stage-workspace.stage-detail') !== null;");
+                        click_dom(control, ".stage-toolstrip button[aria-label='Edit']", "Edit panel must open before histogram & curve checks");
                         wait_for_dom(control, "return document.querySelector('.lc-histogram svg path[stroke=\"#df6464\"]')?.getAttribute('d')?.includes('L') === true && document.querySelector('.lc-histogram__footer')?.textContent.includes('samples') === true;");
                         let curve_before = snapshot(control)["develop"]["curve"].clone();
                         click_dom(control, ".lc-curve-picker > button", "curve preset picker must open");
