@@ -618,7 +618,7 @@ fn control_dispatch(app: &AppHandle<Wry>, name: &str, raw: &str) -> Result<Strin
             let request = args.get("request").cloned().unwrap_or(args);
             control_host(app)?
                 .preview_quick(serde_json::from_value(request).map_err(|error| format!("lc_preview_quick args are invalid: {error}"))?)
-                .map(|value| json!(value))
+                .map(|value| json!(value))?
         }
         "lc_merge_preview" => {
             let request = args.get("request").cloned().unwrap_or(args);
