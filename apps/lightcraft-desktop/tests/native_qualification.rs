@@ -1731,6 +1731,11 @@ fn native_hidden_control_journeys() {
                         choose_inspector_panel(control, "edit");
                         wait_for_dom(control, "return document.querySelector('.lc-histogram svg path[stroke=\"#df6464\"]')?.getAttribute('d')?.includes('L') === true && document.querySelector('.lc-histogram__footer')?.textContent.includes('samples') === true;");
                         let curve_before = snapshot(control)["develop"]["curve"].clone();
+                        let curve_heading = control.eval("return (() => { const button = [...document.querySelectorAll('.lc-inspector__section-head')].find(node => node.querySelector('span:nth-child(2)')?.textContent.trim() === 'Tone Curve'); if (!button) return null; button.scrollIntoView({block: 'center'}); const rect = button.getBoundingClientRect(); return {x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, open: button.getAttribute('data-open') === 'true'}; })();").expect("Tone Curve section must expose its actual heading");
+                        if curve_heading["open"].as_bool() != Some(true) {
+                            control.click(curve_heading["x"].as_f64().expect("curve heading x must be numeric"), curve_heading["y"].as_f64().expect("curve heading y must be numeric"), "left", 1).expect("collapsed Tone Curve section must open by pointer");
+                        }
+                        wait_for_dom(control, "return document.querySelector('.lc-curve-picker > button') !== null;");
                         let scrolled = control.eval("return (() => { const button = document.querySelector('.lc-curve-picker > button'); if (!button) return false; button.scrollIntoView({block: 'center', inline: 'nearest'}); return true; })();").expect("curve preset control must scroll into view");
                         assert_eq!(scrolled.as_bool(), Some(true));
                         wait_for_dom(control, "return (() => { const button = document.querySelector('.lc-curve-picker > button'); if (!button) return false; const rect = button.getBoundingClientRect(); return rect.top >= 0 && rect.bottom <= innerHeight && rect.left >= 0 && rect.right <= innerWidth; })();");
