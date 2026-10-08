@@ -1121,8 +1121,15 @@ pub fn run() {
     #[cfg(feature = "qa-native")]
     let builder = if let Some(control) = qa_control_plugin() { builder.plugin(control) } else { builder };
     #[cfg(target_os = "macos")]
-    let builder =
-        if qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_BACKGROUND").as_deref()) { builder.activate_ignoring_other_apps(false) } else { builder };
+    let builder = {
+        let args: Vec<String> = std::env::args().collect();
+        // Every QA entry point stays in background, including direct --qa launches.
+        if runtime_modes(&args).0 || qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_BACKGROUND").as_deref()) {
+            builder.activate_ignoring_other_apps(false)
+        } else {
+            builder
+        }
+    };
     if let Err(error) = builder.run(context) {
         startup_window_failed();
         eprintln!("lightcraft desktop failed: {error}");
