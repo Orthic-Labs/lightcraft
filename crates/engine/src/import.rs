@@ -28,6 +28,7 @@ use lightcraft_catalog::{MediaKind, Op, Photo, PhotoId, Source};
 use serde::{Deserialize, Serialize};
 
 use crate::Session;
+pub use crate::import_pairs::{RawJpegImportPolicy, RawJpegPair, RawJpegPairKind};
 use crate::media::ProbeInfo;
 
 /// File extensions LightCraft imports (lower case).
@@ -127,6 +128,8 @@ pub struct ImportOptions {
     pub metadata_preset: Option<String>,
     /// Copy: raws are copied as DNG (Copy as DNG).
     pub convert_dng: bool,
+    /// How confidently paired RAW/JPEG variants are selected. Keep both is the default.
+    pub raw_jpeg_policy: RawJpegImportPolicy,
 }
 
 /// How copies are filed in the destination. The date is the capture time, else the time of the
@@ -194,6 +197,15 @@ pub struct ImportCandidate {
     /// A raw variant that can't be decoded yet (why): it imports as preview only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview_only: Option<String>,
+    /// A presentation hint for a confidently paired RAW/JPEG variant; this is not a duplicate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pairing: Option<RawJpegPair>,
+    /// Set by a caller that requested RawOnly. The file remains visible so the user can keep it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_excluded: Option<String>,
+    /// Camera metadata retained for conservative descendant export pairing.
+    #[serde(skip)]
+    pub pairing_camera: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -467,6 +479,7 @@ pub struct ScanInput {
     by_path: HashMap<PathBuf, (PhotoId, ImportCandidate)>,
     by_hash: HashMap<String, PhotoId>,
     cache: HashMap<String, ProbeInfo>,
+    pub raw_jpeg_policy: RawJpegImportPolicy,
     pub scan_options: ImportScanOptions,
 }
 
@@ -488,6 +501,12 @@ pub struct ScanOutput {
 impl ScanInput {
     pub fn new(s: &mut Session, paths: &[String]) -> (Self, Vec<String>) {
         Self::new_with_options(s, paths, ImportScanOptions::default())
+    }
+
+    pub fn new_with_policy(s: &mut Session, paths: &[String], raw_jpeg_policy: RawJpegImportPolicy) -> (Self, Vec<String>) {
+        let (mut input, paths) = Self::new_with_options(s, paths, ImportScanOptions::default());
+        input.raw_jpeg_policy = raw_jpeg_policy;
+        (input, paths)
     }
 
     pub fn new_with_options(s: &mut Session, paths: &[String], scan_options: ImportScanOptions) -> (Self, Vec<String>) {
@@ -514,8 +533,15 @@ impl ScanInput {
                 by_hash.insert(h.clone(), p.id);
             }
         }
-        let input =
-            ScanInput { probe: s.media.file_probe.clone(), skip, by_path, by_hash, cache: std::mem::take(&mut s.import_probes), scan_options };
+        let input = ScanInput {
+            probe: s.media.file_probe.clone(),
+            skip,
+            by_path,
+            by_hash,
+            cache: std::mem::take(&mut s.import_probes),
+            raw_jpeg_policy: RawJpegImportPolicy::KeepBoth,
+            scan_options,
+        };
         (input, paths.to_vec())
     }
 }
@@ -524,7 +550,11 @@ impl ScanInput {
 /// against the library and earlier candidates). Nothing is added; the probes are kept for the
 /// import that follows.
 pub fn scan(s: &mut Session, paths: &[String]) -> Vec<ImportCandidate> {
-    let (input, paths) = ScanInput::new(s, paths);
+    scan_with_policy(s, paths, RawJpegImportPolicy::KeepBoth)
+}
+
+pub fn scan_with_policy(s: &mut Session, paths: &[String], policy: RawJpegImportPolicy) -> Vec<ImportCandidate> {
+    let (input, paths) = ScanInput::new_with_policy(s, paths, policy);
     let out = scan_with(input, &paths, &ScanProgress::default());
     s.import_probes = out.probes;
     out.candidates
@@ -569,6 +599,7 @@ pub fn scan_with(mut input: ScanInput, paths: &[String], progress: &ScanProgress
             Some(Ok(info)) => {
                 (c.format, c.kind, c.width, c.height, c.file_size, c.captured) =
                     (info.format.clone(), info.kind, info.width, info.height, info.file_size, info.captured.clone());
+                c.pairing_camera = info.meta.camera.clone();
                 c.preview_only = info.preview_only.clone();
                 if let Some(h) = &info.content_hash {
                     match seen_hash.get(h) {
@@ -588,7 +619,31 @@ pub fn scan_with(mut input: ScanInput, paths: &[String], progress: &ScanProgress
         }
         out.push(c);
     }
+    annotate_pairings(&mut out, input.raw_jpeg_policy);
     ScanOutput { candidates: out, probes: kept }
+}
+
+fn annotate_pairings(candidates: &mut [ImportCandidate], policy: RawJpegImportPolicy) {
+    let inputs: Vec<crate::import_pairs::PairInput> = candidates
+        .iter()
+        .map(|c| crate::import_pairs::PairInput {
+            path: c.path.clone(),
+            kind: c.kind,
+            captured: c.captured.clone(),
+            camera: c.pairing_camera.clone(),
+            width: c.width,
+            height: c.height,
+        })
+        .collect();
+    for pair in crate::import_pairs::classify(&inputs) {
+        let raw_path = inputs[pair.raw].path.clone();
+        let jpeg_path = inputs[pair.jpeg].path.clone();
+        candidates[pair.raw].pairing = Some(RawJpegPair { with: jpeg_path.clone(), kind: RawJpegPairKind::Raw, relation: pair.relation.into() });
+        candidates[pair.jpeg].pairing = Some(RawJpegPair { with: raw_path, kind: RawJpegPairKind::Jpeg, relation: pair.relation.into() });
+        if policy == RawJpegImportPolicy::RawOnly {
+            candidates[pair.jpeg].policy_excluded = Some("rawOnly".into());
+        }
+    }
 }
 
 /// Import files/folders. See the module docs.

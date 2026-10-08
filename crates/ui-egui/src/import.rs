@@ -91,11 +91,15 @@ pub struct ImportDialog {
 
 impl ImportDialog {
     pub fn new(candidates: Vec<ImportCandidate>) -> Self {
-        let checked = candidates.iter().map(|c| c.duplicate.is_none() && c.error.is_none()).collect();
+        let checked = candidates.iter().map(|c| c.duplicate.is_none() && c.error.is_none() && c.policy_excluded.is_none()).collect();
         ImportDialog { candidates, checked, ..Default::default() }
     }
     pub fn importable(&self, i: usize) -> bool {
-        self.candidates.get(i).is_some_and(|c| c.error.is_none() && (c.duplicate.is_none() || self.is_trashed(i) && !self.on_deleted.is_empty()))
+        self.candidates.get(i).is_some_and(|c| {
+            c.error.is_none()
+                && (c.policy_excluded.is_none() || c.policy_excluded.as_deref() == Some("rawOnly"))
+                && (c.duplicate.is_none() || self.is_trashed(i) && !self.on_deleted.is_empty())
+        })
     }
     /// Candidate `i` is a file whose photo is in Recently Deleted.
     pub fn is_trashed(&self, i: usize) -> bool {

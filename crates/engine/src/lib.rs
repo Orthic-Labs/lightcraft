@@ -23,6 +23,7 @@ pub mod files;
 pub mod fonts;
 pub mod guard;
 pub mod import;
+pub mod import_pairs;
 mod import_move;
 pub mod library;
 mod lightroom_archive;
