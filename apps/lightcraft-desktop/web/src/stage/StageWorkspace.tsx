@@ -299,7 +299,8 @@ function Navigator({ zoom, pan, onChange }: { zoom: number; pan: Point; onChange
 }
 
 function ToolStrip({ ui, setUi }: { ui: UiState; setUi: (patch: Partial<UiState>) => void }) {
-  return <nav className="stage-toolstrip" aria-label="Develop tools">{tools.map((tool) => <button key={tool.id ?? "none"} type="button" className={ui.panel === tool.id ? "selected" : ""} onClick={() => setUi({ panel: tool.id, view: tool.id && ["edit", "crop", "remove", "masking", "redeye", "presets", "versions", "activity", "keywords", "info"].includes(tool.id) && tool.id !== "info" ? "detail" : ui.view })} title={tool.label} aria-label={tool.label}><span className="stage-tool-icon" aria-hidden="true"><Icon name={tool.icon} size={19} /></span><small>{tool.label}</small></button>)}</nav>;
+  const choose = (id: UiState["panel"]) => setUi({ panel: id, view: id && ["edit", "crop", "remove", "masking", "redeye", "presets", "versions", "activity", "keywords", "info"].includes(id) && id !== "info" ? "detail" : ui.view });
+  return <nav className="stage-toolstrip" aria-label="Develop tools">{tools.map((tool) => <button key={tool.id ?? "none"} type="button" className={ui.panel === tool.id ? "selected" : ""} onPointerDown={() => choose(tool.id)} onClick={() => choose(tool.id)} title={tool.label} aria-label={tool.label}><span className="stage-tool-icon" aria-hidden="true"><Icon name={tool.icon} size={19} /></span><small>{tool.label}</small></button>)}</nav>;
 }
 
 function MaskToolbar({ ui, setUi, run }: { ui: UiState; setUi: (patch: Partial<UiState>) => void; run: (id: string, params?: Record<string, unknown>) => Promise<unknown> }) {
