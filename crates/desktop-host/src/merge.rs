@@ -127,13 +127,13 @@ impl MergePreviews {
             crate::validate_id(id.0)?;
         }
         let job = session.plan_merge(kind, finish, &ids, true).map_err(|error| error.to_string())?;
-        if let Some(ticket) = self.current.get(&request.slot).copied() {
-            if let Some(previous) = self.jobs.get(&ticket) {
-                if previous.sequence >= request.sequence {
-                    return Err("merge preview request is stale".into());
-                }
-                previous.cancel.store(true, Ordering::Relaxed);
+        if let Some(ticket) = self.current.get(&request.slot).copied()
+            && let Some(previous) = self.jobs.get(&ticket)
+        {
+            if previous.sequence >= request.sequence {
+                return Err("merge preview request is stale".into());
             }
+            previous.cancel.store(true, Ordering::Relaxed);
         }
         if self.jobs.len() >= MAX_WORKERS {
             return Err("too many merge previews are stopping; retry shortly".into());
@@ -287,7 +287,7 @@ fn validate_generation(requested: u64, current: u64) -> Result<(), String> {
 }
 
 fn sequence_is_fresh(latest: Option<&u64>, sequence: u64) -> bool {
-    latest.map_or(true, |latest| *latest < sequence)
+    latest.is_none_or(|latest| *latest < sequence)
 }
 
 fn validate_cancel(request: &MergePreviewCancelRequest) -> Result<(), String> {
