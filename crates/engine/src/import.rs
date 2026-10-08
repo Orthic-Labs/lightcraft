@@ -1106,16 +1106,19 @@ impl ImportJob {
 
         // Files a preceding scan already probed are not read again; native stamps reject stale
         // entries before they can participate in deduplication or copying.
-        let cached: Vec<Option<ProbeInfo>> = todo
+        // Keep a stale review entry as a failure instead of silently re-probing it. The user
+        // reviewed bytes from that probe; importing replacement bytes in same operation would
+        // make review & import disagree. A later import, with no stale cache entry, probes anew.
+        let cached: Vec<Option<Result<ProbeInfo, String>>> = todo
             .iter()
             .map(|f| {
                 let info = self.cache.remove(f)?;
                 if cached_probe_is_current(f, &info) {
                     self.metrics.cache_hits.fetch_add(1, Relaxed);
-                    Some(info)
+                    Some(Ok(info))
                 } else {
                     self.metrics.cache_misses.fetch_add(1, Relaxed);
-                    None
+                    Some(Err(format!("{f}: file changed meanwhile")))
                 }
             })
             .collect();
@@ -1123,7 +1126,7 @@ impl ImportJob {
         let progress = ScanProgress::with_metrics(self.metrics.clone());
         let mut fresh = probe_all_with_cancel(self.probe.as_ref(), &missing, &progress, cancel).into_iter();
         let probed: Vec<Result<ProbeInfo, String>> =
-            cached.into_iter().map(|c| c.map(Ok).unwrap_or_else(|| fresh.next().unwrap_or_else(|| Err("not probed".into())))).collect();
+            cached.into_iter().map(|c| c.unwrap_or_else(|| fresh.next().unwrap_or_else(|| Err("not probed".into())))).collect();
         crate::memory::release();
 
         // Sidecars are prefetched in bounded workers, indexed by source order. This keeps metadata
