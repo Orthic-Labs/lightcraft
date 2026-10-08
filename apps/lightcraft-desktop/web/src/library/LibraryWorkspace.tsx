@@ -12,6 +12,7 @@ const PAGE = 512;
 const MAX_PAGE_GEOMETRY = 64;
 const MIN_THUMB = 96;
 const MAX_THUMB = 480;
+const SCROLL_SYNC_FALLBACK_MS = 64;
 
 type MenuState = { x: number; y: number; photo: PhotoSummary } | null;
 
@@ -267,6 +268,10 @@ function VirtualPhotoGrid({ snapshot, mode, thumbSize }: { snapshot: DesktopSnap
   const [geometryRevision, setGeometryRevision] = useState(0);
   const previousPageAnchor = useRef<{ page: number; top: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const pendingScrollTop = useRef(0);
+  const scrollFrame = useRef<number | null>(null);
+  const scrollFallback = useRef<number | null>(null);
+  const scrollPoll = useRef<number | null>(null);
   const gap = 10;
   const columns = Math.max(1, Math.floor((viewportWidth + gap) / (thumbSize + gap)));
   const gridWidth = Math.max(1, viewportWidth - 32);
@@ -312,16 +317,55 @@ function VirtualPhotoGrid({ snapshot, mode, thumbSize }: { snapshot: DesktopSnap
   const nextPhotos = nextSliceReady ? nextSlice.photos : [];
   const selected = new Set(snapshot.selection);
   const active = snapshot.active;
-  const onScroll = (event: UIEvent<HTMLDivElement>) => setScrollTop(event.currentTarget.scrollTop);
+  const flushScrollTop = useCallback(() => {
+    const frame = scrollFrame.current;
+    scrollFrame.current = null;
+    if (frame !== null) window.cancelAnimationFrame(frame);
+    const fallback = scrollFallback.current;
+    scrollFallback.current = null;
+    if (fallback !== null) window.clearTimeout(fallback);
+    const next = pendingScrollTop.current;
+    setScrollTop((current) => current === next ? current : next);
+  }, []);
+  const scheduleScrollTop = useCallback((next: number) => {
+    pendingScrollTop.current = Math.max(0, Number.isFinite(next) ? next : 0);
+    if (scrollFrame.current === null) scrollFrame.current = window.requestAnimationFrame(flushScrollTop);
+    // Hidden WebKit can suspend rAF; bounded timer keeps slice selection live.
+    if (scrollFallback.current === null) scrollFallback.current = window.setTimeout(flushScrollTop, SCROLL_SYNC_FALLBACK_MS);
+  }, [flushScrollTop]);
+  const onScroll = (event: UIEvent<HTMLDivElement>) => scheduleScrollTop(event.currentTarget.scrollTop);
   useEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
-    const resize = () => { setViewportWidth(element.clientWidth); setViewportHeight(element.clientHeight); };
+    const resize = () => {
+      setViewportWidth(element.clientWidth);
+      setViewportHeight(element.clientHeight);
+      scheduleScrollTop(element.scrollTop);
+    };
     resize();
     const observer = new ResizeObserver(resize);
     observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
+    const nativeScroll = () => scheduleScrollTop(element.scrollTop);
+    element.addEventListener('scroll', nativeScroll, { passive: true });
+    const poll = () => {
+      if (element.scrollTop !== pendingScrollTop.current) scheduleScrollTop(element.scrollTop);
+      scrollPoll.current = window.setTimeout(poll, SCROLL_SYNC_FALLBACK_MS);
+    };
+    scrollPoll.current = window.setTimeout(poll, SCROLL_SYNC_FALLBACK_MS);
+    return () => {
+      observer.disconnect();
+      element.removeEventListener('scroll', nativeScroll);
+      const frame = scrollFrame.current;
+      scrollFrame.current = null;
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      const fallback = scrollFallback.current;
+      scrollFallback.current = null;
+      if (fallback !== null) window.clearTimeout(fallback);
+      const pollHandle = scrollPoll.current;
+      scrollPoll.current = null;
+      if (pollHandle !== null) window.clearTimeout(pollHandle);
+    };
+  }, [scheduleScrollTop]);
   const select = (photo: PhotoSummary, event?: MouseEvent | KeyboardEvent) => {
     const modifier = Boolean(event && ('metaKey' in event ? event.metaKey : false) || event && ('ctrlKey' in event ? event.ctrlKey : false));
     const modeName = event?.shiftKey ? 'range' : modifier ? 'toggle' : 'replace';
@@ -453,6 +497,10 @@ function VirtualPhotoGrid({ snapshot, mode, thumbSize }: { snapshot: DesktopSnap
     }
     previousPageAnchor.current = { page: pageIndex, top: currentPageTop };
   }, [currentPageTop, isJustified, pageIndex]);
+  useEffect(() => {
+    // Page measurements can clamp scrollTop without dispatching another scroll event.
+    if (scrollRef.current) scheduleScrollTop(scrollRef.current.scrollTop);
+  }, [currentPageTop, geometryRevision, scheduleScrollTop]);
   const totalHeight = isJustified
     ? Math.max(viewportHeight, pageCount * estimatedPageHeight + Math.max(0, pageCount - 1) * gap + Array.from(pageHeights.current.values()).reduce((delta, height) => delta + height - estimatedPageHeight, 0) + 24)
     : Math.max(viewportHeight, rows * squareRowHeight + 24);
