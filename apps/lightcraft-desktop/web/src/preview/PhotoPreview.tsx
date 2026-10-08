@@ -73,7 +73,7 @@ export function PhotoPreview({ photoId, slot, width, height, viewGeneration = 0,
 
   const currentPresented = presented?.descriptor.photoId === photoId ? presented : null;
   const handoff = candidate && currentPresented && candidate.descriptor.handle !== currentPresented.descriptor.handle;
-  const wrapperStyle: CSSProperties = { ...frameStyle, position: "relative", overflow: "hidden" };
+  const wrapperStyle: CSSProperties = { ...frameStyle, position: "relative", overflow: "hidden", isolation: "isolate" };
   const images = candidate
     ? handoff
       ? [renderImage(currentPresented!, true), renderImage(candidate, false)]

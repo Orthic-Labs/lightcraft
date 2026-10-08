@@ -373,8 +373,14 @@ fn assert_workspace_surfaces_unclipped(control: &rightkit_qa::control::Control) 
         const viewport = scroll.getBoundingClientRect();
         const contentBottom = viewport.top + scroll.clientHeight;
         const items = [...scroll.querySelectorAll('.lc-filmstrip-item')].map(e => e.getBoundingClientRect()).filter(r => r.right > viewport.left + 4 && r.left < viewport.right - 4);
+        const labels = [...scroll.querySelectorAll('.lc-filmstrip-meta')].filter(e => {
+            const r = e.getBoundingClientRect();
+            return e.textContent.trim() && r.width > 0 && r.left >= viewport.left && r.right <= viewport.right;
+        });
         return { footerGap: side.bottom - foot.bottom, visibleItems: items.length,
             clippedItems: items.filter(r => r.top - 4 < viewport.top - 1 || r.bottom + 4 > contentBottom + 1).length,
+            visibleLabels: labels.length,
+            coveredLabels: labels.filter(e => { const r = e.getBoundingClientRect(); return !e.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)); }).length,
             viewport: { top: viewport.top, contentBottom, bottom: viewport.bottom },
             itemBounds: items.map(r => ({ top: r.top, bottom: r.bottom })) };
     })();"#).expect("sidebar footer & filmstrip clipping must be measurable");
@@ -382,6 +388,7 @@ fn assert_workspace_surfaces_unclipped(control: &rightkit_qa::control::Control) 
     assert!(bounds["footerGap"].as_f64().is_some_and(|gap| gap.abs() <= 1.0), "brand footer must anchor to sidebar bottom: {bounds}");
     assert!(bounds["visibleItems"].as_u64().is_some_and(|count| count > 0), "filmstrip must show actual thumbnails: {bounds}");
     assert_eq!(bounds["clippedItems"].as_u64(), Some(0), "thumbnail & selection outline must fit above native scrollbar: {bounds}");
+    assert_eq!(bounds["coveredLabels"].as_u64(), Some(0), "decoded preview layers must not cover filmstrip filenames or badges: {bounds}");
 }
 
 fn assert_sustained_preview_gestures(control: &rightkit_qa::control::Control, evidence: &Path) {
