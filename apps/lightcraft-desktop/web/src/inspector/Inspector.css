@@ -36,3 +36,6 @@
 .lc-inspector__collapse svg{transform:rotate(90deg);transition:transform .12s ease}
 .lc-inspector.is-collapsed .lc-inspector__collapse svg{transform:rotate(-90deg)}
 @media (prefers-reduced-motion:reduce){.lc-inspector__collapse svg{transition:none}}
+.lc-inspector__rail{width:var(--lc-rail);min-width:var(--lc-rail);max-width:var(--lc-rail);flex-basis:var(--lc-rail);padding-inline:0;box-sizing:border-box}
+.lc-inspector__rail-tools,.lc-inspector__rail-more{margin-inline:4px}
+.lc-inspector__collapse{width:calc(100% - 8px);margin-inline:4px}

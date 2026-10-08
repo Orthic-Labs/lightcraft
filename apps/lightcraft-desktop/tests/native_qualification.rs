@@ -179,6 +179,12 @@ fn assert_library_header_contrast(control: &rightkit_qa::control::Control, mode:
 }
 
 fn click_dom(control: &rightkit_qa::control::Control, selector: &str, message: &str) {
+    wait_for_dom(
+        control,
+        &format!(
+            "return (() => {{ const node = document.querySelector({selector:?}); const rect = node?.getBoundingClientRect(); return Boolean(rect && rect.width > 0 && rect.height > 0); }})();"
+        ),
+    );
     let geometry = control
         .eval(&format!(
             "return (() => {{ const node = document.querySelector({selector:?}); if (!node) return null; const rect = node.getBoundingClientRect(); const x = rect.x + rect.width / 2; const y = rect.y + rect.height / 2; const hit = document.elementFromPoint(x, y); const describe = (value) => value ? {{ tag: value.tagName, aria: value.getAttribute('aria-label'), title: value.getAttribute('title'), className: value.className }} : null; window.__rkClickDiagnostic = []; const capture = (event) => {{ const target = event.target && event.target.closest ? event.target.closest('button,[role=button]') : event.target; if (window.__rkClickDiagnostic.length < 64) window.__rkClickDiagnostic.push({{ type: event.type, isTrusted: event.isTrusted, clientX: event.clientX, clientY: event.clientY, target: describe(target), selected: target?.classList?.contains('selected') === true }}); }}; window.__rkClickDiagnosticCleanup = () => {{ ['pointerdown', 'pointerup', 'click'].forEach((type) => document.removeEventListener(type, capture, true)); }}; ['pointerdown', 'pointerup', 'click'].forEach((type) => document.addEventListener(type, capture, true)); return {{ x, y, rect: {{ x: rect.x, y: rect.y, width: rect.width, height: rect.height }}, target: describe(node), hit: describe(hit), viewport: {{ width: window.innerWidth, height: window.innerHeight, scale: window.devicePixelRatio }} }}; }})();"
@@ -376,10 +382,13 @@ fn wait_for_grid(control: &rightkit_qa::control::Control, scrolled: bool, previo
 }
 
 fn enable_grid_info(control: &rightkit_qa::control::Control) {
-    let clicked = control
-        .eval("return (() => { const button = [...document.querySelectorAll('.lc-footer-actions button')].find((item) => item.textContent?.includes('Grid info')); if (!button) return false; button.click(); return true; })();")
-        .expect("grid info control query must execute");
-    assert_eq!(clicked.as_bool(), Some(true), "grid info control must exist");
+    click_dom(control, ".lc-display-wrap > button", "Display menu must open");
+    let label = control.eval("return [...document.querySelectorAll('.lc-display-menu [role=menuitem]')].find(node => node.textContent?.startsWith('Grid info:'))?.textContent || ''; ").expect("Grid info state must be queryable");
+    assert!(label.as_str().is_some_and(|text| text.starts_with("Grid info:")), "Grid info control must exist inside Display menu: {label}");
+    if label.as_str().is_some_and(|text| text.ends_with("Off")) {
+        click_dom(control, ".lc-display-menu > button[role=menuitem]", "Grid info must enable via Display menu");
+    }
+    click_dom(control, ".lc-display-wrap > button", "Display menu must close");
     wait_for_dom(control, "return Boolean(document.querySelector('.lc-grid-window .lc-photo-caption span:first-child')?.textContent?.trim());");
 }
 
