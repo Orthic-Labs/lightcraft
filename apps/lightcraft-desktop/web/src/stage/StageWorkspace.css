@@ -81,9 +81,14 @@
 .crop-guide-h1, .crop-guide-h2 { left: 0; right: 0; height: 1px; }.crop-guide-h1 { top: 33.333%; }.crop-guide-h2 { top: 66.666%; }
 .crop-handle { position: absolute; display: block; width: 10px; height: 10px; border: 2px solid #fff; background: #000; }
 .crop-nw { top: -6px; left: -6px; }.crop-ne { top: -6px; right: -6px; }.crop-sw { bottom: -6px; left: -6px; }.crop-se { bottom: -6px; right: -6px; }
-.mask-overlay, .spots-overlay { position: absolute; inset: 4%; pointer-events: none; z-index: 3; }
-.mask-shape { position: absolute; border: 2px solid #ef6b77; background: #e6495d2c; border-radius: 6px; }
+.mask-overlay, .spots-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
+.mask-vector { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.mask-brush-path, .mask-linear-line { fill: none; stroke: #ef6b77; stroke-width: 1.5; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+.mask-linear-line { stroke: #ffd66b; stroke-dasharray: 4 3; }
+.mask-radial-ellipse { fill: #e6495d2c; stroke: #ef6b77; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.mask-seg-outline { position: absolute; border: 2px dashed #ef6b77; border-radius: 5px; }
 .mask-pin { position: absolute; color: #ffcf5c; font-size: 22px; text-shadow: 0 1px 2px #000; }
+.mask-radial-handle { position: absolute; width: 9px; height: 9px; border: 1px solid #fff; border-radius: 50%; background: #1b1d22; transform: translate(-50%, -50%); box-shadow: 0 0 0 1px #000b; }
 .spot-shape, .red-eye-shape { position: absolute; transform: translate(-50%, -50%); border: 2px solid #ffb94a; border-radius: 50%; background: #ffb94a20; }
 .red-eye-shape { border-color: #ff6464; background: #ff222240; }
 .clipping-overlay { position: absolute; inset: 0; z-index: 2; pointer-events: none; background: repeating-linear-gradient(135deg, #ff2c2c2a 0 4px, transparent 4px 10px); mix-blend-mode: screen; }

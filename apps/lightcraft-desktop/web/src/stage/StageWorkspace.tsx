@@ -9,6 +9,7 @@ import "./StageWorkspace.css";
 type Point = { x: number; y: number };
 type Box = { x0: number; y0: number; x1: number; y1: number };
 type DevelopShape = Record<string, unknown>;
+type MaskShapeView = { shape: DevelopShape; id: number; component: number; visible: boolean };
 
 const views: Array<{ id: ViewMode; label: string; key: string }> = [
   { id: "detail", label: "Detail", key: "D" },
@@ -22,9 +23,12 @@ const maskTools = [
   ["brush", "Brush"],
   ["linear", "Linear Gradient"],
   ["radial", "Radial Gradient"],
-  ["composition", "Composition"],
-  ["selection", "Selection"],
-  ["pins", "Pins"],
+  ["colorRange", "Color Range"],
+  ["luminanceRange", "Luminance Range"],
+  ["object", "Object (SAM)"],
+  ["sky", "Sky (SAM)"],
+  ["subject", "Subject (SAM)"],
+  ["background", "Background (SAM)"],
 ] as const;
 
 function record(value: unknown): DevelopShape {
@@ -60,8 +64,21 @@ function cropOf(develop: DevelopShape): { rect: Box; angle: number } {
   return { rect, angle: number(geometry.angle ?? crop.angle) };
 }
 
-function invertPhotoPoint(event: PointerEvent<HTMLElement>, element: HTMLElement, develop: DevelopShape, sourceAspect: number): Point {
-  const bounds = element.getBoundingClientRect();
+/** Convert a client point into uncropped, oriented image coordinates.
+ *
+ * Stage transforms are applied around the image centre. Undoing them here keeps
+ * brush, gradient, object and colour samples aligned at every zoom, pan, crop,
+ * flip and straighten angle.
+ */
+export function normalizedPhotoPoint(
+  clientX: number,
+  clientY: number,
+  bounds: Pick<DOMRect, "left" | "top" | "width" | "height">,
+  develop: DevelopShape,
+  sourceAspect: number,
+  zoom = 1,
+  pan: Point = { x: 0, y: 0 },
+): Point {
   const crop = cropOf(develop);
   const orientation = String(develop.orientation ?? "normal").toLowerCase();
   const orientedAspect = ["rotate90", "rotate270", "transpose", "transverse"].includes(orientation) ? 1 / Math.max(0.001, sourceAspect) : sourceAspect;
@@ -71,8 +88,24 @@ function invertPhotoPoint(event: PointerEvent<HTMLElement>, element: HTMLElement
   const drawHeight = boxAspect > outputAspect ? bounds.height : bounds.width / outputAspect;
   const drawLeft = bounds.left + (bounds.width - drawWidth) / 2;
   const drawTop = bounds.top + (bounds.height - drawHeight) / 2;
-  let px = drawWidth > 0 ? (event.clientX - drawLeft) / drawWidth : 0.5;
-  let py = drawHeight > 0 ? (event.clientY - drawTop) / drawHeight : 0.5;
+
+  // Undo stage transform in the same order CSS applies its functions.
+  const safeZoom = Math.max(0.001, Number.isFinite(zoom) ? zoom : 1);
+  let tx = bounds.width > 0 ? (clientX - bounds.left) / bounds.width : 0.5;
+  let ty = bounds.height > 0 ? (clientY - bounds.top) / bounds.height : 0.5;
+  tx -= Number.isFinite(pan.x) ? pan.x : 0;
+  ty -= Number.isFinite(pan.y) ? pan.y : 0;
+  tx = (tx - 0.5) / safeZoom + 0.5;
+  ty = (ty - 0.5) / safeZoom + 0.5;
+  const stageRadians = (-crop.angle * Math.PI) / 180;
+  const stageDx = tx - 0.5;
+  const stageDy = ty - 0.5;
+  const imageX = stageDx * Math.cos(stageRadians) - stageDy * Math.sin(stageRadians) + 0.5;
+  const imageY = stageDx * Math.sin(stageRadians) + stageDy * Math.cos(stageRadians) + 0.5;
+  const screenX = bounds.left + imageX * bounds.width;
+  const screenY = bounds.top + imageY * bounds.height;
+  let px = drawWidth > 0 ? (screenX - drawLeft) / drawWidth : 0.5;
+  let py = drawHeight > 0 ? (screenY - drawTop) / drawHeight : 0.5;
   px = Math.max(0, Math.min(1, px));
   py = Math.max(0, Math.min(1, py));
   const cropValue = record(develop.crop);
@@ -86,6 +119,45 @@ function invertPhotoPoint(event: PointerEvent<HTMLElement>, element: HTMLElement
   const x = straightX - cx;
   const y = straightY - cy;
   return { x: Math.max(0, Math.min(1, x * Math.cos(radians) - y * Math.sin(radians) + cx)), y: Math.max(0, Math.min(1, x * Math.sin(radians) + y * Math.cos(radians) + cy)) };
+}
+
+function invertPhotoPoint(event: PointerEvent<HTMLElement>, element: HTMLElement, develop: DevelopShape, sourceAspect: number, zoom: number, pan: Point): Point {
+  return normalizedPhotoPoint(event.clientX, event.clientY, element.getBoundingClientRect(), develop, sourceAspect, zoom, pan);
+}
+
+export function radialShapeFromDrag(start: Point, end: Point, sourceAspect: number): DevelopShape {
+  const aspect = Math.max(0.001, sourceAspect);
+  const longEdge = Math.max(aspect, 1);
+  return {
+    kind: "radial",
+    center: { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 },
+    rx: Math.max(0.001, Math.abs(end.x - start.x) * aspect / longEdge / 2),
+    ry: Math.max(0.001, Math.abs(end.y - start.y) / longEdge / 2),
+    angle: 0,
+    feather: 50,
+    invert: false,
+  };
+}
+
+function radialHandleAt(value: Point, shape: DevelopShape): "move" | "rx" | "ry" | "rotate" | null {
+  const center = shapePoint(shape.center);
+  if (!center) return null;
+  const rx = number(shape.rx);
+  const ry = number(shape.ry);
+  if (!(rx > 0 && ry > 0)) return null;
+  const angle = number(shape.angle) * Math.PI / 180;
+  const rotate = (p: Point): Point => ({ x: p.x * Math.cos(angle) - p.y * Math.sin(angle), y: p.x * Math.sin(angle) + p.y * Math.cos(angle) });
+  const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
+  const right = rotate({ x: rx, y: 0 });
+  const bottom = rotate({ x: 0, y: ry });
+  const top = rotate({ x: 0, y: -(ry + 0.06) });
+  if (distance(value, { x: center.x + right.x, y: center.y + right.y }) < 0.045) return "rx";
+  if (distance(value, { x: center.x + bottom.x, y: center.y + bottom.y }) < 0.045) return "ry";
+  if (distance(value, { x: center.x + top.x, y: center.y + top.y }) < 0.045) return "rotate";
+  const localAngle = -angle;
+  const local = { x: (value.x - center.x) * Math.cos(localAngle) - (value.y - center.y) * Math.sin(localAngle), y: (value.x - center.x) * Math.sin(localAngle) + (value.y - center.y) * Math.cos(localAngle) };
+  if ((local.x * local.x) / (rx * rx) + (local.y * local.y) / (ry * ry) <= 1) return "move";
+  return null;
 }
 
 function rotatePoint(value: Point, degrees: number): Point {
@@ -266,18 +338,100 @@ function CropOverlay({ develop, guide = "thirds" }: { develop: DevelopShape; gui
   return <div className="crop-overlay" style={{ left: `${rect.x0 * 100}%`, top: `${rect.y0 * 100}%`, width: `${Math.max(0, rect.x1 - rect.x0) * 100}%`, height: `${Math.max(0, rect.y1 - rect.y0) * 100}%`, transform: `rotate(${cropOf(develop).angle}deg)` }}><i className="crop-handle crop-nw" /><i className="crop-handle crop-ne" /><i className="crop-handle crop-sw" /><i className="crop-handle crop-se" />{guide !== "off" ? <><i className="crop-guide crop-guide-v1" /><i className="crop-guide crop-guide-v2" /><i className="crop-guide crop-guide-h1" /><i className="crop-guide crop-guide-h2" /></> : null}</div>;
 }
 
-function MaskOverlay({ develop, pins }: { develop: DevelopShape; pins: boolean }) {
+function maskShapes(develop: DevelopShape, mode: string, active: number): MaskShapeView[] {
+  if (mode === "off") return [];
   const masks = Array.isArray(develop.masks) ? develop.masks : [];
-  const active = number(develop.activeMask ?? develop.active_mask, -1);
-  const visible = masks.flatMap((mask) => {
+  return masks.flatMap((mask) => {
     const m = record(mask);
+    const id = number(m.id, -1);
+    if (m.visible === false || (mode === "selected" && id !== active)) return [];
     const components = Array.isArray(m.components) ? m.components : [];
-    return components.map((component) => record(component)).map((component) => record(component.shape));
+    return components.map((component, componentIndex) => ({
+      shape: record(record(component).shape),
+      id,
+      component: componentIndex,
+      visible: true,
+    }));
   });
-  return <div className="mask-overlay" aria-hidden="true">{visible.map((shape, index) => {
-    const rect = box(shape.rect ?? shape.bounds) ?? { x0: 0.12 + index * 0.03, y0: 0.18 + index * 0.03, x1: 0.55, y1: 0.75 };
-    return <span key={`${active}-${index}`} className="mask-shape" style={{ left: `${rect.x0 * 100}%`, top: `${rect.y0 * 100}%`, width: `${(rect.x1 - rect.x0) * 100}%`, height: `${(rect.y1 - rect.y0) * 100}%` }} />;
-  })}{pins && visible.map((_, index) => <b key={`pin-${index}`} className="mask-pin" style={{ left: `${(0.22 + index * 0.1) * 100}%`, top: `${(0.3 + index * 0.1) * 100}%` }}>•</b>)}</div>;
+}
+
+function shapePoint(value: unknown): Point | null {
+  return point(value);
+}
+
+function shapePins(shape: DevelopShape): Point[] {
+  const kind = String(shape.kind ?? "");
+  if (kind === "radial") return [shapePoint(shape.center)].filter((value): value is Point => value !== null);
+  if (kind === "linear") return [shapePoint(shape.start), shapePoint(shape.end)].filter((value): value is Point => value !== null);
+  if (kind === "object") {
+    return [
+      ...(Array.isArray(shape.hint) ? shape.hint : []),
+      ...(Array.isArray(shape.exclude) ? shape.exclude : []),
+    ].map(shapePoint).filter((value): value is Point => value !== null);
+  }
+  if (kind === "brush") {
+    const strokes = Array.isArray(shape.strokes) ? shape.strokes : [];
+    return strokes.flatMap((stroke) => {
+      const raw = record(stroke).points;
+      const points: unknown[] = Array.isArray(raw) ? raw : [];
+      return [points[0], points[points.length - 1]].map(shapePoint).filter((value): value is Point => value !== null);
+    });
+  }
+  return [];
+}
+
+function radialHandles(shape: DevelopShape): Point[] {
+  const center = shapePoint(shape.center);
+  const rx = number(shape.rx);
+  const ry = number(shape.ry);
+  if (!center || !(rx > 0 && ry > 0)) return [];
+  const angle = number(shape.angle) * Math.PI / 180;
+  const rotate = (p: Point): Point => ({ x: p.x * Math.cos(angle) - p.y * Math.sin(angle), y: p.x * Math.sin(angle) + p.y * Math.cos(angle) });
+  return [{ x: rx, y: 0 }, { x: 0, y: ry }, { x: 0, y: -(ry + 0.06) }].map((value) => { const next = rotate(value); return { x: center.x + next.x, y: center.y + next.y }; });
+}
+
+function brushPath(shape: DevelopShape): string | null {
+  const strokes = Array.isArray(shape.strokes) ? shape.strokes : [];
+  const path = strokes.map((stroke) => {
+    const raw = record(stroke).points;
+    const points: Point[] = (Array.isArray(raw) ? raw : []).map(shapePoint).filter((value): value is Point => value !== null);
+    if (!points.length) return "";
+    return `M ${points.map((value) => `${value.x * 100} ${value.y * 100}`).join(" L ")}`;
+  }).filter(Boolean).join(" ");
+  return path || null;
+}
+
+function MaskOverlay({ develop, activeMask, mode, pins }: { develop: DevelopShape; activeMask: number; mode: string; pins: boolean }) {
+  const visible = maskShapes(develop, mode, activeMask);
+  return <div className="mask-overlay" aria-hidden="true">
+    <svg className="mask-vector" viewBox="0 0 100 100" preserveAspectRatio="none">
+      {visible.map(({ shape, id, component }) => {
+        const kind = String(shape.kind ?? "");
+        if (kind === "brush") {
+          const path = brushPath(shape);
+          return path ? <path key={`${id}-${component}`} className="mask-brush-path" d={path} /> : null;
+        }
+        if (kind === "linear") {
+          const start = shapePoint(shape.start);
+          const end = shapePoint(shape.end);
+          return start && end ? <line key={`${id}-${component}`} className="mask-linear-line" x1={start.x * 100} y1={start.y * 100} x2={end.x * 100} y2={end.y * 100} /> : null;
+        }
+        if (kind === "radial") {
+          const center = shapePoint(shape.center);
+          const rx = number(shape.rx);
+          const ry = number(shape.ry);
+          return center && rx > 0 && ry > 0 ? <ellipse key={`${id}-${component}`} className="mask-radial-ellipse" cx={center.x * 100} cy={center.y * 100} rx={rx * 100} ry={ry * 100} transform={`rotate(${number(shape.angle)} ${center.x * 100} ${center.y * 100})`} /> : null;
+        }
+        const seg = record(shape.seg);
+        const rect = box(seg.rect ?? shape.rect ?? shape.bounds);
+        return rect ? <span key={`${id}-${component}`} className="mask-seg-outline" style={{ left: `${rect.x0 * 100}%`, top: `${rect.y0 * 100}%`, width: `${(rect.x1 - rect.x0) * 100}%`, height: `${(rect.y1 - rect.y0) * 100}%` }} /> : null;
+      })}
+    </svg>
+    {pins && visible.flatMap(({ shape, id, component }) => [
+      ...shapePins(shape).map((value, pinIndex) => <b key={`${id}-${component}-pin-${pinIndex}`} className="mask-pin" style={{ left: `${value.x * 100}%`, top: `${value.y * 100}%` }}>{String(shape.kind ?? "").toLowerCase() === "object" && pinIndex % 2 ? "−" : "•"}</b>),
+      ...(String(shape.kind ?? "") === "radial" ? radialHandles(shape).map((value, handleIndex) => <i key={`${id}-${component}-handle-${handleIndex}`} className="mask-radial-handle" style={{ left: `${value.x * 100}%`, top: `${value.y * 100}%` }} />) : []),
+    ])}
+  </div>;
 }
 
 function SpotsOverlay({ develop, eyes }: { develop: DevelopShape; eyes?: boolean }) {
@@ -299,7 +453,11 @@ function Navigator({ zoom, pan, onChange }: { zoom: number; pan: Point; onChange
 }
 
 function MaskToolbar({ ui, setUi, run }: { ui: UiState; setUi: (patch: Partial<UiState>) => void; run: (id: string, params?: Record<string, unknown>) => Promise<unknown> }) {
-  return <div className="mask-toolbar" role="toolbar" aria-label="Mask tools">{maskTools.map(([id, label]) => <button key={id} type="button" className={ui.tool === id ? "selected" : ""} onClick={() => { setUi({ tool: id, maskOverlay: true }); if (id === "linear" || id === "radial" || id === "brush") void run("mask.add", { kind: id }); if (id === "composition") void run("mask.addComponent", { kind: "brush", op: "add" }).catch(() => run("mask.add", { kind: "brush" })); }} title={label}>{label}</button>)}<button type="button" className={ui.maskOverlay ? "selected" : ""} onClick={() => setUi({ maskOverlay: !ui.maskOverlay })}>Overlay</button><button type="button" className={ui.maskPins ? "selected" : ""} onClick={() => setUi({ maskPins: !ui.maskPins })}>Pins</button></div>;
+  const addMask = (kind: string) => {
+    setUi({ tool: kind, maskOverlay: true });
+    void run("mask.add", { kind });
+  };
+  return <div className="mask-toolbar" role="toolbar" aria-label="Mask tools">{maskTools.map(([id, label]) => <button key={id} type="button" className={ui.tool === id ? "selected" : ""} onClick={() => addMask(id)} title={label}>{label}</button>)}<button type="button" className={ui.maskOverlay ? "selected" : ""} onClick={() => setUi({ maskOverlay: !ui.maskOverlay })}>Overlay</button><button type="button" className={ui.maskPins ? "selected" : ""} onClick={() => setUi({ maskPins: !ui.maskPins })}>Pins</button></div>;
 }
 
 function CropToolbar({ ui, setUi, run }: { ui: UiState; setUi: (patch: Partial<UiState>) => void; run: (id: string, params?: Record<string, unknown>) => Promise<unknown> }) {
@@ -389,10 +547,11 @@ export function StageWorkspace() {
   const develop = record(snapshot?.develop);
   const previewGeneration = snapshot?.viewGeneration ?? 0;
   const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
-  const [drag, setDrag] = useState<{ kind: string; start: Point; last: Point; points?: Point[]; startBox?: Box; handle?: number; startAngle?: number; startPointerAngle?: number } | null>(null);
+  const [drag, setDrag] = useState<{ kind: string; start: Point; last: Point; points?: Point[]; startBox?: Box; handle?: number; radialHandle?: "rx" | "ry" | "rotate"; startAngle?: number; startPointerAngle?: number; maskId?: number; component?: number; startShape?: DevelopShape } | null>(null);
   const [candidateIndex, setCandidateIndex] = useState(0);
   const burst = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pending = useRef<{ id: string; params: Record<string, unknown> } | null>(null);
+  const commandQueue = useRef(Promise.resolve());
 
   const selection: number[] = useMemo(() => snapshot?.selection ?? [], [snapshot?.selection]);
   const candidateIds = selection.filter((id) => id !== active);
@@ -409,14 +568,20 @@ export function StageWorkspace() {
   const zoom = typeof ui.zoom === "number" ? ui.zoom : ui.zoom === "fill" ? 1.25 : 1;
   const sourceAspect = photo && photo.h > 0 ? photo.w / photo.h : 1.5;
   const previewEdge = Math.max(256, Math.min(8192, Math.round(Number.isFinite(ui.previewEdge) ? ui.previewEdge : 2560)));
+  const inferredMask = Array.isArray(develop.masks) ? number(record(develop.masks[develop.masks.length - 1]).id, -1) : -1;
+  const activeMask = number((snapshot as (DesktopSnapshot & { activeMask?: unknown }) | null)?.activeMask, number(record(snapshot?.source).activeMask ?? record(snapshot?.source).active_mask, number(develop.activeMask ?? develop.active_mask, inferredMask)));
 
-  const send = useCallback(async (id: string, params: Record<string, unknown> = {}) => { await run(id, params); }, [run]);
+  const send = useCallback((id: string, params: Record<string, unknown> = {}) => {
+    const next = commandQueue.current.then(() => run(id, params));
+    commandQueue.current = next.then(() => undefined, () => undefined);
+    return next;
+  }, [run]);
 
-  const commitBurst = useCallback(() => {
+  const commitBurst = useCallback(async () => {
     if (burst.current) clearTimeout(burst.current);
     const next = pending.current;
     pending.current = null;
-    if (next) void send(next.id, next.params);
+    if (next) await send(next.id, next.params);
   }, [send]);
 
   const gestureValue = useCallback((id: string, params: Record<string, unknown>) => {
@@ -427,7 +592,7 @@ export function StageWorkspace() {
 
   useEffect(() => () => { if (burst.current) clearTimeout(burst.current); }, []);
 
-  const pointAt = useCallback((event: PointerEvent<HTMLElement>) => invertPhotoPoint(event, event.currentTarget, develop, sourceAspect), [develop, sourceAspect]);
+  const pointAt = useCallback((event: PointerEvent<HTMLElement>) => invertPhotoPoint(event, event.currentTarget, develop, sourceAspect, zoom, pan), [develop, pan, sourceAspect, zoom]);
 
   const beginPointer = useCallback((event: PointerEvent<HTMLElement>) => {
     if (active == null) return;
@@ -449,13 +614,17 @@ export function StageWorkspace() {
     if (ui.panel === "redeye") { event.currentTarget.setPointerCapture(event.pointerId); setDrag({ kind: "eye", start: p, last: p }); void send("develop.beginInteraction", { label: "Red Eye" }); return; }
     if (ui.panel === "masking") {
       event.currentTarget.setPointerCapture(event.pointerId);
-      setDrag({ kind: ui.tool || "brush", start: p, last: p, points: ui.tool === "brush" ? [p] : undefined });
+      const tool = ui.tool === "selection" ? "object" : ui.tool || "brush";
+      const radial = tool === "radial" ? maskShapes(develop, "selected", activeMask).find(({ shape }) => String(shape.kind ?? "") === "radial") : undefined;
+      const radialAction = radial ? radialHandleAt(p, radial.shape) : null;
+      const kind = radialAction === "move" ? "radialMove" : radialAction === "rx" || radialAction === "ry" || radialAction === "rotate" ? "radialResize" : tool;
+      setDrag({ kind, start: p, last: p, points: tool === "brush" ? [p] : undefined, radialHandle: radialAction === "rx" || radialAction === "ry" || radialAction === "rotate" ? radialAction : undefined, maskId: radial?.id, component: radial?.component, startShape: radial?.shape });
       void send("develop.beginInteraction", { label: "Mask" });
-      if (ui.tool === "brush") void send("mask.brushStroke", { points: [[p.x, p.y]], size: ui.brushSize / 1000, feather: ui.brushFeather / 100 });
-      if (ui.tool === "selection") void send("mask.objectPoint", { x: p.x, y: p.y, exclude: false });
+      if (tool === "colorRange") void send("mask.sampleColor", { x: p.x, y: p.y, add: event.shiftKey, ...(activeMask > 0 ? { id: activeMask } : {}) });
+      if (tool === "object") void send("mask.objectPoint", { x: p.x, y: p.y, exclude: event.altKey, ...(activeMask > 0 ? { id: activeMask } : {}) });
     }
     if (ui.panel === "edit" && ui.tool === "wbPicker") { void send("develop.wbPick", { x: p.x, y: p.y }); setUi({ tool: "" }); }
-  }, [active, develop, pointAt, send, setUi, ui.brushFeather, ui.brushSize, ui.panel, ui.tool]);
+  }, [active, activeMask, develop, pointAt, send, setUi, ui.panel, ui.tool]);
 
   const movePointer = useCallback((event: PointerEvent<HTMLElement>) => {
     if (!drag) return;
@@ -484,44 +653,65 @@ export function StageWorkspace() {
     } else if (drag.kind === "brush") {
       const points = [...(drag.points ?? []), p];
       setDrag((current) => current ? { ...current, last: p, points } : current);
-      gestureValue("mask.brushStroke", { points: points.map((value) => [value.x, value.y]), size: ui.brushSize / 1000, feather: ui.brushFeather / 100 });
     } else if (drag.kind === "linear") {
-      gestureValue("mask.update", { shape: { kind: drag.kind, start: { x: drag.start.x, y: drag.start.y }, end: { x: p.x, y: p.y } } });
+      gestureValue("mask.update", { ...(drag.maskId != null ? { id: drag.maskId } : {}), ...(drag.component != null ? { component: drag.component } : {}), shape: { kind: "linear", start: { x: drag.start.x, y: drag.start.y }, end: { x: p.x, y: p.y } } });
     } else if (drag.kind === "radial") {
-      const orientation = String(develop.orientation ?? "normal").toLowerCase();
-      const orientedAspect = ["rotate90", "rotate270", "transpose", "transverse"].includes(orientation) ? 1 / Math.max(0.001, sourceAspect) : sourceAspect;
-      const longEdge = Math.max(orientedAspect, 1);
-      const center = { x: (drag.start.x + p.x) / 2, y: (drag.start.y + p.y) / 2 };
-      const rx = Math.max(0.001, Math.abs(p.x - drag.start.x) * orientedAspect / longEdge / 2);
-      const ry = Math.max(0.001, Math.abs(p.y - drag.start.y) / longEdge / 2);
-      gestureValue("mask.update", { shape: { kind: "radial", center, rx, ry, angle: 0, feather: 50, invert: false } });
+      gestureValue("mask.update", { ...(drag.maskId != null ? { id: drag.maskId } : {}), ...(drag.component != null ? { component: drag.component } : {}), shape: radialShapeFromDrag(drag.start, p, sourceAspect) });
+    } else if ((drag.kind === "radialMove" || drag.kind === "radialResize") && drag.startShape) {
+      const shape = { ...drag.startShape };
+      const center = shapePoint(shape.center) ?? drag.start;
+      const startAngle = number(shape.angle);
+      if (drag.kind === "radialMove") {
+        const dx = p.x - drag.start.x;
+        const dy = p.y - drag.start.y;
+        shape.center = { x: Math.max(0, Math.min(1, center.x + dx)), y: Math.max(0, Math.min(1, center.y + dy)) };
+      } else if (drag.radialHandle === "rotate") {
+        const before = Math.atan2(drag.start.y - center.y, drag.start.x - center.x);
+        const after = Math.atan2(p.y - center.y, p.x - center.x);
+        shape.angle = startAngle + (after - before) * 180 / Math.PI;
+      } else {
+        const angle = -startAngle * Math.PI / 180;
+        const local = { x: (p.x - center.x) * Math.cos(angle) - (p.y - center.y) * Math.sin(angle), y: (p.x - center.x) * Math.sin(angle) + (p.y - center.y) * Math.cos(angle) };
+        if (drag.radialHandle === "rx") shape.rx = Math.max(0.005, Math.abs(local.x));
+        if (drag.radialHandle === "ry") shape.ry = Math.max(0.005, Math.abs(local.y));
+      }
+      gestureValue("mask.update", { ...(drag.maskId != null ? { id: drag.maskId } : {}), ...(drag.component != null ? { component: drag.component } : {}), shape });
     } else if (drag.kind === "spot") {
       setDrag((current) => current ? { ...current, last: p } : current);
     } else if (drag.kind === "eye") {
       setDrag((current) => current ? { ...current, last: p } : current);
     }
-  }, [drag, gestureValue, pointAt, ui.brushFeather, ui.brushSize]);
+  }, [drag, gestureValue, pointAt, sourceAspect]);
 
-  const endPointer = useCallback((event: PointerEvent<HTMLElement>) => {
+  const endPointer = useCallback(async (event: PointerEvent<HTMLElement>) => {
     if (!drag) return;
     const p = pointAt(event);
-    if (drag.kind === "spot") {
+    if (drag.kind === "brush" && drag.points?.length) {
+      await send("mask.brushStroke", { ...(drag.maskId != null ? { id: drag.maskId } : {}), points: drag.points.map((value) => [value.x, value.y]), size: ui.brushSize / 1000, feather: ui.brushFeather / 100 });
+    } else if (drag.kind === "spot") {
       const radius = Math.max(0.005, Math.abs(p.x - drag.start.x) || 0.025);
       const mode = ui.tool === "clone" ? "clone" : ui.tool === "heal" ? "heal" : "remove";
-      void send("spot.add", { mode, points: [[drag.start.x, drag.start.y]], size: radius, source: [p.x - drag.start.x, p.y - drag.start.y] });
+      await send("spot.add", { mode, points: [[drag.start.x, drag.start.y]], size: radius, source: [p.x - drag.start.x, p.y - drag.start.y] });
     } else if (drag.kind === "eye") {
-      void send("redeye.add", { center: [drag.start.x, drag.start.y], rx: Math.max(0.01, Math.abs(p.x - drag.start.x)), ry: Math.max(0.01, Math.abs(p.y - drag.start.y)) });
+      await send("redeye.add", { center: [drag.start.x, drag.start.y], rx: Math.max(0.01, Math.abs(p.x - drag.start.x)), ry: Math.max(0.01, Math.abs(p.y - drag.start.y)) });
     }
-    commitBurst();
-    void send("develop.endInteraction", {});
+    await commitBurst();
+    await send("develop.endInteraction", {});
     setDrag(null);
-  }, [commitBurst, drag, pointAt, send, ui.tool]);
+  }, [commitBurst, drag, pointAt, send, ui.brushFeather, ui.brushSize, ui.tool]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && drag) { void send("develop.cancelInteraction", {}); setDrag(null); return; }
+      if (event.key === "Escape" && drag) {
+        if (burst.current) clearTimeout(burst.current);
+        burst.current = null;
+        pending.current = null;
+        void send("develop.cancelInteraction", {});
+        setDrag(null);
+        return;
+      }
       if (event.defaultPrevented || event.isComposing || isEditableTarget(event.target)) return;
-      if (event.key === "Escape") { setUi({ infoOverlay: 0, slideshow: false }); return; }
+      if (event.key === "Escape") { setUi({ infoOverlay: 0, slideshow: false, tool: ui.tool === "wbPicker" ? "" : ui.tool }); return; }
       if (event.key === " ") { event.preventDefault(); setUi({ slideshow: !ui.slideshow }); return; }
       if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void send(event.key === "ArrowLeft" ? "library.previous" : "library.next", {}); }
       if (event.key.toLowerCase() === "w" && ui.panel === "edit") setUi({ tool: "wbPicker" });
@@ -529,7 +719,7 @@ export function StageWorkspace() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [drag, send, setUi, ui.cropOverlay, ui.panel, ui.slideshow]);
+  }, [drag, send, setUi, ui.cropOverlay, ui.panel, ui.slideshow, ui.tool]);
 
   const routeView = useCallback((view: ViewMode) => {
     setUi({ view, panel: view === "people" ? "info" : ui.panel });
@@ -548,7 +738,7 @@ export function StageWorkspace() {
     <div className="stage-topbar"><label className="stage-view-mode"><span>View</span><select aria-label="View mode" value={views.some((view) => view.id === ui.view) ? ui.view : "detail"} onChange={(event) => routeView(event.target.value as ViewMode)}>{views.map((view) => <option key={view.id} value={view.id}>{view.label}</option>)}</select></label><div className="stage-photo-title"><strong>{titleFor(photo)}</strong><span>{photo ? `${photo.w} × ${photo.h}` : ""}</span></div><MultiViewActions view={ui.view} candidate={candidate} reference={ui.referenceId} run={run} setUi={setUi} /><div className="stage-status" aria-live="polite">{snapshot?.status.previewBuild ? <span className="stage-loading">Rendering preview…</span> : snapshot?.status.unsaved ? <span className="stage-unsaved">Unsaved changes</span> : snapshot ? <span className="stage-saved">Saved</span> : null}{snapshot?.status.importing ? <span>Importing…</span> : null}{snapshot?.status.exporting ? <span>Exporting…</span> : null}{error ? <span className="stage-error">{error}</span> : null}{notice ? <span>{notice}</span> : null}</div></div>
     <div className="stage-body">
       <div className="stage-canvas" style={{ ["--stage-zoom" as string]: zoom, ["--stage-pan-x" as string]: `${pan.x * 100}%`, ["--stage-pan-y" as string]: `${pan.y * 100}%` }}>
-        {ui.view === "compare" ? <div className="compare-panes"><div className="compare-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} before={ui.beforeAfter === "original"} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /><span className="pane-label">Select</span></div><div className="compare-pane"><StageImage photoId={candidate} photo={photoFor(candidate)} previewEdge={previewEdge} slot={previewSlot(ui.view, 1)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span className="pane-label">Candidate {candidate ?? "—"}</span></div></div> : ui.view === "reference" ? <div className="compare-panes"><div className="compare-pane"><StageImage photoId={ui.referenceId} photo={photoFor(ui.referenceId)} previewEdge={previewEdge} slot="reference" viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span className="pane-label">Reference {ui.referenceId ?? "—"}</span></div><div className="compare-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot="reference-active" viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /><span className="pane-label">Active</span></div></div> : ui.view === "survey" ? <div className="survey-grid">{(selection.length ? selection : active == null ? [] : [active]).map((id, index) => <button type="button" className={id === active ? "survey-photo selected" : "survey-photo"} key={id} onClick={() => { setUi({ view: "detail" }); void send("library.select", { ids: [id], active: id, mode: "replace" }); }}><StageImage photoId={id} photo={photoFor(id)} previewEdge={previewEdge} slot={previewSlot(ui.view, index)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span>{index + 1}</span></button>)}</div> : ui.view === "people" ? <div className="people-stage"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><div className="face-boxes">{Array.isArray(record(snapshot?.source).faces) ? (record(snapshot?.source).faces as unknown[]).map((face, index) => { const f = record(face); const r = box(f.rect ?? f.bounds) ?? { x0: 0.3 + index * 0.05, y0: 0.25, x1: 0.44 + index * 0.05, y1: 0.42 }; return <span key={index} style={{ left: `${r.x0 * 100}%`, top: `${r.y0 * 100}%`, width: `${(r.x1 - r.x0) * 100}%`, height: `${(r.y1 - r.y0) * 100}%` }} />; }) : null}</div></div> : ui.beforeAfter !== "off" && ui.beforeAfter !== "original" ? <BeforeAfterStage mode={ui.beforeAfter} photoId={active} photo={photoFor(active)} previewEdge={previewEdge} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /> : <div className="single-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} before={ui.beforeAfter === "original"} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} />{ui.panel === "crop" ? <CropOverlay develop={develop} guide={ui.cropOverlay} /> : null}{ui.maskOverlay && ui.panel === "masking" ? <MaskOverlay develop={develop} pins={ui.maskPins} /> : null}{ui.panel === "remove" ? <SpotsOverlay develop={develop} /> : null}{ui.panel === "redeye" ? <SpotsOverlay develop={develop} eyes /> : null}{ui.clipping ? <div className="clipping-overlay" aria-label="Clipping preview" /> : null}</div>}
+        {ui.view === "compare" ? <div className="compare-panes"><div className="compare-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} before={ui.beforeAfter === "original"} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /><span className="pane-label">Select</span></div><div className="compare-pane"><StageImage photoId={candidate} photo={photoFor(candidate)} previewEdge={previewEdge} slot={previewSlot(ui.view, 1)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span className="pane-label">Candidate {candidate ?? "—"}</span></div></div> : ui.view === "reference" ? <div className="compare-panes"><div className="compare-pane"><StageImage photoId={ui.referenceId} photo={photoFor(ui.referenceId)} previewEdge={previewEdge} slot="reference" viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span className="pane-label">Reference {ui.referenceId ?? "—"}</span></div><div className="compare-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot="reference-active" viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /><span className="pane-label">Active</span></div></div> : ui.view === "survey" ? <div className="survey-grid">{(selection.length ? selection : active == null ? [] : [active]).map((id, index) => <button type="button" className={id === active ? "survey-photo selected" : "survey-photo"} key={id} onClick={() => { setUi({ view: "detail" }); void send("library.select", { ids: [id], active: id, mode: "replace" }); }}><StageImage photoId={id} photo={photoFor(id)} previewEdge={previewEdge} slot={previewSlot(ui.view, index)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><span>{index + 1}</span></button>)}</div> : ui.view === "people" ? <div className="people-stage"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} /><div className="face-boxes">{Array.isArray(record(snapshot?.source).faces) ? (record(snapshot?.source).faces as unknown[]).map((face, index) => { const f = record(face); const r = box(f.rect ?? f.bounds) ?? { x0: 0.3 + index * 0.05, y0: 0.25, x1: 0.44 + index * 0.05, y1: 0.42 }; return <span key={index} style={{ left: `${r.x0 * 100}%`, top: `${r.y0 * 100}%`, width: `${(r.x1 - r.x0) * 100}%`, height: `${(r.y1 - r.y0) * 100}%` }} />; }) : null}</div></div> : ui.beforeAfter !== "off" && ui.beforeAfter !== "original" ? <BeforeAfterStage mode={ui.beforeAfter} photoId={active} photo={photoFor(active)} previewEdge={previewEdge} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} /> : <div className="single-pane"><StageImage photoId={active} photo={photoFor(active)} previewEdge={previewEdge} slot={previewSlot(ui.view)} before={ui.beforeAfter === "original"} viewGeneration={previewGeneration} develop={develop} onHistogram={setHistogram} onPointerDown={beginPointer} onPointerMove={movePointer} onPointerUp={endPointer} />{ui.panel === "crop" ? <CropOverlay develop={develop} guide={ui.cropOverlay} /> : null}{ui.maskOverlay && ui.panel === "masking" ? <MaskOverlay develop={develop} activeMask={activeMask} mode={ui.maskOverlayMode} pins={ui.maskPins} /> : null}{ui.panel === "remove" ? <SpotsOverlay develop={develop} /> : null}{ui.panel === "redeye" ? <SpotsOverlay develop={develop} eyes /> : null}{ui.clipping ? <div className="clipping-overlay" aria-label="Clipping preview" /> : null}</div>}
         {ui.infoOverlay ? <InfoOverlay photo={photo} mode={ui.infoOverlay} onClose={() => setUi({ infoOverlay: 0 })} /> : null}
         {ui.navigator ? <Navigator zoom={zoom} pan={pan} onChange={setPan} /> : null}
         {histogram ? <div className="histogram-badge" aria-label="Histogram available">Histogram</div> : null}
