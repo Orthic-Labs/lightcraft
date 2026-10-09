@@ -605,6 +605,74 @@ fn set_native_viewport(control: &rightkit_qa::control::Control, width: u64, heig
     result
 }
 
+fn diagnose_native_viewport_bounce(control: &rightkit_qa::control::Control, scenario: &rightkit_qa::harness::Scenario, width: u32, height: u32) {
+    let sample = |phase: &str| {
+        let dom = match control.eval(r#"return (() => {
+            const describe = (selector) => {
+                const node = document.querySelector(selector);
+                if (!node) return { selector, missing: true };
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return {
+                    selector,
+                    className: typeof node.className === 'string' ? node.className : '',
+                    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, right: rect.right, bottom: rect.bottom },
+                    columns: style.gridTemplateColumns,
+                    display: style.display,
+                };
+            };
+            return {
+                viewport: { width: innerWidth, height: innerHeight },
+                layout: ['.lc-library-layout', '.lc-library-workspace', '.lc-stage-layout', '.lc-inspector', '.lc-inspector__rail', '.lc-inspector__more-menu'].map(describe),
+            };
+        })();"#) {
+            Ok(value) => value,
+            Err(error) => json!({"error": error.to_string()}),
+        };
+        let native = match control.command("lc_qa_window_state", &Value::Null) {
+            Ok(value) => value,
+            Err(error) => json!({"error": error.to_string()}),
+        };
+        json!({"phase": phase, "dom": dom, "native": native})
+    };
+
+    let before = sample("before");
+    let bounced_to = width
+        .checked_add(1)
+        .map(|bounce_width| match control.set_viewport(bounce_width, height) {
+            Ok((inner_width, inner_height)) => json!({
+                "requested": {"width": bounce_width, "height": height},
+                "observed": {"width": inner_width, "height": inner_height},
+            }),
+            Err(error) => json!({
+                "requested": {"width": bounce_width, "height": height},
+                "error": error.to_string(),
+            }),
+        })
+        .unwrap_or_else(|| json!({"error": "viewport width overflow"}));
+    let bounced = sample("bounce");
+    let restored_to = match control.set_viewport(width, height) {
+        Ok((inner_width, inner_height)) => json!({"observed": {"width": inner_width, "height": inner_height}}),
+        Err(error) => json!({"error": error.to_string()}),
+    };
+    let restored = sample("restored");
+    let evidence = json!({
+        "schema": 1,
+        "probe": "native-viewport-bounce",
+        "requested": {"width": width, "height": height},
+        "before": before,
+        "bounce": {"resize": bounced_to, "sample": bounced},
+        "restored": {"resize": restored_to, "sample": restored},
+    });
+    eprintln!("[qa] native viewport bounce diagnostics={evidence}");
+    let path = scenario.dir().join("native-viewport-bounce.json");
+    if let Ok(bytes) = serde_json::to_vec_pretty(&evidence)
+        && fs::write(&path, bytes).is_ok()
+    {
+        scenario.keep("native-viewport-bounce.json", &path);
+    }
+}
+
 fn assert_layout_settled(control: &rightkit_qa::control::Control, selector: &str) {
     let expression = format!(
         "return (() => {{ const node = document.querySelector({selector:?}); if (!node) return false; const rect = node.getBoundingClientRect(); return rect.width >= 1 && rect.height >= 1 && getComputedStyle(node).display !== 'none'; }})();"
@@ -1087,6 +1155,13 @@ fn with_control<T>(
                 scenario.keep("failure-native.png", &path);
             }
             Err(error) => eprintln!("[qa] failure screenshot unavailable: {error}"),
+        }
+        if cfg!(target_os = "macos")
+            && let Ok(viewport) = control.eval("return {width: window.innerWidth, height: window.innerHeight};")
+            && let (Some(width), Some(height)) = (viewport["width"].as_u64(), viewport["height"].as_u64())
+            && let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height))
+        {
+            diagnose_native_viewport_bounce(control, scenario, width, height);
         }
     }
     let stopped = control.stop().expect("native app must stop cleanly");
