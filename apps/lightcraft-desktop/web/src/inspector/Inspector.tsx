@@ -4,6 +4,7 @@ import type { ControlSpec, DesktopSnapshot, JsonObject, Panel, UiState } from '.
 import { useDesktop } from '../desktop';
 import { Icon, type IconName } from '../icons';
 import { FuseCurves } from '@rightkit/app-shell/react';
+import { SliderCommandQueue } from './sliderCommandQueue';
 import './Inspector.css';
 
 type Run = (id: string, params?: JsonObject) => Promise<unknown>;
@@ -270,7 +271,8 @@ function ControlRow({ spec, value, run }: { spec: ControlSpec; value: number; ru
   const releasePendingToken = useRef<number | null>(null);
   const latestValue = useRef(value);
   latestValue.current = value;
-  const commandQueue = useRef(Promise.resolve());
+  const runRef = useRef(run);
+  runRef.current = run;
   useEffect(() => { if (!started.current && releasePendingToken.current === null) setDraft(value); }, [value]);
   const trace = (phase: string, details: InteractionDiagnostic = {}) => {
     if (typeof window === 'undefined') return;
@@ -278,25 +280,27 @@ function ControlRow({ spec, value, run }: { spec: ControlSpec; value: number; ru
     if (!Array.isArray(records) || records.length >= 128) return;
     records.push({ at: Date.now(), control: spec.id, phase, ...details, started: started.current });
   };
-  const enqueue = (id: string, params: JsonObject = {}) => {
-    trace('enqueue.before', { command: id });
-    const pending = commandQueue.current.then(() => run(id, params));
-    const observed = pending.then(
-      value => { trace('enqueue.after', { command: id }); return value; },
-      error => { trace('enqueue.error', { command: id, error: String(error) }); throw error; },
-    );
-    commandQueue.current = observed.then(() => undefined, () => undefined);
-    return observed;
-  };
+  const commandQueue = useRef<SliderCommandQueue | null>(null);
+  if (commandQueue.current === null) {
+    commandQueue.current = new SliderCommandQueue((id, params) => {
+      trace('enqueue.before', { command: id });
+      const observed = runRef.current(id, params);
+      return observed.then(
+        result => { trace('enqueue.after', { command: id }); return result; },
+        error => { trace('enqueue.error', { command: id, error: String(error) }); throw error; },
+      );
+    });
+  }
+  const enqueue = (id: string, params: JsonObject = {}) => commandQueue.current!.command(id, params);
   const release = (token: number, fallback?: number) => {
     if (releasePendingToken.current !== token) return;
     releasePendingToken.current = null;
     if (activeToken.current === null) setDraft(fallback ?? latestValue.current);
   };
-  const begin = () => { if (started.current) { trace('begin.skipped'); return; } const token = ++gestureToken.current; activeToken.current = token; gestureValue.current = draft; trace('begin.before'); started.current = true; trace('begin.started'); void enqueue('develop.beginInteraction', { label: spec.label }); };
-  const end = () => { if (!started.current) { trace('end.skipped'); return; } const token = activeToken.current; if (token === null) return; trace('end.before'); started.current = false; activeToken.current = null; releasePendingToken.current = token; trace('end.started'); void enqueue('develop.endInteraction', {}).then(() => release(token), () => release(token)); };
-  const cancel = () => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } if (!started.current) { trace('cancel.skipped'); return; } const token = activeToken.current; if (token === null) return; trace('cancel.before'); started.current = false; activeToken.current = null; releasePendingToken.current = token; setDraft(gestureValue.current); trace('cancel.started'); void enqueue('develop.cancelInteraction', {}).then(() => release(token, gestureValue.current), () => release(token, gestureValue.current)); };
-  const set = (next: number) => { if (!Number.isFinite(next)) return Promise.resolve(); const clamped = Math.max(spec.min, Math.min(spec.max, next)); setDraft(clamped); return enqueue('develop.set', { control: spec.id, value: clamped }); };
+  const begin = () => { if (started.current) { trace('begin.skipped'); return; } const token = ++gestureToken.current; activeToken.current = token; gestureValue.current = draft; trace('begin.before'); started.current = true; trace('begin.started'); void commandQueue.current!.begin(spec.label); };
+  const end = () => { if (!started.current) { trace('end.skipped'); return; } const token = activeToken.current; if (token === null) return; trace('end.before'); started.current = false; activeToken.current = null; releasePendingToken.current = token; trace('end.started'); void commandQueue.current!.end().then(() => release(token), () => release(token)); };
+  const cancel = () => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } if (!started.current) { trace('cancel.skipped'); return; } const token = activeToken.current; if (token === null) return; trace('cancel.before'); started.current = false; activeToken.current = null; releasePendingToken.current = token; setDraft(gestureValue.current); trace('cancel.started'); void commandQueue.current!.cancel().then(() => release(token, gestureValue.current), () => release(token, gestureValue.current)); };
+  const set = (next: number) => { if (!Number.isFinite(next)) return Promise.resolve(); const clamped = Math.max(spec.min, Math.min(spec.max, next)); setDraft(clamped); return commandQueue.current!.set(spec.id, clamped); };
   const onKey = (next: number) => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } begin(); void set(next).then(() => { if (!started.current) return; if (timer.current) clearTimeout(timer.current); timer.current = setTimeout(end, 400); }, () => undefined); };
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); if (started.current) cancel(); }, [run]);
   return <div className="lc-inspector__row"><label htmlFor={`ctl-${spec.id}`}>{spec.label}</label><input id={`ctl-${spec.id}`} type="range" min={spec.min} max={spec.max} step={spec.step} value={draft} aria-label={spec.label} onPointerDown={begin} onPointerUp={end} onPointerCancel={cancel} onChange={e => { begin(); void set(Number(e.target.value)); }} onKeyDown={e => { trace('keydown', { target: 'range', key: e.key, code: e.code, trusted: e.nativeEvent.isTrusted }); if (e.key === 'Escape') cancel(); else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End') { e.preventDefault(); const current = Number(e.currentTarget.value); const base = Number.isFinite(current) ? current : draft; const next = e.key === 'Home' ? spec.min : e.key === 'End' ? spec.max : (e.key === 'ArrowLeft' || e.key === 'ArrowDown') ? base - spec.step : base + spec.step; onKey(next); } }} /><input type="number" min={spec.min} max={spec.max} step={spec.step} value={Number(draft.toFixed(spec.decimals))} aria-label={`${spec.label} value`} onFocus={begin} onChange={e => setDraft(Number(e.target.value))} onKeyDown={e => { trace('keydown', { target: 'number', key: e.key, code: e.code, trusted: e.nativeEvent.isTrusted }); if (e.key === 'Escape') cancel(); }} onBlur={() => { void set(draft); end(); }} /><button className="lc-inspector__reset" type="button" aria-label={`Reset ${spec.label}`} title={`Reset ${spec.label}`} onClick={() => { end(); void enqueue('develop.resetControl', { control: spec.id }); setDraft(spec.default); }}>↺</button></div>;
