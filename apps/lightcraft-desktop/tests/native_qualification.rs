@@ -1170,7 +1170,7 @@ fn with_control<T>(
             && let (Some(width), Some(height)) = (viewport["width"].as_u64(), viewport["height"].as_u64())
             && let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height))
         {
-            diagnose_native_viewport_bounce(control, scenario, width, height);
+            diagnose_native_viewport_bounce(&control, scenario, width, height);
         }
     }
     let stopped = control.stop().expect("native app must stop cleanly");
