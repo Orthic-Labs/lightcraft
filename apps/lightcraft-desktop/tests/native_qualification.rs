@@ -733,7 +733,14 @@ fn layout_style_diagnostics(control: &rightkit_qa::control::Control) -> Value {
         const rules=[];
         const visit=(list,chain=[])=>{for(const rule of list){if(rule.selectorText&&/lc-stage-layout|lc-library-layout|lc-grid-window|lc-grid-row/.test(rule.selectorText))rules.push({chain,selector:rule.selectorText,style:rule.style.cssText});if(rule.cssRules)visit(rule.cssRules,chain.concat(rule.conditionText||rule.name||rule.cssText.slice(0,100)));}};
         for(const sheet of document.styleSheets){try{visit(sheet.cssRules,[sheet.href]);}catch(error){rules.push({href:sheet.href,error:String(error)});}}
-        return {rules,unitlessZeroTrack:CSS.supports('grid-template-columns','minmax(360px,1fr) 0 44px'),pixelZeroTrack:CSS.supports('grid-template-columns','minmax(360px,1fr) 0px 44px'),userAgent:navigator.userAgent,previewErrors:[...document.querySelectorAll('.photo-preview-frame[aria-label]')].map(e=>e.getAttribute('aria-label')).slice(0,100)};
+        const geometry=e=>{if(!e)return null;const r=e.getBoundingClientRect(),s=getComputedStyle(e);return {className:e.className,x:r.x,y:r.y,width:r.width,height:r.height,top:s.top,columns:s.gridTemplateColumns,inline:e.style.cssText};};
+        const layout=document.querySelector('.lc-stage-layout.is-inspector-collapsed,.lc-library-layout.is-inspector-collapsed');
+        let collapsedInlineProbe=null;
+        if(layout){const property='grid-template-columns',original=layout.style.getPropertyValue(property),priority=layout.style.getPropertyPriority(property);const before=geometry(layout);try{layout.style.setProperty(property,'minmax(360px,1fr) 0px 44px');collapsedInlineProbe={before,inline:geometry(layout)};}finally{if(original)layout.style.setProperty(property,original,priority);else layout.style.removeProperty(property);}collapsedInlineProbe.restored=geometry(layout);}
+        const grid=document.querySelector('.lc-grid-window');
+        let gridTopProbe=null;
+        if(grid){const original=grid.style.getPropertyValue('top'),priority=grid.style.getPropertyPriority('top'),before=geometry(grid);try{grid.style.setProperty('top','0px');gridTopProbe={before,zero:geometry(grid)};}finally{if(original)grid.style.setProperty('top',original,priority);else grid.style.removeProperty('top');}gridTopProbe.restored=geometry(grid);}
+        return {rules,collapsedInlineProbe,gridTopProbe,documentHidden:document.hidden,visibilityState:document.visibilityState,unitlessZeroTrack:CSS.supports('grid-template-columns','minmax(360px,1fr) 0 44px'),pixelZeroTrack:CSS.supports('grid-template-columns','minmax(360px,1fr) 0px 44px'),userAgent:navigator.userAgent,previewErrors:[...document.querySelectorAll('.photo-preview-frame[aria-label]')].map(e=>e.getAttribute('aria-label')).slice(0,100)};
     })();"#).unwrap_or_else(|error| json!({"error": error.to_string()}))
 }
 
