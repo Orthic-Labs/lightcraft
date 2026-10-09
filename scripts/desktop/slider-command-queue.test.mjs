@@ -76,3 +76,43 @@ test("cancel drops unsent value & waits for in-flight set", async () => {
     "develop.beginInteraction", "develop.set", "develop.endInteraction",
   ]);
 });
+
+test("rejected set settles caller & queue remains usable", async () => {
+  const calls = [];
+  let rejectSet = true;
+  const queue = new SliderCommandQueue(async (id, params) => {
+    calls.push([id, params]);
+    if (id === "develop.set" && rejectSet) { rejectSet = false; throw new Error("set failed"); }
+  });
+  await queue.begin("Exposure");
+  const failure = queue.set("exposure", 1).catch(reason => reason);
+  const end = queue.end();
+  assert.equal((await failure).message, "set failed");
+  await end;
+  await queue.begin("Contrast");
+  await queue.set("contrast", 4);
+  await queue.cancel();
+  assert.deepEqual(calls.map(([id]) => id), [
+    "develop.beginInteraction", "develop.set", "develop.endInteraction",
+    "develop.beginInteraction", "develop.set", "develop.cancelInteraction",
+  ]);
+});
+
+test("rejected begin drops generation & permits next gesture", async () => {
+  const calls = [];
+  let rejectBegin = true;
+  const queue = new SliderCommandQueue(async (id, params) => {
+    calls.push([id, params]);
+    if (id === "develop.beginInteraction" && rejectBegin) { rejectBegin = false; throw new Error("begin failed"); }
+  });
+  const beginFailure = queue.begin("Exposure").catch(reason => reason);
+  const setFailure = queue.set("exposure", 1).catch(reason => reason);
+  assert.equal((await beginFailure).message, "begin failed");
+  assert.equal((await setFailure).message, "begin failed");
+  await queue.begin("Contrast");
+  await queue.set("contrast", 4);
+  await queue.end();
+  assert.deepEqual(calls.map(([id]) => id), [
+    "develop.beginInteraction", "develop.beginInteraction", "develop.set", "develop.endInteraction",
+  ]);
+});

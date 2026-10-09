@@ -10,6 +10,7 @@ type Deferred = {
 type GenerationState = {
   pending: { params: SliderCommandParams; completion: Deferred } | null;
   pumpScheduled: boolean;
+  failure: unknown | null;
 };
 
 function deferred(): Deferred {
@@ -39,12 +40,21 @@ export class SliderCommandQueue {
   }
 
   public begin(label: string): Promise<unknown> {
-    this.activeGeneration = { pending: null, pumpScheduled: false };
-    return this.command('develop.beginInteraction', { label });
+    const generation = { pending: null, pumpScheduled: false, failure: null } as GenerationState;
+    this.activeGeneration = generation;
+    return this.command('develop.beginInteraction', { label }).catch(reason => {
+      generation.failure = reason;
+      if (this.activeGeneration === generation) this.activeGeneration = null;
+      if (generation.pending) {
+        generation.pending.completion.reject(reason);
+        generation.pending = null;
+      }
+      throw reason;
+    });
   }
 
   public set(control: string, value: number): Promise<void> {
-    const generation = this.activeGeneration ?? { pending: null, pumpScheduled: false };
+    const generation = this.activeGeneration ?? { pending: null, pumpScheduled: false, failure: null };
     this.activeGeneration = generation;
     const pending = generation.pending;
     if (pending) {
@@ -82,6 +92,11 @@ export class SliderCommandQueue {
     generation.pumpScheduled = true;
     const pump = this.tail.then(async () => {
       try {
+        if (generation.failure !== null) {
+          generation.pending?.completion.reject(generation.failure);
+          generation.pending = null;
+          return;
+        }
         while (generation.pending) {
           const current = generation.pending;
           generation.pending = null;
