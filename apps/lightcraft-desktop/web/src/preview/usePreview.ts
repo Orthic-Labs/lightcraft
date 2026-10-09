@@ -95,6 +95,7 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
 
   const retry = useCallback(() => {
     fullOnlyRetry.current = false;
+    pressureRetryCount.current = 0;
     setRetryValue((value) => value + 1);
   }, []);
 
