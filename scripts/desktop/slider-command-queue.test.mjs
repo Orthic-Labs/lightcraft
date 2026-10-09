@@ -109,10 +109,12 @@ test("rejected begin drops generation & permits next gesture", async () => {
   const setFailure = queue.set("exposure", 1).catch(reason => reason);
   assert.equal((await beginFailure).message, "begin failed");
   assert.equal((await setFailure).message, "begin failed");
-  await queue.begin("Contrast");
-  await queue.set("contrast", 4);
-  await queue.end();
+  const cleanup = queue.cancel();
+  const nextBegin = queue.begin("Contrast");
+  const nextSet = queue.set("contrast", 4);
+  const nextEnd = queue.end();
+  await Promise.all([cleanup, nextBegin, nextSet, nextEnd]);
   assert.deepEqual(calls.map(([id]) => id), [
-    "develop.beginInteraction", "develop.beginInteraction", "develop.set", "develop.endInteraction",
+    "develop.beginInteraction", "develop.cancelInteraction", "develop.beginInteraction", "develop.set", "develop.endInteraction",
   ]);
 });

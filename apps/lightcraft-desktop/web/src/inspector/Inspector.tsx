@@ -268,6 +268,7 @@ function ControlRow({ spec, value, run }: { spec: ControlSpec; value: number; ru
   const gestureValue = useRef(value);
   const gestureToken = useRef(0);
   const activeToken = useRef<number | null>(null);
+  const pointerActive = useRef(false);
   const releasePendingToken = useRef<number | null>(null);
   const latestValue = useRef(value);
   latestValue.current = value;
@@ -314,10 +315,7 @@ function ControlRow({ spec, value, run }: { spec: ControlSpec; value: number; ru
     void commandQueue.current!.begin(spec.label).catch(reason => {
       if (activeToken.current !== token) return;
       trace('begin.failed', { error: String(reason), token });
-      started.current = false;
-      activeToken.current = null;
-      releasePendingToken.current = null;
-      if (mounted.current) setDraft(gestureValue.current);
+      cancel(token);
     });
     return token;
   };
@@ -349,10 +347,10 @@ function ControlRow({ spec, value, run }: { spec: ControlSpec; value: number; ru
     void commandQueue.current!.cancel().then(() => release(token, gestureValue.current), () => release(token, gestureValue.current));
   };
   const set = (next: number) => { if (!Number.isFinite(next)) return Promise.resolve(); const clamped = Math.max(spec.min, Math.min(spec.max, next)); if (mounted.current) setDraft(clamped); return commandQueue.current!.set(spec.id, clamped); };
-  const onKey = (next: number) => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } const token = begin(); if (token === null) return; void set(next).then(() => { if (!started.current || activeToken.current !== token) return; if (timer.current) clearTimeout(timer.current); timer.current = setTimeout(() => end(token), 400); }, reason => failGesture(token, reason)); };
-  useEffect(() => () => { mounted.current = false; }, []);
+  const onKey = (next: number) => { if (pointerActive.current) return; if (timer.current) { clearTimeout(timer.current); timer.current = null; } const token = begin(); if (token === null) return; void set(next).then(() => { if (!started.current || activeToken.current !== token || pointerActive.current) return; if (timer.current) clearTimeout(timer.current); timer.current = setTimeout(() => { if (!pointerActive.current) end(token); }, 400); }, reason => failGesture(token, reason)); };
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); if (started.current) cancel(); }, [run]);
-  return <div className="lc-inspector__row"><label htmlFor={`ctl-${spec.id}`}>{spec.label}</label><input id={`ctl-${spec.id}`} type="range" min={spec.min} max={spec.max} step={spec.step} value={draft} aria-label={spec.label} onPointerDown={() => begin()} onPointerUp={() => end()} onPointerCancel={() => cancel()} onChange={e => { const token = begin(); void set(Number(e.target.value)).catch(reason => failGesture(token, reason)); }} onKeyDown={e => { trace('keydown', { target: 'range', key: e.key, code: e.code, trusted: e.nativeEvent.isTrusted }); if (e.key === 'Escape') cancel(); else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End') { e.preventDefault(); const current = Number(e.currentTarget.value); const base = Number.isFinite(current) ? current : draft; const next = e.key === 'Home' ? spec.min : e.key === 'End' ? spec.max : (e.key === 'ArrowLeft' || e.key === 'ArrowDown') ? base - spec.step : base + spec.step; onKey(next); } }} /><input type="number" min={spec.min} max={spec.max} step={spec.step} value={Number(draft.toFixed(spec.decimals))} aria-label={`${spec.label} value`} onFocus={() => begin()} onChange={e => { if (mounted.current) setDraft(Number(e.target.value)); }} onKeyDown={e => { trace('keydown', { target: 'number', key: e.key, code: e.code, trusted: e.nativeEvent.isTrusted }); if (e.key === 'Escape') cancel(); }} onBlur={() => { if (!started.current) return; const token = activeToken.current; void set(draft).then(() => end(token ?? undefined), reason => failGesture(token, reason)); }} /><button className="lc-inspector__reset" type="button" aria-label={`Reset ${spec.label}`} title={`Reset ${spec.label}`} onClick={() => { end(); void enqueue('develop.resetControl', { control: spec.id }); if (mounted.current) setDraft(spec.default); }}>↺</button></div>;
+  return <div className="lc-inspector__row"><label htmlFor={`ctl-${spec.id}`}>{spec.label}</label><input id={`ctl-${spec.id}`} type="range" min={spec.min} max={spec.max} step={spec.step} value={draft} aria-label={spec.label} onPointerDown={() => { pointerActive.current = true; if (timer.current) { clearTimeout(timer.current); timer.current = null; } begin(); }} onPointerUp={() => { pointerActive.current = false; end(); }} onPointerCancel={() => { pointerActive.current = false; cancel(); }} onChange={e => { const token = begin(); void set(Number(e.target.value)).catch(reason => failGesture(token, reason)); }} onKeyDown={e => { trace('keydown', { target: 'range', key: e.key, code: e.code, trusted: e.nativeEvent.isTrusted }); if (e.key === 'Escape') cancel(); else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End') { e.preventDefault(); const current = Number(e.currentTarget.value); const base = Number.isFinite(current) ? current : draft; const next = e.key === 'Home' ? spec.min : e.key === 'End' ? spec.max : (e.key === 'ArrowLeft' || e.key === 'ArrowDown') ? base - spec.step : base + spec.step; onKey(next); } }} /><input type="number" min={spec.min} max={spec.max} step={spec.step} value={Number(draft.toFixed(spec.decimals))} aria-label={`${spec.label} value`} onFocus={() => begin()} onChange={e => { if (mounted.current) setDraft(Number(e.target.value)); }} onKeyDown={e => { trace('keydown', { target: 'number', key: e.key, code: e.code, trusted: e.nativeEvent.isTrusted }); if (e.key === 'Escape') cancel(); }} onBlur={() => { if (!started.current) return; const token = activeToken.current; void set(draft).then(() => end(token ?? undefined), reason => failGesture(token, reason)); }} /><button className="lc-inspector__reset" type="button" aria-label={`Reset ${spec.label}`} title={`Reset ${spec.label}`} onClick={() => { end(); void enqueue('develop.resetControl', { control: spec.id }); if (mounted.current) setDraft(spec.default); }}>↺</button></div>;
 }
 
 function MixerLegend({ settings }: { settings: Json }) { const mixer = object(settings.mixer); return <div className="lc-inspector__empty">{Object.keys(mixer).length ? 'Adjust hue, saturation & luminance for each colour.' : 'Select photo to adjust its colours.'}</div>; }
