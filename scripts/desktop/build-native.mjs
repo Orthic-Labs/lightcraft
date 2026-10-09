@@ -23,10 +23,15 @@ const checkout = spawnSync('git', ['-C', fonts, 'checkout', '--quiet', 'abb83316
 if (checkout.error || checkout.status !== 0) fail('pinned craft-fonts checkout failed');
 const env = { ...process.env, CRAFT_FONTS_DIR: fonts, CRAFT_FONTS_REQUIRED: '1' };
 run(['run', 'build'], repoRoot, env);
+// Retain headless experiment CLI as an exact-revision compiler artifact too.
+const cliCompiler = runCargoSync(['build', '--locked', '-p', 'lightcraft-cli', '--target', target, '--profile', 'release-iterate', '--message-format=json'], { cwd: repoRoot, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true });
+writeFileSync(path.join(root, 'cli-cargo-artifacts.jsonl'), cliCompiler.stdout || '');
+if (cliCompiler.stderr) process.stderr.write(cliCompiler.stderr);
+if (cliCompiler.error || cliCompiler.status !== 0) fail(`RightKit headless CLI Cargo failed: ${cliCompiler.error?.message || cliCompiler.status}`);
 const compiler = runCargoSync(['build', '--locked', '--manifest-path', 'apps/lightcraft-desktop/Cargo.toml', '--features', 'qa-native,custom-protocol', '--target', target, '--profile', 'release-iterate', '--message-format=json'], { cwd: repoRoot, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true });
 // Retain compiler records on failures too. A large asynchronous stdout write
 // followed by process failure can drop diagnostics near the end of JSON output.
-writeFileSync(path.join(root, 'cargo-artifacts.jsonl'), compiler.stdout || '');
+writeFileSync(path.join(root, 'cargo-artifacts.jsonl'), `${cliCompiler.stdout || ''}\n${compiler.stdout || ''}`);
 if (compiler.stderr) process.stderr.write(compiler.stderr);
 if (compiler.error || compiler.status !== 0) {
   for (const line of (compiler.stdout || '').split('\n')) {

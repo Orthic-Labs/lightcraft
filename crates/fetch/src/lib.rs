@@ -365,7 +365,7 @@ fn fetch_file(f: &FileSpec<'_>, url: &str, dir: &Path, opts: &Options, cancel: &
     };
     let fetched = f.size != Some(have) || have == 0;
     if fetched {
-        let limits = Limits { connect: opts.connect_timeout, stall: opts.stall_timeout, cancel };
+        let limits = Limits { connect: opts.connect_timeout, stall: opts.stall_timeout, cancel, deadline: None };
         let mut url = Url::parse(url).map_err(|e| Fail::NextMirror(e.to_string()))?;
         let origin = url.host.clone();
         let mut redirects = 0;
