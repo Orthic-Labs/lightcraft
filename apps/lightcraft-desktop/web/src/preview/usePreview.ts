@@ -31,6 +31,7 @@ export interface UsePreviewResult {
 const MAX_DIMENSION = 8192;
 const MAX_SEQUENCE = Number.MAX_SAFE_INTEGER;
 const MAX_ACKNOWLEDGED_HANDLES = 256;
+const MAX_PRESSURE_RETRIES = 3;
 let nextSequenceValue = 0;
 
 function nextSequence(): number {
@@ -74,6 +75,10 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
   const staleRetryCount = useRef(0);
   const staleRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const staleRecoveryScheduled = useRef(false);
+  const pressureRetryKey = useRef("");
+  const pressureRetryCount = useRef(0);
+  const pressureRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fullOnlyRetry = useRef(false);
   const lastPhoto = useRef(options.photoId);
   const [retryValue, setRetryValue] = useState(0);
   const [state, setState] = useState<PreviewState>({ status: "idle", descriptor: null, url: null, error: null });
@@ -89,6 +94,7 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
   } satisfies PreviewRequest;
 
   const retry = useCallback(() => {
+    fullOnlyRetry.current = false;
     setRetryValue((value) => value + 1);
   }, []);
 
@@ -175,6 +181,13 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
       staleRetryCount.current = 0;
       staleRecoveryScheduled.current = false;
     }
+    if (pressureRetryKey.current !== requestKey) {
+      pressureRetryKey.current = requestKey;
+      pressureRetryCount.current = 0;
+      fullOnlyRetry.current = false;
+    }
+    const retryFullOnly = fullOnlyRetry.current;
+    fullOnlyRetry.current = false;
     let cancelled = false;
     const photoChanged = lastPhoto.current !== options.photoId;
     lastPhoto.current = options.photoId;
@@ -189,27 +202,49 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
     setState((previous) => photoChanged
       ? { status: "loading", descriptor: null, url: null, error: null }
       : { status: "loading", descriptor: previous.descriptor, url: previous.url, error: null });
+    const schedulePressureRetry = (message: string): boolean => {
+      if (!/preview queue pressure/i.test(message)) return false;
+      if (pressureRetryCount.current >= MAX_PRESSURE_RETRIES) return false;
+      const retryNumber = pressureRetryCount.current;
+      pressureRetryCount.current += 1;
+      if (pressureRetryTimer.current !== null) clearTimeout(pressureRetryTimer.current);
+      const spread = Math.abs(current.photoId) % 7;
+      const delay = 140 + (spread * 35) + (retryNumber * 180);
+      const retained = retainedPreview(current.photoId);
+      setState({ status: "loading", descriptor: retained?.descriptor ?? null, url: retained?.url ?? null, error: null });
+      pressureRetryTimer.current = setTimeout(() => {
+        pressureRetryTimer.current = null;
+        if (pressureRetryKey.current !== requestKey || cancelled) return;
+        // Retry only full render: quick stand-ins are already disposable & would
+        // increase pressure while native queue is draining.
+        fullOnlyRetry.current = true;
+        setRetryValue((value) => value + 1);
+      }, delay);
+      return true;
+    };
     // Paint engine's disposable embedded/cached stand-in first. Full render remains
     // authoritative & replaces it through same freshness/lease gate below.
-    void requestQuickPreview(current)
-      .then((descriptor) => {
-        const matches = descriptor.photoId === current.photoId && descriptor.slot === current.slot && descriptor.viewGeneration === current.viewGeneration && descriptor.sequence === current.sequence;
-        if (cancelled || !matches) {
-          acknowledge(descriptor.handle);
-          return;
-        }
-        const browserUrl = convertFileSrc(descriptor.handle, "lightcraft-preview");
-        void decodePreviewUrl(browserUrl).then(() => {
-          if (cancelled || pendingRequest.current?.sequence !== current.sequence || activeDescriptor.current) {
+    if (!retryFullOnly) {
+      void requestQuickPreview(current)
+        .then((descriptor) => {
+          const matches = descriptor.photoId === current.photoId && descriptor.slot === current.slot && descriptor.viewGeneration === current.viewGeneration && descriptor.sequence === current.sequence;
+          if (cancelled || !matches) {
             acknowledge(descriptor.handle);
             return;
           }
-          activeDescriptor.current = descriptor;
-          options.onHistogram?.(descriptor.histogram);
-          setState({ status: "loading", descriptor, url: `lightcraft-preview://${descriptor.handle}`, error: null });
-        }).catch(() => acknowledge(descriptor.handle));
-      })
-      .catch(() => undefined);
+          const browserUrl = convertFileSrc(descriptor.handle, "lightcraft-preview");
+          void decodePreviewUrl(browserUrl).then(() => {
+            if (cancelled || pendingRequest.current?.sequence !== current.sequence || activeDescriptor.current) {
+              acknowledge(descriptor.handle);
+              return;
+            }
+            activeDescriptor.current = descriptor;
+            options.onHistogram?.(descriptor.histogram);
+            setState({ status: "loading", descriptor, url: `lightcraft-preview://${descriptor.handle}`, error: null });
+          }).catch(() => acknowledge(descriptor.handle));
+        })
+        .catch(() => undefined);
+    }
     void requestPreview(current)
       .then((descriptor) => {
         const matches = descriptor.photoId === current.photoId && descriptor.slot === current.slot && descriptor.viewGeneration === current.viewGeneration && descriptor.sequence === current.sequence;
@@ -229,6 +264,7 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
           pendingRequest.current = null;
           staleRetryCount.current = 0;
           staleRecoveryScheduled.current = false;
+          pressureRetryCount.current = 0;
           // Keep current handle live until replacement state commits, so mounted URL stays
           // valid while React swaps decoded pixels.
           const previous = activeDescriptor.current;
@@ -263,6 +299,7 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
         pendingRequest.current = null;
         const message = error instanceof Error ? error.message : String(error);
         const retained = retainedPreview(current.photoId);
+        if (schedulePressureRetry(message)) return;
         if (/preview (?:superseded|view is stale|request is stale)/i.test(message)) {
           if (staleRetryCount.current < 2) {
             const retryNumber = staleRetryCount.current;
@@ -300,6 +337,10 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
         clearTimeout(staleRetryTimer.current);
         staleRetryTimer.current = null;
       }
+      if (pressureRetryTimer.current !== null) {
+        clearTimeout(pressureRetryTimer.current);
+        pressureRetryTimer.current = null;
+      }
     };
     // request values are represented by explicit dependencies below; callback identity is caller-owned.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -312,6 +353,10 @@ export function usePreview(options: UsePreviewOptions): UsePreviewResult {
     presentedPreview.current = null;
     presentedHandle.current = null;
     pendingRequest.current = null;
+    if (pressureRetryTimer.current !== null) {
+      clearTimeout(pressureRetryTimer.current);
+      pressureRetryTimer.current = null;
+    }
   }, [acknowledge, retirePending]);
 
   return { state, request: { ...request, sequence: latestSequence.current }, retry, onImageReady, onImageError };
