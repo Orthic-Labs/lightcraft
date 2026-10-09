@@ -23,6 +23,27 @@ const root = path.resolve(artifactRoot());
 const revision = sourceIdentity();
 const architecture = process.env.RIGHT_GIT_RELEASE_ARCHITECTURE || process.env.RIGHT_GIT_TARGET_ARCH;
 if (!architecture) fail("candidate requires RIGHT_GIT_RELEASE_ARCHITECTURE from generated target matrix");
+
+function ensureReleaseCheckoutAttached() {
+  const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8", windowsHide: true });
+  if (head.error || head.status !== 0 || head.stdout.trim() !== revision) {
+    fail(`candidate checkout HEAD must equal admitted source revision ${revision}`);
+  }
+  const branch = spawnSync("git", ["symbolic-ref", "--quiet", "HEAD"], { cwd: repoRoot, encoding: "utf8", windowsHide: true });
+  if (branch.status === 0) return;
+  const name = `right-release/${revision}`;
+  const attached = spawnSync("git", ["switch", "--create", name, revision], { cwd: repoRoot, encoding: "utf8", windowsHide: true });
+  if (attached.error || attached.status !== 0) {
+    fail(`candidate checkout must attach admitted source revision to a branch: ${attached.error?.message || attached.stderr || attached.stdout || attached.status}`);
+  }
+  const attachedHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8", windowsHide: true });
+  if (attachedHead.error || attachedHead.status !== 0 || attachedHead.stdout.trim() !== revision) {
+    fail(`branch attachment changed candidate HEAD away from admitted source revision ${revision}`);
+  }
+  console.log(`desktop candidate checkout: attached ${name} at ${revision}`);
+}
+
+ensureReleaseCheckoutAttached();
 const releaseTargetName = platform === "macos" ? "mac" : "win";
 const { config } = await loadReleaseConfig();
 if (config.schema !== 1 || !config.development?.targets?.[releaseTargetName]) {
