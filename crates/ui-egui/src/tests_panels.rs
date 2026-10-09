@@ -407,13 +407,19 @@ fn a_renamed_folder_keeps_its_place_in_the_tree() {
     h.app.session.library_folder = Some(trip.clone());
     h.step();
     h.step();
-    assert!(has(&h, &format!("source:libfolder:{trip}")));
+    // Catalog folder rows use forward slashes even when imported paths use Windows spelling.
+    let row = |path: &str| format!("source:libfolder:{}", path.replace('\\', "/"));
+    let visible_rows =
+        |h: &Headless| h.app.widgets.iter().filter(|(id, _)| id.starts_with("source:libfolder:")).map(|(id, _)| id.clone()).collect::<Vec<_>>();
+    let expected = row(&trip);
+    assert!(has(&h, &expected), "expected {expected}; observed {:?}", visible_rows(&h));
     let r = h.request("engine.execute", json!({"command": "folder.rename", "params": {"path": pics, "name": "pics2"}}), T);
     assert_eq!(r["ok"], true, "{r}");
     h.step();
     h.step();
     let renamed = base.join("pics2").join("trip").to_string_lossy().to_string();
-    assert!(has(&h, &format!("source:libfolder:{renamed}")), "the chosen folder is still on screen after the rename");
+    let expected = row(&renamed);
+    assert!(has(&h, &expected), "the chosen folder is still on screen after the rename: expected {expected}; observed {:?}", visible_rows(&h));
 }
 
 /// The menu opens from anywhere on a folder row, the disclosure triangle included; a disk row
