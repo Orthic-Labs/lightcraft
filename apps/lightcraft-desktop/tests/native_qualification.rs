@@ -1057,7 +1057,7 @@ fn with_control<T>(
     }));
     eprintln!("[qa] journey body: name={} passed={}", scenario.name(), result.is_ok());
     if result.is_err() {
-        let layout = layout_style_diagnostics(control);
+        let layout = layout_style_diagnostics(&control);
         let path = scenario.dir().join("failure-layout.json");
         if let Ok(bytes) = serde_json::to_vec_pretty(&layout)
             && fs::write(&path, bytes).is_ok()
