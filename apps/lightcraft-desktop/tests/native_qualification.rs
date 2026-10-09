@@ -617,13 +617,18 @@ fn diagnose_native_viewport_bounce(control: &rightkit_qa::control::Control, scen
                     selector,
                     className: typeof node.className === 'string' ? node.className : '',
                     rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, right: rect.right, bottom: rect.bottom },
+                    inlineStyle: node.getAttribute('style'),
+                    top: style.top,
                     columns: style.gridTemplateColumns,
                     display: style.display,
+                    scrollTop: node.scrollTop,
+                    scrollHeight: node.scrollHeight,
+                    clientHeight: node.clientHeight,
                 };
             };
             return {
                 viewport: { width: innerWidth, height: innerHeight },
-                layout: ['.lc-library-layout', '.lc-library-workspace', '.lc-stage-layout', '.lc-inspector', '.lc-inspector__rail', '.lc-inspector__more-menu'].map(describe),
+                layout: ['.lc-library-layout', '.lc-library-workspace', '.lc-grid-scroll', '.lc-grid-spacer', '.lc-grid-window', '.lc-stage-layout', '.stage-workspace', '.lc-inspector', '.lc-inspector__rail', '.lc-inspector__more-menu'].map(describe),
             };
         })();"#) {
             Ok(value) => value,
@@ -650,19 +655,23 @@ fn diagnose_native_viewport_bounce(control: &rightkit_qa::control::Control, scen
             }),
         })
         .unwrap_or_else(|| json!({"error": "viewport width overflow"}));
-    let bounced = sample("bounce");
+    let bounced = sample("bounce-immediate");
+    sleep(Duration::from_millis(128));
+    let bounced_after_128ms = sample("bounce-after-128ms");
     let restored_to = match control.set_viewport(width, height) {
         Ok((inner_width, inner_height)) => json!({"observed": {"width": inner_width, "height": inner_height}}),
         Err(error) => json!({"error": error.to_string()}),
     };
-    let restored = sample("restored");
+    let restored = sample("restored-immediate");
+    sleep(Duration::from_millis(128));
+    let restored_after_128ms = sample("restored-after-128ms");
     let evidence = json!({
         "schema": 1,
         "probe": "native-viewport-bounce",
         "requested": {"width": width, "height": height},
         "before": before,
-        "bounce": {"resize": bounced_to, "sample": bounced},
-        "restored": {"resize": restored_to, "sample": restored},
+        "bounce": {"resize": bounced_to, "immediate": bounced, "after128ms": bounced_after_128ms},
+        "restored": {"resize": restored_to, "immediate": restored, "after128ms": restored_after_128ms},
     });
     eprintln!("[qa] native viewport bounce diagnostics={evidence}");
     let path = scenario.dir().join("native-viewport-bounce.json");
