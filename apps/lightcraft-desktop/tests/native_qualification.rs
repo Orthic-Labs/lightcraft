@@ -588,10 +588,9 @@ fn set_native_viewport(control: &rightkit_qa::control::Control, width: u64, heig
     eprintln!("[qa] viewport native={result}; DOM={dom_size}");
     let settled = wait_for_dom(control, &format!("return window.innerWidth === {width} && window.innerHeight === {height};"));
     assert_eq!(settled.as_bool(), Some(true), "WebView inner size must match requested QA viewport");
-    let layout = format!(
-        r#"return (() => {{
-            const viewport = {{ width: window.innerWidth, height: window.innerHeight }};
-            const rect = (selector) => {{ const node = document.querySelector(selector); if (!node) return null; const r = node.getBoundingClientRect(); return {{ x:r.x, y:r.y, width:r.width, height:r.height, bottom:r.bottom, display:getComputedStyle(node).display }}; }};
+    let layout = r#"return (() => {
+            const viewport = { width: window.innerWidth, height: window.innerHeight };
+            const rect = (selector) => { const node = document.querySelector(selector); if (!node) return null; const r = node.getBoundingClientRect(); return { x:r.x, y:r.y, width:r.width, height:r.height, bottom:r.bottom, display:getComputedStyle(node).display }; };
             const outer = ['html', 'body', '#root', '.rk-shell'].map(rect);
             const body = rect('.rk-body');
             const plane = rect('.rk-plane');
@@ -599,9 +598,8 @@ fn set_native_viewport(control: &rightkit_qa::control::Control, width: u64, heig
             const exact = (r) => r && r.display !== 'none' && Math.abs(r.width - viewport.width) <= 1 && Math.abs(r.height - viewport.height) <= 1 && Math.abs(r.bottom - viewport.height) <= 1;
             const child = (r) => r && r.display !== 'none' && r.width >= 1 && r.height >= 1 && Math.abs(r.bottom - viewport.height) <= 1;
             return outer.every(exact) && child(body) && child(plane) && child(content);
-        }})();"#,
-    );
-    let layout_settled = wait_for_dom(control, &layout);
+        })();"#;
+    let layout_settled = wait_for_dom(control, layout);
     assert_eq!(layout_settled.as_bool(), Some(true), "native viewport layout must settle after resize");
     assert_native_window_hidden(control);
     result
@@ -715,11 +713,28 @@ fn assert_active_grid_is_bounded(control: &rightkit_qa::control::Control) {
 }
 
 fn grid_metrics(control: &rightkit_qa::control::Control) -> Value {
-    control
-        .eval(
-            "return (() => { const scroll = document.querySelector('.lc-grid-scroll'); const grid = document.querySelector('.lc-grid-window'); const images = [...(grid?.querySelectorAll('img.lc-photo-preview') || [])]; const first = grid?.querySelector('.lc-photo-caption span:first-child')?.textContent?.trim() || ''; const bounds=scroll?.getBoundingClientRect(); const visible=[...(grid?.querySelectorAll('.lc-photo-cell') || [])].filter(e=>{const r=e.getBoundingClientRect();return bounds&&r.bottom>bounds.top&&r.top<bounds.bottom;}); const ready=visible.filter(e=>[...e.querySelectorAll('img.lc-photo-preview')].some(img=>img.complete&&img.naturalWidth>0&&img.naturalHeight>0)); return {visible:visible.length,visibleReady:ready.length,errors:grid?.querySelectorAll('[data-preview-state=error]').length||0,scrollTop: scroll?.scrollTop || 0, scrollHeight: scroll?.scrollHeight || 0, clientHeight: scroll?.clientHeight || 0, top: Number.parseFloat(grid?.style.top || '0') || 0, cells: grid?.querySelectorAll('.lc-photo-cell').length || 0, images: images.length, loaded: images.filter((img) => img.complete && img.naturalWidth > 0 && img.naturalHeight > 0).length, first, busy: grid?.getAttribute('aria-busy') === 'true'}; })();",
-        )
-        .expect("scalable grid DOM query must execute")
+    control.eval(r#"return (() => {
+        const scroll = document.querySelector('.lc-grid-scroll');
+        const grid = document.querySelector('.lc-grid-window');
+        const cells = [...(grid?.querySelectorAll('.lc-photo-cell') || [])];
+        const images = [...(grid?.querySelectorAll('img.lc-photo-preview') || [])];
+        const first = grid?.querySelector('.lc-photo-caption span:first-child')?.textContent?.trim() || '';
+        const box = e => { if (!e) return null; const r=e.getBoundingClientRect(),s=getComputedStyle(e); return {x:r.x,y:r.y,width:r.width,height:r.height,bottom:r.bottom,display:s.display,position:s.position,style:e.style.cssText}; };
+        const bounds=scroll?.getBoundingClientRect();
+        const visible=cells.filter(e=>{const r=e.getBoundingClientRect();return bounds&&r.bottom>bounds.top&&r.top<bounds.bottom;});
+        const ready=visible.filter(e=>[...e.querySelectorAll('img.lc-photo-preview')].some(img=>img.complete&&img.naturalWidth>0&&img.naturalHeight>0));
+        const describe=e=>({name:e.querySelector('.lc-photo-name')?.textContent,box:box(e),row:box(e.parentElement),error:e.querySelector('.photo-preview-frame')?.getAttribute('aria-label')});
+        return {visible:visible.length,visibleReady:ready.length,errors:grid?.querySelectorAll('[data-preview-state=error]').length||0,scrollTop:scroll?.scrollTop||0,scrollHeight:scroll?.scrollHeight||0,clientHeight:scroll?.clientHeight||0,top:Number.parseFloat(grid?.style.top||'0')||0,cells:cells.length,images:images.length,loaded:images.filter(img=>img.complete&&img.naturalWidth>0&&img.naturalHeight>0).length,first,busy:grid?.getAttribute('aria-busy')==='true',scrollBox:box(scroll),gridBox:box(grid),firstCells:cells.slice(0,5).map(describe),lastCells:cells.slice(-5).map(describe)};
+    })();"#).expect("scalable grid DOM query must execute")
+}
+
+fn layout_style_diagnostics(control: &rightkit_qa::control::Control) -> Value {
+    control.eval(r#"return (() => {
+        const rules=[];
+        const visit=(list,chain=[])=>{for(const rule of list){if(rule.selectorText&&/lc-stage-layout|lc-library-layout|lc-grid-window|lc-grid-row/.test(rule.selectorText))rules.push({chain,selector:rule.selectorText,style:rule.style.cssText});if(rule.cssRules)visit(rule.cssRules,chain.concat(rule.conditionText||rule.name||rule.cssText.slice(0,100)));}};
+        for(const sheet of document.styleSheets){try{visit(sheet.cssRules,[sheet.href]);}catch(error){rules.push({href:sheet.href,error:String(error)});}}
+        return {rules,unitlessZeroTrack:CSS.supports('grid-template-columns','minmax(360px,1fr) 0 44px'),pixelZeroTrack:CSS.supports('grid-template-columns','minmax(360px,1fr) 0px 44px'),userAgent:navigator.userAgent,previewErrors:[...document.querySelectorAll('.photo-preview-frame[aria-label]')].map(e=>e.getAttribute('aria-label')).slice(0,100)};
+    })();"#).unwrap_or_else(|error| json!({"error": error.to_string()}))
 }
 
 fn wait_for_grid(control: &rightkit_qa::control::Control, scrolled: bool, previous_first: Option<&str>) -> Value {
@@ -1042,6 +1057,13 @@ fn with_control<T>(
     }));
     eprintln!("[qa] journey body: name={} passed={}", scenario.name(), result.is_ok());
     if result.is_err() {
+        let layout = layout_style_diagnostics(control);
+        let path = scenario.dir().join("failure-layout.json");
+        if let Ok(bytes) = serde_json::to_vec_pretty(&layout)
+            && fs::write(&path, bytes).is_ok()
+        {
+            scenario.keep("failure-layout.json", &path);
+        }
         let state = control.eval("return {url: location.href, title: document.title, width: window.innerWidth, height: window.innerHeight, rootChildren: document.getElementById('root')?.childElementCount, layout: ['html', 'body', '#root', '.rk-shell', '.rk-body', '.rk-plane', '.lc-content', '.lc-library-layout', '.lc-library-center', '.lc-library-workspace', '.lc-stage-layout', '.lc-inspector', '.lc-inspector__rail'].map(selector => { const e = document.querySelector(selector); if (!e) return {selector, missing: true}; const r = e.getBoundingClientRect(), s = getComputedStyle(e); return {selector, className: e.className, rect: {x: r.x, y: r.y, width: r.width, height: r.height, right: r.right}, display: s.display, rows: s.gridTemplateRows, columns: s.gridTemplateColumns, visibility: s.visibility}; }), activeElement: document.activeElement?.outerHTML.slice(0, 500), preview: document.querySelector('.stage-preview')?.outerHTML, previewStates: Array.from(document.querySelectorAll('[data-preview-state]')).map(node => ({state: node.getAttribute('data-preview-state'), html: node.outerHTML.slice(0, 1000)})), body: document.body.innerText.slice(0, 4000)};");
         eprintln!("[qa] failure DOM={state:?}");
         if let Ok(state) = state {
