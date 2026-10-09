@@ -686,7 +686,7 @@
   "Remove a filter above, or choose Clear all": "上のフィルターを解除するか、「すべて解除」を選択してください",
   "Remove from Target Album": "追加先アルバムから除去",
   "Remove shortcut": "ショートカットを削除",
-  "Remove this face box (undo with Edit ▸ Undo)": "この顔の枠を除去（「編集 ▸ 取り消す」で元に戻せます）",
+  "Remove this face box (undo with Edit ▸ Undo)": "この顔の枠を除去（「編集 → 取り消す」で元に戻せます）",
   "Rename Component": "構成要素の名前を変更",
   "Rename Folder": "フォルダ名を変更",
   "Rename Mask": "マスク名を変更",
@@ -1639,5 +1639,9 @@
   "≤  at most": "≤  以下",
   "≥  at least": "≥  以上",
   "日本語": "日本語",
-  "繁體中文（台灣）": "繁體中文（台灣）"
+  "繁體中文（台灣）": "繁體中文（台灣）",
+  "Automatic renders the Detail view at the size it is shown, up to the photo's own pixels. Choose a size to cap it: smaller is faster.": "自動では、詳細表示を表示サイズ(写真本来の画素数まで)で描画します。サイズを選ぶと上限になります。小さいほど高速です",
+  "Scroll menu down": "メニューを下にスクロール",
+  "Scroll menu up": "メニューを上にスクロール",
+  "Open Log Folder": "ログフォルダーを開く"
 }

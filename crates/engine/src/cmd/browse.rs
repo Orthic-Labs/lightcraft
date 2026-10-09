@@ -268,15 +268,17 @@ pub(crate) fn follow_folder(s: &mut Session, from: &str, to: &str) {
 /// the folder itself.
 fn follow_library_folder(chosen: &mut Option<String>, from: &str, to: &str) {
     let Some(c) = chosen.as_deref() else { return };
-    let (ck, fk) = (lightcraft_catalog::query::folder_key(c), lightcraft_catalog::query::folder_key(from));
-    if fk.is_empty() {
-        return;
-    }
-    if let Some(rest) = ck.strip_prefix(fk.as_str()).filter(|r| r.is_empty() || r.starts_with('/') || fk.ends_with('/')) {
-        let rest = rest.trim_start_matches('/');
+    if let Some(rest) = lightcraft_catalog::query::folder_rest(c, from) {
+        // Compare by folder identity, while retaining the destination's separator and the
+        // chosen subfolder's spelling for display.
+        if rest.is_empty() {
+            *chosen = Some(to.to_string());
+            return;
+        }
         let separator = if to.contains('\\') || (cfg!(windows) && to.as_bytes().get(1) == Some(&b':')) { '\\' } else { '/' };
-        let rest = if separator == '\\' { rest.replace('/', "\\") } else { rest.to_string() };
-        *chosen = Some(if rest.is_empty() { to.to_string() } else { format!("{}{separator}{rest}", to.trim_end_matches(['/', '\\'])) });
+        let rest = rest.join(&separator.to_string());
+        let prefix = to.trim_end_matches(['/', '\\']);
+        *chosen = Some(if prefix.is_empty() { format!("{separator}{rest}") } else { format!("{prefix}{separator}{rest}") });
     }
 }
 

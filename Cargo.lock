@@ -4179,12 +4179,14 @@ dependencies = [
  "lightcraft-raw",
  "lightcraft-scenes",
  "lightcraft-segment",
+ "lightcraft-tiff",
  "log",
  "miniz_oxide 0.8.9",
  "rayon",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "unicode-segmentation",
  "web-time",
 ]
 

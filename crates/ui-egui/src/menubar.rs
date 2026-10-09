@@ -231,6 +231,7 @@ const LAYOUT: &[(&str, &[&str])] = &[
             "app.whatsNew",
             "app.shortcuts",
             "app.systemInfo",
+            "app.openLogFolder",
             "---",
             "app.about",
         ],
@@ -360,7 +361,7 @@ fn expanded(app: &LightcraftApp, name: &str) -> Option<Vec<MenuNode>> {
             vec![
                 item(
                     "library.buildPreviews",
-                    json!({"size": "standard", "edge": app.ui.settings.preview_edge}),
+                    json!({"size": "standard", "edge": app.ui.settings.standard_preview_edge()}),
                     crate::i18n::tr_format!("Build Standard-Sized Previews ({scope})", scope = crate::i18n::tr(scope)),
                     None,
                     !running,
@@ -746,22 +747,27 @@ pub fn show_in_window(app: &mut LightcraftApp, ui: &mut egui::Ui, max_width: f32
     let mut clicked: Option<(String, Value)> = None;
     let start = ui.cursor().left();
     let mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
+    // Menus hang below the whole top bar and never grow past the window (#189): a tall menu
+    // scrolls instead of egui sliding it up over the titles.
+    let bar_bottom = Some(ui.max_rect().bottom());
     if total <= max_width {
         let saved = ui.spacing().item_spacing.x;
         ui.spacing_mut().item_spacing.x = TITLE_GAP;
         for (title, items) in &bar {
             let r = ui.add(egui::Button::new(egui::RichText::new(crate::i18n::tr(title)).font(font.clone()).color(t.text_label)).frame(false));
             crate::widgets::register(ui.ctx(), format!("menu:{title}"), r.rect);
-            egui::Popup::menu(&r).show(|ui| nodes_ui(ui, items, mac, &mut clicked));
+            egui::Popup::menu(&r).show(|ui| crate::menu_level::level(ui, 1, bar_bottom, |ui| nodes_ui(ui, items, mac, &mut clicked, 1, bar_bottom)));
         }
         ui.spacing_mut().item_spacing.x = saved;
     } else {
         let r = ui.add(egui::Button::new(egui::RichText::new(crate::i18n::tr("Menu")).font(font.clone()).color(t.text_label)).frame(false));
         crate::widgets::register(ui.ctx(), "menu:all", r.rect);
         egui::Popup::menu(&r).show(|ui| {
-            for (title, items) in &bar {
-                ui.menu_button(crate::i18n::tr(title), |ui| nodes_ui(ui, items, mac, &mut clicked));
-            }
+            crate::menu_level::level(ui, 1, bar_bottom, |ui| {
+                for (title, items) in &bar {
+                    submenu(ui, title, crate::i18n::tr(title).to_string(), 1, bar_bottom, |ui| nodes_ui(ui, items, mac, &mut clicked, 2, bar_bottom));
+                }
+            });
         });
     }
     if let Some((id, params)) = clicked {
@@ -776,7 +782,19 @@ pub fn show_in_window(app: &mut LightcraftApp, ui: &mut egui::Ui, max_width: f32
     ui.cursor().left() - start
 }
 
-fn nodes_ui(ui: &mut egui::Ui, nodes: &[MenuNode], mac: bool, clicked: &mut Option<(String, Value)>) {
+/// A submenu row showing `text` at `depth`, whose rows `children` draws one level deeper,
+/// bounded like every level. The row is registered as `menusub:<label>` (the untranslated
+/// label), and while its submenu is open it is the anchor the next frame's room is measured from.
+fn submenu(ui: &mut egui::Ui, label: &str, text: String, depth: usize, bar_bottom: Option<f32>, children: impl FnOnce(&mut egui::Ui)) {
+    let r = ui.menu_button(text, |ui| crate::menu_level::level(ui, depth + 1, bar_bottom, children));
+    crate::widgets::register(ui.ctx(), format!("menusub:{label}"), r.response.rect);
+    if r.inner.is_some() {
+        crate::menu_level::set_anchor(ui.ctx(), depth + 1, r.response.rect);
+    }
+}
+
+/// `depth` is 1 for a top-level menu's rows; `bar_bottom` is where the menu bar ends.
+fn nodes_ui(ui: &mut egui::Ui, nodes: &[MenuNode], mac: bool, clicked: &mut Option<(String, Value)>, depth: usize, bar_bottom: Option<f32>) {
     ui.set_min_width(220.0);
     for n in nodes {
         match n {
@@ -784,7 +802,9 @@ fn nodes_ui(ui: &mut egui::Ui, nodes: &[MenuNode], mac: bool, clicked: &mut Opti
                 ui.separator();
             }
             MenuNode::Submenu { label, children } => {
-                ui.menu_button(format!("      {}", crate::i18n::tr(label)), |ui| nodes_ui(ui, children, mac, clicked));
+                submenu(ui, label, format!("      {}", crate::i18n::tr(label)), depth, bar_bottom, |ui| {
+                    nodes_ui(ui, children, mac, clicked, depth + 1, bar_bottom)
+                });
             }
             MenuNode::Item { id, params, label, shortcut, enabled, checked } => {
                 // a gutter for check marks, like native menus
@@ -1065,6 +1085,37 @@ mod tests {
         let first = app.session.visible()[0].0;
         app.session.execute("library.select", &json!({"ids": [first]})).unwrap();
         assert!(run_item(&mut app, "merge.hdrLast", Value::Null).is_err());
+    }
+
+    /// #260: Help ▸ Open Log Folder reveals the log file the host names. Without one (the web,
+    /// `--memory`) or without a file manager to show it, the item is off and the command says why.
+    #[test]
+    fn open_log_folder_reveals_the_hosts_log_file() {
+        let mut app = app();
+        let help = |app: &LightcraftApp| menu_bar(app).into_iter().find(|(t, _)| t == "Help").map(|(_, items)| items).unwrap_or_default();
+        assert!(matches!(find(&help(&app), "app.openLogFolder"), Some(MenuNode::Item { enabled: false, .. })), "listed in Help, off without a log");
+        assert!(!crate::menus::ui_enabled(&app, "app.openLogFolder"));
+        assert!(run_item(&mut app, "app.openLogFolder", Value::Null).is_err());
+        let shown = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let s = shown.clone();
+        app.services.reveal = Some(Box::new(move |p: &str| {
+            s.lock().unwrap().push(p.to_string());
+            Ok(())
+        }));
+        // a file manager alone is not enough: this session keeps no log
+        assert!(!crate::menus::ui_enabled(&app, "app.openLogFolder"));
+        assert!(run_item(&mut app, "app.openLogFolder", Value::Null).is_err());
+        assert!(shown.lock().unwrap().is_empty());
+        let log = "/home/a/.config/lightcraft/logs/lightcraft.log";
+        app.services.log_file = Some(log.into());
+        assert!(crate::menus::ui_enabled(&app, "app.openLogFolder"));
+        assert!(matches!(find(&help(&app), "app.openLogFolder"), Some(MenuNode::Item { enabled: true, .. })));
+        let r = run_item(&mut app, "app.openLogFolder", Value::Null).unwrap();
+        assert_eq!(r["path"], log);
+        assert_eq!(shown.lock().unwrap().as_slice(), [log]);
+        // the file manager's failure is the command's
+        app.services.reveal = Some(Box::new(|_: &str| Err("no file manager".into())));
+        assert_eq!(run_item(&mut app, "app.openLogFolder", Value::Null).unwrap_err(), "no file manager");
     }
 
     #[test]

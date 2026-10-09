@@ -1007,3 +1007,101 @@ fn trashed_photo_ids(tag: &str) -> (Session, std::path::PathBuf, [u64; 1], u64) 
     let (s, src, id) = trashed_photo(tag);
     (s, src, [id], 0)
 }
+
+/// Issue #374: launch arguments never turn into a walk of a whole drive or home folder. An empty
+/// argument is ignored; `.`, `..` and (on Windows) `/` are resolved against the working folder a
+/// launcher picked, which is often a drive root; a root is replaced by its memory card's DCIM
+/// folder or refused, and so is the home folder.
+#[test]
+fn launch_paths_never_become_a_drive_root_or_the_home_folder() {
+    use crate::import::{LaunchPath, launch_path};
+    let root = if cfg!(windows) { Path::new("C:\\") } else { Path::new("/") };
+    let home = if cfg!(windows) { Path::new("C:\\Users\\me") } else { Path::new("/home/me") };
+    let none = |_: &Path| None;
+    let refused = |r: Option<LaunchPath>| matches!(r, Some(LaunchPath::Refused { .. }));
+    for empty in ["", "  "] {
+        assert_eq!(launch_path(empty, Some(root), Some(home), none), None, "{empty:?}");
+    }
+    // the working folder is the drive root: `.` (and `..`) name the whole drive
+    for arg in [".", "..", "./", ".\\..", "/"] {
+        let arg = if cfg!(windows) { arg.to_string() } else { arg.replace('\\', "/") };
+        assert!(refused(launch_path(&arg, Some(root), Some(home), none)), "{arg:?}");
+    }
+    assert!(refused(launch_path("..", Some(&home.join("Pictures")), Some(home), none)), "up to the home folder");
+    assert!(refused(launch_path(&home.to_string_lossy(), None, Some(home), none)));
+    assert!(refused(launch_path(".", None, Some(home), none)), "relative, no working folder");
+    // a memory card's root: its camera folder
+    let dcim = |r: &Path| Some(r.join("DCIM"));
+    assert_eq!(launch_path(".", Some(root), Some(home), dcim), Some(LaunchPath::Import(root.join("DCIM").to_string_lossy().to_string())));
+    // ordinary folders and files resolve to absolute paths
+    let pics = home.join("Pictures");
+    assert_eq!(launch_path("Pictures", Some(home), Some(home), none), Some(LaunchPath::Import(pics.to_string_lossy().to_string())));
+    assert_eq!(
+        launch_path(&pics.join("a.jpg").to_string_lossy(), None, Some(home), none),
+        Some(LaunchPath::Import(pics.join("a.jpg").to_string_lossy().to_string()))
+    );
+}
+
+/// Issue #374: a folder import is bounded — a tree deeper or larger than the limits is not walked
+/// to the end (it stops and says so), and what it found is still returned.
+#[test]
+fn expand_stops_at_the_walk_limits() {
+    let d = temp_dir("bounded");
+    let mut deep = d.clone();
+    for i in 0..8 {
+        deep = deep.join(format!("d{i}"));
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join(format!("p{i}.jpg")), b"x").unwrap();
+    }
+    let top = [d.to_string_lossy().to_string()];
+    let (all, cut) = crate::import::expand_within(&top, None, crate::walk::Limits::default());
+    assert_eq!((all.len(), cut), (8, false));
+    let (some, cut) = crate::import::expand_within(&top, None, crate::walk::Limits { max_depth: 3, max_entries: 1000 });
+    assert_eq!((some.len(), cut), (2, true), "{some:?}");
+    let (few, cut) = crate::import::expand_within(&top, None, crate::walk::Limits { max_depth: 32, max_entries: 5 });
+    assert!(cut && few.len() < 8, "{few:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Raw containers LightCraft cannot decode but shows by their embedded JPEG are picked up from a folder
+/// (the extensions are in `import::EXTENSIONS`; the files differ so none is a duplicate) and import as preview only.
+#[test]
+fn folder_import_picks_up_undecodable_raw_containers_as_preview_only() {
+    use lightcraft_codecs::{ChromaSubsampling, EncodeImage, EncodeMeta, Samples, encode_jpeg};
+    let src = temp_dir("preview-only-exts");
+    let px: Vec<u8> = (0..40 * 30).flat_map(|i| [(i % 251) as u8, 128, 200]).collect();
+    let jpeg = encode_jpeg(&EncodeImage::new(40, 30, 3, Samples::U8(&px)), 90, ChromaSubsampling::S444, &EncodeMeta::default()).unwrap();
+    // CRW / MRW / X3F: their magic, then the JPEG. IIQ / KDC / MOS / ERF: a TIFF whose IFD0 only points at the JPEG.
+    let tiff = {
+        let off = 8 + 2 + 24 + 4;
+        let mut f = b"II*\0\x08\0\0\0\x02\0".to_vec();
+        for (tag, v) in [(513u16, off as u32), (514, jpeg.len() as u32)] {
+            f.extend_from_slice(&tag.to_le_bytes());
+            f.extend_from_slice(&[4, 0, 1, 0, 0, 0]);
+            f.extend_from_slice(&v.to_le_bytes());
+        }
+        f.extend_from_slice(&[0, 0, 0, 0]);
+        f.extend_from_slice(&jpeg);
+        f
+    };
+    let with_magic = |magic: &[u8]| [magic, &[0x11u8; 64][..], &jpeg].concat();
+    let files: [(&str, Vec<u8>); 7] = [
+        ("a.CRW", with_magic(b"II\x1a\0\0\0HEAPCCDR")),
+        ("b.mrw", with_magic(b"\0MRM\0\x01\0\0")),
+        ("c.x3f", with_magic(b"FOVb\x02\0\x02\0")),
+        ("d.iiq", [&tiff[..], b"d"].concat()),
+        ("e.kdc", [&tiff[..], b"e"].concat()),
+        ("f.mos", [&tiff[..], b"f"].concat()),
+        ("g.erf", [&tiff[..], b"g"].concat()),
+    ];
+    for (name, bytes) in &files {
+        std::fs::write(src.join(name), bytes).unwrap();
+    }
+    let mut s = Session::new().with_fs();
+    let r = s.execute("library.import", &json!({"paths": [src.to_string_lossy()]})).unwrap();
+    assert_eq!(r["scanned"], 7, "{r}");
+    assert_eq!(ids(&r, "imported"), 7, "{r}");
+    assert_eq!(ids(&r, "failed"), 0, "{r}");
+    assert!(s.catalog.photos().all(|p| p.preview_only.is_some() && p.kind == lightcraft_catalog::MediaKind::Raw && (p.width, p.height) == (40, 30)));
+    let _ = std::fs::remove_dir_all(&src);
+}

@@ -15,16 +15,20 @@ pub mod icons;
 pub mod import;
 pub mod lightroom_import;
 pub mod links;
+pub mod menu_level;
 pub mod menubar;
 pub mod menus;
 pub mod merge;
 pub mod panels;
+pub mod pick;
+pub mod region;
 pub mod render;
 pub mod shortcuts;
 pub mod softpaint;
 pub mod state;
 pub mod tasks;
 pub mod theme;
+pub mod titlebar;
 pub mod widgets;
 
 #[cfg(test)]
@@ -44,9 +48,13 @@ mod tests_masking;
 #[cfg(test)]
 mod tests_masking_layout;
 #[cfg(test)]
+mod tests_menubar;
+#[cfg(test)]
 mod tests_offline;
 #[cfg(test)]
 mod tests_panels;
+#[cfg(test)]
+mod tests_preview_limit;
 #[cfg(test)]
 mod tests_quit_unsaved;
 #[cfg(test)]
@@ -54,7 +62,11 @@ mod tests_scroll;
 #[cfg(test)]
 mod tests_switch_library;
 #[cfg(test)]
+mod tests_titlebar;
+#[cfg(test)]
 mod tests_unsaved;
+#[cfg(test)]
+mod tests_zoom;
 
 use std::sync::mpsc::{Receiver, Sender};
 
@@ -88,6 +100,10 @@ pub type HostAction = Box<dyn FnMut(&mut Session) -> Result<Value, String>>;
 /// Platform services injected by the host app (desktop or web).
 #[derive(Default)]
 pub struct Services {
+    /// Native file dialogs for commands, shown off the UI thread and answered later
+    /// (`pick`; #191). With it, the synchronous pickers below serve only the buttons inside
+    /// dialogs; without it (the web, tests) they answer the commands too.
+    pub picker: Option<pick::Picker>,
     /// Show an open dialog for photos; returns paths.
     pub pick_files: Option<PickFiles>,
     /// Open dialog for preset files (`.lcpreset`, `.xmp`, `.lrtemplate`, `.zip`, `.dng`, Luminar `.lmp` / `.mplumpack`).
@@ -107,6 +123,9 @@ pub struct Services {
     pub png: Option<PngEncode>,
     /// Show a file in the system file manager (desktop only).
     pub reveal: Option<RevealFn>,
+    /// The host's current log file (`<settings>/logs/lightcraft.log`), which Help ▸ Open Log
+    /// Folder reveals (#260). None where no log is kept: the web, `--memory`, `LIGHTCRAFT_NO_PREFS`.
+    pub log_file: Option<String>,
     /// Choose a folder (Settings → General → Open Library…; desktop only).
     pub pick_folder: Option<PickFolder>,
     /// Open a Lightroom Classic `.lrcat` catalog for read-only import.
@@ -171,6 +190,8 @@ pub struct LightcraftApp {
     shadow: Option<headless::HeadlessView>,
     /// Synthetic input events (from the control channel) injected one step per frame.
     pub synthetic: Vec<egui::Event>,
+    /// Native file dialogs up for commands (`pick`): each command runs again when its closes.
+    pub(crate) pending_picks: Vec<pick::Pending>,
     /// Modifiers announced for synthetic input (held from a button down to its release).
     synthetic_mods: egui::Modifiers,
     /// Clear `synthetic_mods` on the next frame.
@@ -195,6 +216,16 @@ pub struct LightcraftApp {
     /// What the loupe drew last frame: photo and source ("render", "cached", "embedded", "small",
     /// "thumb", "none").
     pub loupe_shown: Option<(lightcraft_catalog::PhotoId, &'static str)>,
+    /// The window render the loupe asked for last, by job key (see [`region`]); kept for the few
+    /// windows whose textures can be on screen, and for the inspector.
+    pub region_view: Option<region::RegionView>,
+    /// The same for the Before side of a Before/After view.
+    pub region_before_view: Option<region::RegionView>,
+    /// The loupe's render sizes while a pinch or two-finger scroll runs.
+    pub(crate) size_hold: region::SizeHold,
+    /// (photo, look, window frame size) a window was refused for: it reads more than one render holds.
+    pub(crate) window_refused: Option<(lightcraft_catalog::PhotoId, u64, usize)>,
+    pub(crate) region_tiles: std::collections::HashMap<(bool, u64), region::RegionView>,
     /// Photo Merge dialog previews and background merges.
     pub merge: merge::MergeState,
     /// An import in progress (the import review dialog's batches).
@@ -249,6 +280,7 @@ impl LightcraftApp {
             screenshot_token: 0,
             shadow: None,
             synthetic: vec![],
+            pending_picks: vec![],
             synthetic_mods: egui::Modifiers::NONE,
             synthetic_mods_release: false,
             styled: false,
@@ -262,6 +294,11 @@ impl LightcraftApp {
             widgets: vec![],
             gesture: None,
             loupe_shown: None,
+            region_view: None,
+            region_before_view: None,
+            size_hold: Default::default(),
+            window_refused: None,
+            region_tiles: Default::default(),
             merge: merge::MergeState::default(),
             import: None,
             scan: None,
@@ -873,6 +910,7 @@ impl LightcraftApp {
         import::scan_progress(self, &ctx);
         lightroom_import::progress(self, &ctx);
         export_task::poll(self, &ctx);
+        pick::poll(self, &ctx);
         panels::grid::drag_feedback(self, &ctx);
         panels::toast(self, &ctx);
         self.widgets = widgets::take_registry(&ctx);

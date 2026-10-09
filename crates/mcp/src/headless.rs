@@ -13,7 +13,8 @@ use crate::backend::Backend;
 /// File extensions recognised as photos when expanding folders.
 pub const PHOTO_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "tif", "tiff", "webp", "dng", "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2", "rwl", "raw", "pef", "psd", "jxl", "gif",
-    "bmp", "avif",
+    "bmp", "avif", // containers LightCraft cannot decode but imports as preview only (their embedded JPEG)
+    "iiq", "crw", "mrw", "x3f", "kdc", "mos", "erf",
 ];
 
 /// Headless backend: a [`Session`] with filesystem hooks.
@@ -139,31 +140,20 @@ impl Backend for Headless {
     }
 }
 
-/// Expand folders (recursively, sorted) into photo files and make paths absolute.
+/// Expand folders (recursively, sorted; bounded, see `lightcraft_engine::walk`) into photo files
+/// and make paths absolute.
 pub fn expand_paths(paths: &[String]) -> Vec<String> {
-    fn walk(p: &Path, out: &mut Vec<String>) {
-        if p.is_dir() {
-            if let Ok(rd) = std::fs::read_dir(p) {
-                let mut v: Vec<_> = rd.flatten().map(|e| e.path()).collect();
-                v.sort();
-                for c in v {
-                    if c.file_name().is_some_and(|n| !n.to_string_lossy().starts_with('.')) {
-                        walk(&c, out);
-                    }
-                }
-            }
-        } else if p.extension().is_some_and(|e| PHOTO_EXTENSIONS.contains(&e.to_string_lossy().to_lowercase().as_str())) {
-            out.push(std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().to_string());
-        }
-    }
+    let absolute = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().to_string();
+    let photo = |p: &Path| p.extension().is_some_and(|e| PHOTO_EXTENSIONS.contains(&e.to_string_lossy().to_lowercase().as_str()));
     let mut out = Vec::new();
     for p in paths {
         let path = Path::new(p);
         if path.is_dir() {
-            walk(path, &mut out);
+            let w = lightcraft_engine::walk::files_in(path, None, lightcraft_engine::walk::Limits::default(), photo);
+            out.extend(w.files.iter().map(|f| absolute(f)));
         } else {
             // Explicit files are kept even with unknown extensions (the probe decides).
-            out.push(std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()).to_string_lossy().to_string());
+            out.push(absolute(path));
         }
     }
     out

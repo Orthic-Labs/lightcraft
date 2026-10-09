@@ -31,7 +31,10 @@ pub(crate) const PROFILE_PROXY: usize = 192;
 /// as-shot look (`docs/camera-preview-colour.md`). The catalog's `Photo::relative_wb` matches the
 /// same formats by file extension.
 pub(crate) fn file_local_look(format: RawFormat) -> bool {
-    matches!(format, RawFormat::Arw | RawFormat::Nef | RawFormat::Nrw | RawFormat::Rw2 | RawFormat::Raf | RawFormat::Cr3)
+    matches!(
+        format,
+        RawFormat::Arw | RawFormat::Nef | RawFormat::Nrw | RawFormat::Rw2 | RawFormat::Raf | RawFormat::Cr3 | RawFormat::Cr2 | RawFormat::Pef
+    )
 }
 
 pub(crate) fn fit_preview(raw: &RawImage, bytes: &[u8], transform: &CameraTransform) -> Option<CameraLook> {
@@ -1017,8 +1020,11 @@ mod tests {
 
     #[test]
     fn supported_raws_get_a_file_local_look() {
-        assert!([RawFormat::Arw, RawFormat::Nef, RawFormat::Nrw, RawFormat::Rw2, RawFormat::Raf, RawFormat::Cr3].into_iter().all(file_local_look));
-        assert!(![RawFormat::Dng, RawFormat::Cr2].into_iter().any(file_local_look));
+        // every decoded raw without a colour matrix of its own (issue #310: CR2 rendered flat with the fallback)
+        let local = [RawFormat::Arw, RawFormat::Nef, RawFormat::Nrw, RawFormat::Rw2, RawFormat::Raf, RawFormat::Cr3, RawFormat::Cr2, RawFormat::Pef];
+        assert!(local.into_iter().all(file_local_look));
+        // DNG carries its own colour model
+        assert!(!file_local_look(RawFormat::Dng));
     }
 
     #[test]
@@ -1179,15 +1185,17 @@ mod tests {
         assert!(fit_pairs(&sensor, &reference).is_none());
     }
 
-    /// X-Trans and 16-bit Bayer RAFs use the same fixed fit at thumbnail and export sizes;
-    /// a poor reference keeps the fallback. Skips cleanly without these CC0 corpus files.
+    /// X-Trans and 16-bit Bayer RAFs use the same fixed fit at thumbnail and export sizes.
+    /// The X-T20 fails the gates on all pixels (held-out RMS 0.114 against 0.10) and passes away
+    /// from edges (0.056, issue #232), so it is fitted too. Skips cleanly without these CC0
+    /// corpus files.
     #[test]
     fn corpus_raf_colour_and_white_balance() {
         let dir = std::env::var_os("LIGHTCRAFT_CORPUS")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus"))
             .join("raw");
-        for (name, accepted) in [("raf-fuji-xt2-865.raf", true), ("raf-fuji-gfx100s-4503.raf", true), ("raf-fuji-xt20-compressed.raf", false)] {
+        for (name, accepted) in [("raf-fuji-xt2-865.raf", true), ("raf-fuji-gfx100s-4503.raf", true), ("raf-fuji-xt20-compressed.raf", true)] {
             let Ok(bytes) = std::fs::read(dir.join(name)) else { continue };
             let header = crate::files::probe_bytes(name, &bytes).unwrap();
             assert_eq!(header.as_shot_wb, Some((6500.0, 0.0)), "{name}");

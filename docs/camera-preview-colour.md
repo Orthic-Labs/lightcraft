@@ -1,6 +1,6 @@
-# Sony ARW, Nikon NEF, Panasonic RW2, Fujifilm RAF and Canon CR3 starting look
+# Sony ARW, Nikon NEF, Panasonic RW2, Fujifilm RAF, Canon CR3/CR2 and Pentax PEF starting look
 
-ARW, NEF, RW2, RAF and CR3 decoding supply sensor data and camera white-balance multipliers, but currently no measured camera colour matrix. Treating camera RGB as linear sRGB produces a dark, muted default rendering. The loader now estimates a file-local starting look from that file's embedded camera JPEG, only when a usable camera matrix is absent. All output pixels still come from the RAW sensor data; there is no JPEG replacement or uniform saturation boost.
+ARW, NEF, RW2, RAF, CR3, CR2 and PEF decoding supply sensor data and camera white-balance multipliers, but currently no measured camera colour matrix. Treating camera RGB as linear sRGB produces a dark, muted default rendering. The loader now estimates a file-local starting look from that file's embedded camera JPEG, only when a usable camera matrix is absent. All output pixels still come from the RAW sensor data; there is no JPEG replacement or uniform saturation boost.
 
 ## Colour and tone are separate
 
@@ -56,7 +56,7 @@ The additional supplied folder contains 748 RAFs. Profiles were fitted separatel
 
 For validation, every fifth usable photo of each model in sorted path order was withheld. Profiles trained on the remaining 160 X-H2S and 436 X-T4 photos were tested on 41 and 109 withheld photos. Mean CIE76 ΔE against the camera JPEG was 9.86 → 1.70 with per-file fitting → 1.62 with the pooled X-H2S profile, and 13.64 → 2.43 → 2.34 for X-T4. The profiles improved 108 of 150 files; the largest regression against per-file fitting was 0.60 ΔE, with no previously accepted fit rejected. These are withheld files from the same limited scene collection, not independent coverage of all subjects or illuminants.
 
-The three original dark X-H2S wrench files have too little colour variation to learn a matrix, but now use the known profile to fit tone: ΔE 8.74 → 2.25, all accepted. The four original X-T4 files and two public X-T4 files remain accepted with the final bundled profile; they regress slightly against their own per-file fits (six-file mean 4.72 → 4.94), while remaining much closer than the neutral fallback (13.47). One public X-T20 reference still fails the gates and keeps the fallback.
+The three original dark X-H2S wrench files have too little colour variation to learn a matrix, but now use the known profile to fit tone: ΔE 8.74 → 2.25, all accepted. The four original X-T4 files and two public X-T4 files remain accepted with the final bundled profile; they regress slightly against their own per-file fits (six-file mean 4.72 → 4.94), while remaining much closer than the neutral fallback (13.47). The public X-T20 reference fails the gates on all pixels (held-out RMS 0.114) and passes on the second attempt away from edges (0.056, from 0.185 uncorrected), so it is fitted too.
 
 RAF inputs also work with `lightcraft-cli calibrate`. Tests cover real X-Trans/16-bit Bayer fits, profile use on dull scenes, per-file fitting after profile rejection, monochrome rejection, resolution independence, header/decoded relative WB, old-catalog WB transitions and invalid RAF calibration inputs. A full-size 6240×4160 X-T4 JPEG export also succeeded.
 
@@ -84,3 +84,10 @@ Nikon maker-note `CropArea` (0x0045) supplies the default `[left, top, width, he
 An embedded JPEG with neither ICC nor EXIF metadata uses Nikon maker-note `ColorSpace` (0x001e: 1 = sRGB, 2 = Adobe RGB). This fallback is applied before transfer decoding and resizing, and used by quick previews, preview-only RAW and the existing camera-look reference decode. A JPEG's own metadata takes precedence. No fitting algorithm, training split, highlight reconstruction or white-balance control changes are included. Render cache version 12 invalidates older previews.
 
 Synthetic tests cover crop bounds/CFA preservation, colour-space tags, fallback transfer decoding and metadata precedence. A private Nikon Z 8 sample reports an 8256 × 5504 default crop from an 8280 × 5520 sensor. No private sample or Adobe asset is included.
+
+### Canon CR2 and Pentax PEF
+
+CR2 and PEF decode without a camera colour matrix too, but were left out of the fit until issue #310 (CR2 files opening
+flat and desaturated: the camera's preview first, then the neutral fallback). They now use the same fit, gates and
+relative white balance. This change was not measured on the corpus: the gates keep the fallback for any file whose fit
+doesn't pass, so a file can only stay as before or move closer to its camera JPEG. Per-model numbers are still to come.
