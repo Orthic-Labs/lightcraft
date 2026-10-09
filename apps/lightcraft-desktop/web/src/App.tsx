@@ -10,6 +10,7 @@ import { StageWorkspace } from './stage/StageWorkspace';
 import { Inspector } from './inspector';
 import { DialogHost } from './dialogs';
 import { BackgroundActivity } from './BackgroundActivity';
+import { APP_NAME } from './branding';
 import './app.css';
 
 const themeStore = createThemeStore({ storageKey: 'lightcraft.theme', storage: null });
@@ -120,7 +121,7 @@ function Workspace() {
       onNavigate={navigate}
       sidebar={<LibraryShellSidebar groups={navGroups} sectionIds={groups.map((group) => group.id)} activeId={sourceId(snapshot)} onNavigate={navigate} />}
       title={<WorkspaceModeSwitch />}
-      wordmark={<span className="lc-wordmark"><span>Light</span>Craft</span>}
+      wordmark={<span className="lc-wordmark">{APP_NAME}</span>}
       sidebarWidth={ui.sidebarCollapsed ? 48 : ui.sidebarWidth}
       sidebarCollapsed={ui.sidebarCollapsed}
       onSidebarCollapsedChange={(collapsed) => setUi({ sidebarCollapsed: collapsed })}

@@ -22,7 +22,7 @@ const VERSION: u32 = 1;
 /// Largest profile file read (a 5 × 72 × 5 table is ~60 KB of JSON).
 const MAX_FILE: u64 = 4 << 20;
 
-/// Profiles built into LightCraft (`assets/camera-profiles/`, see `assets/ATTRIBUTION.md`):
+/// Profiles built into Ember (`assets/camera-profiles/`, see `assets/ATTRIBUTION.md`):
 /// `(model, JSON)`.
 pub const BUNDLED: &[(&str, &str)] = &[
     ("ILCE-7M4", include_str!("../../../assets/camera-profiles/ILCE-7M4.json")),
@@ -65,17 +65,17 @@ impl CameraProfile {
     }
 }
 
-/// LightCraft's configuration folder (settings, GPU marker, camera profiles).
+/// Ember's configuration folder (settings, GPU marker, camera profiles).
 pub fn config_dir() -> Option<PathBuf> {
     if cfg!(target_os = "macos") {
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/LightCraft"))
+        std::env::var_os("HOME").map(|h| crate::branding::data_dir(&PathBuf::from(h).join("Library/Application Support"), "Ember", "LightCraft"))
     } else if cfg!(windows) {
-        std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("LightCraft"))
+        std::env::var_os("APPDATA").map(|a| crate::branding::data_dir(&PathBuf::from(a), "Ember", "LightCraft"))
     } else {
         std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .map(|c| c.join("lightcraft"))
+            .map(|c| crate::branding::data_dir(&c, "ember", "lightcraft"))
     }
 }
 

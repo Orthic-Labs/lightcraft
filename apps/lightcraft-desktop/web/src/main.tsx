@@ -3,5 +3,5 @@ import { createRoot } from 'react-dom/client';
 import App from './App';
 
 const root = document.getElementById('root');
-if (!root) throw new Error('LightCraft root element is missing');
+if (!root) throw new Error('Ember root element is missing');
 createRoot(root).render(<StrictMode><App /></StrictMode>);

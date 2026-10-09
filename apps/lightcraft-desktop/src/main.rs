@@ -12,5 +12,5 @@ fn main() {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn main() {
-    eprintln!("LightCraft Preview native host is supported on macOS & Windows only");
+    eprintln!("Ember native host is supported on macOS & Windows only");
 }

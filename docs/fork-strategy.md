@@ -1,4 +1,4 @@
-# Right-suite photo editor fork
+# Ember fork strategy
 
 Keep a product fork for RightKit React/Tauri UX, optional cloud provider experiments, local culling & Auto work. Contribute broadly useful RAW/catalog/processing fixes upstream separately. Upstream remains engine/reference source; our release gate owns shipped behavior.
 
@@ -12,7 +12,7 @@ Keep a product fork for RightKit React/Tauri UX, optional cloud provider experim
 
 ## Branding
 
-Working name: **PhotoRight**, matching ScrapeRight/CutRight naming. Prepare an original Right-suite mark; retain LightCraft/ArtCraft copyrights, licences, NOTICE & contributor credits in About/source. Do not derive our mark from existing ArtCraft assets. Their [brand licence](../docs/brand/LICENSE-brand.txt) requires distributed product forks to replace ArtCraft marks & permits plain-text upstream attribution. No product/bundle ID, storage directory or desktop registration is renamed by this experiment; branding rollout needs explicit migration design to preserve catalogs/settings & avoid duplicate app registrations.
+Product name: **Ember**, maintained by Orthic Labs. Original flame artwork replaces upstream product marks. Preserve LightCraft/ArtCraft copyrights, licences, NOTICE & contributor credits. Plain-text upstream attribution appears in About & README. See [branding & compatibility](branding.md) for bundle identity, legacy preferences/library reuse & retained format identifiers.
 
 ## RightKit integrations
 

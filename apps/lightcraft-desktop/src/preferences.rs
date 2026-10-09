@@ -1,7 +1,7 @@
 //! Crash-safe app preferences for the Tauri preview host.
 //!
 //! Preferences are JSON objects rather than a typed projection so fields introduced by another
-//! LightCraft host survive a round trip through this app.
+//! Ember host survive a round trip through this app.
 
 #![forbid(unsafe_code)]
 

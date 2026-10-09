@@ -214,7 +214,7 @@ mod tauri_commands {
                     path.to_string()
                 } else {
                     let picker = if action == "backupLibrary" {
-                        services::run("saveFile", &json!({"suggestedName": "LightCraft Library Backup.lclibrary", "extensions": ["lclibrary"]}))
+                        services::run("saveFile", &json!({"suggestedName": "Ember Library Backup.lclibrary", "extensions": ["lclibrary"]}))
                     } else {
                         services::run("chooseFolder", &json!({}))
                     }?;
@@ -330,9 +330,9 @@ fn about_info() -> Result<Value, String> {
     let contributors = credits.get("contributors").filter(|value| value.is_array()).cloned().unwrap_or_else(|| json!([]));
     let models = credits.get("models").filter(|value| value.is_array()).cloned().unwrap_or_else(|| json!([]));
     Ok(json!({
-        "name": "LightCraft",
+        "name": lightcraft_engine::branding::NAME,
         "version": env!("CARGO_PKG_VERSION"),
-        "repository": "https://github.com/storytold/lightcraft",
+        "repository": "https://github.com/Orthic-Labs/lightcraft",
         "source": {
             "repo": credits.get("repo").cloned().unwrap_or(Value::Null),
             "branch": credits.get("branch").cloned().unwrap_or(Value::Null),
@@ -445,7 +445,7 @@ fn native_window_action(app: &AppHandle<Wry>, action: &str, params: &Value, call
                     route.push_str(&active.to_string());
                 }
                 WebviewWindowBuilder::new(app, "second-main", WebviewUrl::App(route.into()))
-                    .title("LightCraft")
+                    .title("Ember")
                     .inner_size(1200.0, 800.0)
                     .min_inner_size(800.0, 560.0)
                     .build()
@@ -763,7 +763,7 @@ fn response(status: u16, body: Vec<u8>, content_type: &str) -> Response<Vec<u8>>
         .unwrap_or_else(|_| Response::new(Vec::new()))
 }
 
-const PRIMARY_IDENTIFIER: &str = "ai.storyteller.lightcraft";
+const PRIMARY_IDENTIFIER: &str = lightcraft_engine::branding::APPLICATION_ID;
 const MAX_PERSISTED_LIBRARY_PATH: usize = 8_192;
 
 fn qa_hidden_enabled(value: Option<&OsStr>) -> bool {
@@ -851,7 +851,7 @@ fn early_preferences_root(qa: bool, qa_data_dir: Option<&Path>) -> Option<PathBu
                 None
             }
         })
-        .map(|root| root.join("ai.storyteller.lightcraft.preview"))
+        .map(|root| root.join(PRIMARY_IDENTIFIER))
 }
 
 fn early_gpu_marker_path(primary: bool) -> Option<PathBuf> {
@@ -946,7 +946,7 @@ fn gpu_crash_check(marker: Option<PathBuf>) -> Option<String> {
 
 fn gpu_crash_notice(what: &str) -> String {
     format!(
-        "LightCraft closed unexpectedly while starting the GPU last time ({what}), so GPU rendering is now off and photos render on the CPU. To try the GPU again, turn on Settings ▸ Performance ▸ Use the GPU for rendering; to try another graphics backend, start LightCraft with LIGHTCRAFT_GPU_BACKEND=dx12, vulkan or off."
+        "Ember closed unexpectedly while starting the GPU last time ({what}), so GPU rendering is now off and photos render on the CPU. To try the GPU again, turn on Settings ▸ Performance ▸ Use the GPU for rendering; to try another graphics backend, start Ember with LIGHTCRAFT_GPU_BACKEND=dx12, vulkan or off."
     )
 }
 
@@ -966,7 +966,7 @@ fn prepare_primary_preferences(path: &Path) -> Option<String> {
     if path.exists() {
         return None;
     }
-    let legacy = services::legacy_preferences_path()?;
+    let Some(legacy) = services::legacy_preferences_paths().into_iter().find(|legacy| legacy.try_exists().unwrap_or(true)) else { return None };
     match services::migrate_preferences(&legacy, path) {
         Ok(true) => log::info!("migrated legacy LightCraft preferences from {}", legacy.display()),
         Ok(false) => {}
@@ -988,6 +988,7 @@ fn startup_options(app: &AppHandle<Wry>) -> (HostOptions, PathBuf, Option<String
     let app_dir = isolated_root(app, qa, qa_data_dir.as_deref());
     let explicit = explicit_library(&args);
     let library = explicit
+        .or_else(|| (!qa && primary).then(lightcraft_engine::library::environment_dir).flatten())
         .or_else(|| (!qa && primary).then(|| persisted_library_path(&config)).flatten())
         .or_else(|| (!qa && primary).then(lightcraft_engine::library::default_dir).flatten())
         .unwrap_or_else(|| app_dir.join("Preview Library"));
@@ -998,7 +999,7 @@ fn startup_options(app: &AppHandle<Wry>) -> (HostOptions, PathBuf, Option<String
 }
 
 fn build_shell() -> rightkit_shell::Shell {
-    // LightCraft owns fit/fill/100% & wheel zoom controls in its stage.
+    // Ember owns fit/fill/100% & wheel zoom controls in its stage.
     let hardening = rightkit_shell::Hardening { block_zoom: false, ..Default::default() };
     let args: Vec<String> = std::env::args().collect();
     let qa = args.iter().any(|arg| arg == "--qa")
@@ -1006,8 +1007,7 @@ fn build_shell() -> rightkit_shell::Shell {
         || qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_HIDDEN").as_deref())
         || qa_hidden_enabled(std::env::var_os("RIGHTKIT_QA_BACKGROUND").as_deref());
     let (_, qa_data_dir) = runtime_modes(&args);
-    let mut builder =
-        rightkit_shell::Shell::builder("lightcraft-preview").app_name("LightCraft").main_label("main").hardening(hardening).show_on_ready(!qa);
+    let mut builder = rightkit_shell::Shell::builder("ember").app_name("Ember").main_label("main").hardening(hardening).show_on_ready(!qa);
     if let Some(data_dir) = qa_data_dir {
         builder = builder.state_dir(data_dir.join("shell"));
     }

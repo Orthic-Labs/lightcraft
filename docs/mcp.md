@@ -1,6 +1,6 @@
-# LightCraft MCP server
+# Ember MCP server
 
-`lightcraft-cli mcp` exposes LightCraft to AI agents through the
+`lightcraft-cli mcp` exposes Ember to AI agents through the
 [Model Context Protocol](https://modelcontextprotocol.io): newline-delimited JSON-RPC 2.0 over
 stdio (protocol revision `2025-06-18`; `2025-03-26` and `2024-11-05` clients are accepted). The
 server lives in `crates/mcp` (`lightcraft-mcp`, layer L5) and is hand-written: no async runtime,
@@ -13,11 +13,11 @@ It runs in one of two modes:
 | **Headless** (default) | `lightcraft-cli mcp [--demo] [FILES/FOLDERS…]` | An in-process engine `Session`. Develop, render and export without a window. |
 | **Connect** | `lightcraft-cli mcp --connect [127.0.0.1:7980]` | A running desktop app started with `lightcraft --control 7980`, through its loopback JSON-lines control channel ([control-protocol.md](control-protocol.md)). Adds the UI tools (screenshot, clicks, keys, pointer gestures). |
 
-Options: `--library DIR` opens (or creates) a persistent LightCraft library — the same crash-safe
-format the desktop app uses (`~/Pictures/LightCraft Library` by default there) — so ratings, edits and albums
+Options: `--library DIR` opens (or creates) a persistent Ember library — the same crash-safe
+format the desktop app uses (`~/Pictures/Ember Library` by default there) — so ratings, edits and albums
 survive between sessions (with `--demo`, a new library is seeded with the demo photos). A library
 is open in one program at a time (`catalog.lock` in the library folder): while the desktop app has
-it open, `--library` on the same folder fails with "This library is already open in LightCraft
+it open, `--library` on the same folder fails with "This library is already open in Ember
 (process N …)" — use connect mode to work with the running app instead;
 `--demo` starts the headless session with the procedurally generated demo library;
 `--compact` lists only the helper tools (see below). In connect mode the server starts even when
@@ -107,7 +107,7 @@ In headless mode these return a tool error explaining how to start the app.
 
 ### One tool per command
 
-Everything is a command in LightCraft, so `tools/list` also contains one tool per entry of the
+Everything is a command in Ember, so `tools/list` also contains one tool per entry of the
 command registry (engine commands, plus the app's UI commands such as `view.detail` when
 connected): the id with `.` replaced by `_` and a `cmd_` prefix — `photo.rate` → `cmd_photo_rate`,
 `develop.set` → `cmd_develop_set`, `edit.undo` → `cmd_edit_undo`. Arguments are the command's
@@ -145,7 +145,7 @@ standard error codes (-32700 parse, -32600 invalid request, -32601 method not fo
 invalid params, -32002 resource not found).
 
 With `--library`, a command whose change can't be written to disk (disk full, …) is an error too:
-`saved in memory but not written to disk: <reason>; LightCraft will retry` — the change is applied in the session and
+`saved in memory but not written to disk: <reason>; Ember will retry` — the change is applied in the session and
 written by the next successful save (see [control-protocol.md](control-protocol.md#when-the-library-cant-be-saved)).
 
 ## One-shot commands: `lightcraft-cli run`

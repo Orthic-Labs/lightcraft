@@ -1,44 +1,15 @@
-# macOS DMG window
+# Ember macOS installer window
 
-What Finder shows when the DMG opens: a 660 × 400 pt background with the app icon and the
-`Applications` link side by side. `package.sh` copies these files into the image; nothing here is
-generated at build time, so the DMG still builds with `hdiutil makehybrid` (no mounted device, no
-Finder scripting on CI, nothing extra installed in the signing job).
+Finder content is 660 × 400 pt. Original Ember artwork occupies left panel; light area preserves readable Finder labels. App icon: `Ember.app` at (326, 205); Applications link: (574, 205); icon size 128.
 
-| File | What |
-|---|---|
-| `background.svg` | Source of the background: the app icon (`assets/app-icon/lightcraft.svg`, linked, not copied) cropped as a cover on the LightCraft colour field (`#f2a516`), Ink and Paper. Its text (Inter, JetBrains Mono) is outlined, so rendering it needs no fonts. |
-| `background.tiff` | The background at 1x (660 × 400 px, 72 dpi) and 2x (1320 × 800 px, 144 dpi) in one HiDPI TIFF (Deflate, sRGB). Goes to `.background/background.tiff`. |
-| `dmg-layout.DS_Store` | Finder's view settings for the volume: window size, icon size 128, LightCraft.app at (326, 205), `Applications` at (574, 205), and the background. Goes to `.DS_Store` in the image; named so it isn't mistaken for (or ignored like) a Finder-generated `.DS_Store`. |
-| `generate.py` | Writes `background.tiff` and `dmg-layout.DS_Store` from the SVG and the layout above. |
+`background.svg` is source artwork. `generate.py` renders its deliberately small SVG vocabulary with repository Inter fonts & original Ember icon, then writes 1x/2x `background.tiff` (72/144 dpi) & deterministic `dmg-layout.DS_Store`. Volume name is `Ember`, matching `package.sh`; version belongs in artifact filename.
 
-## The volume name has no version
-
-The mounted volume is called `LightCraft`, not `LightCraft <version>`. The layout points at the background
-through an alias that includes the volume name, and Finder resolves it by that name: with a
-versioned name the window keeps its size and icon positions but shows no background (tested).
-The DMG file name (`lightcraft-<version>-macos-<arch>.dmg`) still carries the version.
-
-## Rules
-
-- **Finder draws the icon labels in black in light and dark mode** when a window has a background,
-  so the area under both icons stays light (Paper).
-- **Nothing goes inside the icon boxes:** artwork keeps 10 pt clear of each 128 pt icon box and of
-  the label strip under it.
-
-## Regenerate
-
-Edit `background.svg` (or the layout constants in `generate.py`), then run, on any OS:
+Regenerate assets with isolated Python tooling:
 
 ```sh
-pip install 'pillow>=12' ds_store==1.3.3 mac_alias==2.2.3
-python3 packaging/macos/dmg/generate.py   # needs resvg on PATH
+python3 -m venv /tmp/ember-asset-env
+/tmp/ember-asset-env/bin/pip install pillow==12.1.1 ds_store==1.3.3 mac_alias==2.2.3
+/tmp/ember-asset-env/bin/python packaging/macos/dmg/generate.py
 ```
 
-Both outputs are byte-for-byte reproducible and carry nothing from the machine that ran it: the
-SVG renders without any fonts, and `dmg-layout.DS_Store` is written from scratch, its background
-alias holding only the volume name and `/.background/background.tiff`. If you add text to the SVG,
-outline it (`usvg` from resvg converts text to paths). The window is 660 × 432 with Finder's 32 pt
-title bar; the content area is 660 × 400.
-
-This follows VectorCraft's `packaging/macos/dmg/` (storytold/vectorcraft#493).
+This generates artwork/layout only. No native build, Finder automation or app launch is needed. Fixed alias/profile metadata avoids local paths, timestamps & volume UUIDs. Generator’s layout/alias code derives from upstream work by @XusBadia; artwork is original Orthic Labs work. See `assets/ATTRIBUTION.md`.

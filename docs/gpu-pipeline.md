@@ -25,7 +25,7 @@ when warped geometry rebuilds.
 wgpu loads the driver of **every** backend in an instance's set while it enumerates adapters — even
 when it then picks another one. A Vulkan driver that crashes there (issue #136: an access violation
 in Intel's `igvk64.dll` on a UHD 630 under Windows 11) takes the process down before any window
-appears, and a native crash cannot be caught. So LightCraft only lets wgpu touch the backends it
+appears, and a native crash cannot be caught. So Ember only lets wgpu touch the backends it
 means to use (`lightcraft_gpu::backend`), for its compute device *and* for the desktop window
 (eframe/egui-wgpu, `window_wgpu_options` in `apps/lightcraft/src/main.rs`):
 
@@ -50,10 +50,10 @@ Settings ▸ Performance ▸ *Use the GPU for rendering* unchecked (applied befo
 `LIGHTCRAFT_GPU=0` or `LIGHTCRAFT_GPU_BACKEND=off`, no GPU driver is loaded for rendering at all.
 
 **Crash sentinel.** The desktop app writes `gpu-init.marker` into its settings folder (next to
-`ui.json`: `%APPDATA%\LightCraft`, `~/Library/Application Support/LightCraft`,
+`ui.json`: `%APPDATA%\Ember`, `~/Library/Application Support/Ember`,
 `~/.config/lightcraft`) just before the compute device is created and removes it as soon as creation
 returns, successfully or not. If the marker is still there at the next launch, the process died inside
-the driver: LightCraft starts with GPU rendering off (the preference is saved unchecked), removes the
+the driver: Ember starts with GPU rendering off (the preference is saved unchecked), removes the
 marker and says so in a notice. Checking *Use the GPU for rendering* again tries the GPU once more
 (and re-arms the sentinel). Not with `LIGHTCRAFT_NO_PREFS` (tests, scripts), and not in a `--memory` session,
 which writes nothing: it neither arms the sentinel nor removes a marker it finds (it still starts with GPU
@@ -63,7 +63,7 @@ harmless: rendering is then on the CPU until the box is checked again. The senti
 compute device; a crash while the window's renderer starts is avoided by the backend defaults above
 or worked around with `LIGHTCRAFT_GPU_BACKEND`.
 
-**Troubleshooting a crash at startup (Windows).** Start LightCraft from a `.cmd` file or a terminal
+**Troubleshooting a crash at startup (Windows).** Start Ember from a `.cmd` file or a terminal
 with `set LIGHTCRAFT_GPU_BACKEND=dx12` (the default since #136), or `=off` to keep the GPU out of
 rendering; `set VK_LOADER_DRIVERS_DISABLE=*igvk64*` (Vulkan loader) hides a specific Vulkan driver
 from every program started with it. Help ▸ System Info and `app.gpu` show the adapter and backend in
@@ -76,7 +76,7 @@ walks the whole system drive while the window's GPU device is created (`D3D12Cre
 unresponsive window for minutes. The Vulkan driver shares that code, so another backend doesn't
 help. Set *Shader Cache Size* back to **Driver Default** (or any size); the setting is global, there
 is no per-program override. Other programs that create a DX12 or Vulkan device at startup hang the
-same way (PhotoCraft does). It is a driver issue: nothing in LightCraft itself
+same way (PhotoCraft does). It is a driver issue: nothing in Ember itself
 walks the drive.
 
 ## Where it is used

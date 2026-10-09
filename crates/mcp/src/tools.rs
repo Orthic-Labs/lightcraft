@@ -88,7 +88,7 @@ pub fn helper_tools(has_ui: bool) -> Vec<Value> {
         tool(
             "run_command",
             "Run command",
-            "Run any LightCraft command by id with JSON params (see list_commands for ids and parameter docs), e.g. {command: \"photo.rate\", params: {rating: 4}}.",
+            "Run any Ember command by id with JSON params (see list_commands for ids and parameter docs), e.g. {command: \"photo.rate\", params: {rating: 4}}.",
             json!({"command": {"type": "string"}, "params": {"type": "object", "description": "Command parameters", "additionalProperties": true}}),
             &["command"],
         ),
@@ -216,7 +216,7 @@ pub fn helper_tools(has_ui: bool) -> Vec<Value> {
             tool(
                 "screenshot",
                 "Screenshot",
-                "Capture the LightCraft window (after pending renders finish) and return it as an image.",
+                "Capture the Ember window (after pending renders finish) and return it as an image.",
                 json!({"maxSize": {"type": "integer", "description": "Downscale so the long edge is at most this (default 1600)"}, "format": {"type": "string", "enum": ["png", "jpeg"]}, "path": {"type": "string", "description": "Also save the screenshot here"}}),
                 &[],
             ),

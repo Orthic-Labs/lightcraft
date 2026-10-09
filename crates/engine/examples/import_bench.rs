@@ -86,11 +86,7 @@ fn dng_fixture(index: usize, edge: usize) -> Result<Vec<u8>, Box<dyn Error>> {
         wb_multipliers: None,
         linearized: false,
         opcodes: OpcodeLists::default(),
-        metadata: lightcraft_meta::Metadata {
-            make: Some("LightCraft Synthetic".into()),
-            model: Some("DNG-Import-Bench".into()),
-            ..Default::default()
-        },
+        metadata: lightcraft_meta::Metadata { make: Some("Ember Synthetic".into()), model: Some("DNG-Import-Bench".into()), ..Default::default() },
     };
     Ok(lightcraft_raw::write_dng(&raw, &DngWriteOptions { compression: DngCompression::Deflate { tile: 64, half: false }, ..Default::default() })?)
 }
