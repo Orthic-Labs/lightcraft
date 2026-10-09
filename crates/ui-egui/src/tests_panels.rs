@@ -395,20 +395,25 @@ fn a_renamed_folder_keeps_its_place_in_the_tree() {
     let base = std::env::temp_dir().join(format!("lc-ui-rename-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let _cleanup = Cleanup(base.clone());
-    std::fs::create_dir_all(base.join("pics/trip")).unwrap();
-    std::fs::create_dir_all(base.join("pics/home")).unwrap();
-    let b = base.to_string_lossy().to_string();
-    let mut h = folders_app(&[&format!("{b}/pics/trip/a.jpg"), &format!("{b}/pics/home/b.jpg")]);
+    let pics = base.join("pics");
+    let trip = pics.join("trip").to_string_lossy().to_string();
+    let home = pics.join("home").to_string_lossy().to_string();
+    std::fs::create_dir_all(&trip).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let trip_photo = std::path::Path::new(&trip).join("a.jpg").to_string_lossy().to_string();
+    let home_photo = std::path::Path::new(&home).join("b.jpg").to_string_lossy().to_string();
+    let mut h = folders_app(&[trip_photo.as_str(), home_photo.as_str()]);
     h.app.session.source = lightcraft_engine::LibrarySource::LibraryFolder;
-    h.app.session.library_folder = Some(format!("{b}/pics/trip"));
+    h.app.session.library_folder = Some(trip.clone());
     h.step();
     h.step();
-    assert!(has(&h, &format!("source:libfolder:{b}/pics/trip")));
-    let r = h.request("engine.execute", json!({"command": "folder.rename", "params": {"path": format!("{b}/pics"), "name": "pics2"}}), T);
+    assert!(has(&h, &format!("source:libfolder:{trip}")));
+    let r = h.request("engine.execute", json!({"command": "folder.rename", "params": {"path": pics, "name": "pics2"}}), T);
     assert_eq!(r["ok"], true, "{r}");
     h.step();
     h.step();
-    assert!(has(&h, &format!("source:libfolder:{b}/pics2/trip")), "the chosen folder is still on screen after the rename");
+    let renamed = base.join("pics2").join("trip").to_string_lossy().to_string();
+    assert!(has(&h, &format!("source:libfolder:{renamed}")), "the chosen folder is still on screen after the rename");
 }
 
 /// The menu opens from anywhere on a folder row, the disclosure triangle included; a disk row
