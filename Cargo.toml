@@ -32,6 +32,7 @@ lightcraft-desktop-host = { path = "crates/desktop-host" }
 lightcraft-mcp = { path = "crates/mcp" }
 lightcraft-fetch = { path = "crates/fetch" }
 lightcraft-segment = { path = "crates/segment" }
+lightcraft-photo-ai = { path = "crates/photo-ai" }
 
 # foundation
 thiserror = "2"

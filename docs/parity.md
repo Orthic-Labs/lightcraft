@@ -230,7 +230,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 
 | Id | Feature | Tier | Status | Evidence | Missing / notes |
 |---|---|---|---|---|---|
-| LR-EDIT-AUTO | Auto settings | P0 | 🟡 | `cmd:develop.auto`, `crates/pipeline/src/auto.rs` | Eight sliders & one-step undo work; scene-key/backlight-aware tone rules & content-dependent colour adjustments, with procedural rendered-output regressions. Lightroom Classic Auto output quality has not been benchmarked. |
+| LR-EDIT-AUTO | Auto settings | P0 | 🟡 | `cmd:develop.auto`, `cmd:ai.models`, `cmd:ai.schema`, `cmd:ai.validate`, `crates/pipeline/src/auto.rs`, `crates/photo-ai/README.md` | Eight sliders & one-step undo work; scene-key/backlight-aware tone rules & content-dependent colour adjustments, with procedural rendered-output regressions. Experimental read-only OpenRouter CLI comparison produces current Auto/model renders & typed receipts; no cloud recipe is applied to libraries. Model quality & Lightroom Auto parity are not yet qualified. |
 | LR-EDIT-BW | Black & white | P0 | ✅ | `cmd:develop.treatment` | |
 | LR-EDIT-HDR-MODE | HDR editing | P2 | ⬜ | | |
 | LR-EDIT-LIGHT-EXPOSURE | Exposure | P0 | ✅ | `ctl:light.exposure` | |

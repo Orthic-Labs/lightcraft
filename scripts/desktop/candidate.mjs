@@ -82,6 +82,12 @@ if (mode === "build") {
   runDevelopment({ root: repoRoot, platform: releaseTargetName, config });
   const input = configuredRecord();
   const entries = cargoCompilerArtifacts(input);
+  const cli = entries.find((entry) => entry.target === 'lightcraft-cli' && entry.kind === 'executable');
+  if (!cli) fail('candidate must retain exact-revision headless CLI');
+  const smoke = spawnSync(cli.path, ['ai', 'compare', '--demo', '--prepare-only', '--out', path.join(root, 'photo-ai-smoke')], { cwd: repoRoot, encoding: 'utf8', windowsHide: true, timeout: 120_000 });
+  if (smoke.error || smoke.status !== 0) fail(`headless photo assessment smoke failed: ${smoke.error?.message || smoke.stderr || smoke.status}`);
+  const smokeReport = JSON.parse(readFileSync(path.join(root, 'photo-ai-smoke/report.json'), 'utf8'));
+  if (smokeReport.mode !== 'prepare-only' || smokeReport.libraryMutated !== false || smokeReport.cases?.length !== 3 || smokeReport.cases.some((item) => item.runs?.length !== 0)) fail('headless photo assessment smoke contract failed');
   const materialized = materializeArtifacts(entries, root, {
     sourceRevision: revision,
     platform,

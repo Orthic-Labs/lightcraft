@@ -4062,9 +4062,12 @@ version = "0.4.0"
 dependencies = [
  "dhat",
  "lightcraft-codecs",
+ "lightcraft-develop",
  "lightcraft-engine",
  "lightcraft-mcp",
  "lightcraft-merge",
+ "lightcraft-photo-ai",
+ "lightcraft-pipeline",
  "lightcraft-raster",
  "lightcraft-sysmem",
  "lightcraft-ui-egui",
@@ -4173,6 +4176,7 @@ dependencies = [
  "lightcraft-gpu",
  "lightcraft-merge",
  "lightcraft-meta",
+ "lightcraft-photo-ai",
  "lightcraft-pipeline",
  "lightcraft-preview",
  "lightcraft-raster",
@@ -4262,6 +4266,20 @@ dependencies = [
  "quick-xml 0.38.4",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "lightcraft-photo-ai"
+version = "0.4.0"
+dependencies = [
+ "base64 0.22.1",
+ "lightcraft-codecs",
+ "lightcraft-develop",
+ "lightcraft-fetch",
+ "lightcraft-raster",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

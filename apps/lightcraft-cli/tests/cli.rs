@@ -7,6 +7,41 @@ use serde_json::{Value, json};
 
 const BIN: &str = env!("CARGO_BIN_EXE_lightcraft-cli");
 
+#[test]
+fn photo_assessment_prepare_only_preserves_source_and_requires_new_output() {
+    let input = tmp("ai-readonly-input.png");
+    gradient_png(&input);
+    let before = std::fs::read(&input).unwrap();
+    let output = tmp("ai-readonly-report");
+    if output.exists() {
+        std::fs::remove_dir_all(&output).unwrap();
+    }
+    let result = Command::new(BIN)
+        .args(["ai", "compare", "--prepare-only", "--out"])
+        .arg(&output)
+        .arg(&input)
+        .env_remove("OPENROUTER_API_KEY")
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(std::fs::read(&input).unwrap(), before);
+    let report: Value = serde_json::from_slice(&std::fs::read(output.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report["mode"], "prepare-only");
+    assert_eq!(report["libraryMutated"], false);
+    assert_eq!(report["cases"].as_array().unwrap().len(), 1);
+    assert!(report["cases"][0]["runs"].as_array().unwrap().is_empty());
+    assert!(output.join("index.html").is_file());
+    let image = output.join(report["cases"][0]["input"].as_str().unwrap());
+    let proxy = lightcraft_photo_ai::Proxy::new(std::fs::read(image).unwrap()).unwrap();
+    assert_eq!(report["cases"][0]["proxySha256"], proxy.digest());
+    let first_report = std::fs::read(output.join("report.json")).unwrap();
+    let result = Command::new(BIN).args(["ai", "compare", "--prepare-only", "--out"]).arg(&output).arg(&input).output().unwrap();
+    assert!(!result.status.success());
+    assert_eq!(std::fs::read(output.join("report.json")).unwrap(), first_report);
+    assert_eq!(std::fs::read(&input).unwrap(), before);
+    std::fs::remove_dir_all(output).unwrap();
+}
+
 fn tmp(name: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("lightcraft-cli-test-{}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();

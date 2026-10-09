@@ -15,6 +15,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod alloc_release;
+mod photo_ai;
 
 use std::io::{BufReader, Write};
 use std::path::Path;
@@ -87,6 +88,10 @@ USAGE:
       Write synthetic merge inputs (procedural scene; bracketed DNGs or overlapping PNG views).
   lightcraft-cli commands [--json]   list every command id with its parameters
   lightcraft-cli controls [--json]   list every develop control id with its range
+  lightcraft-cli ai compare --demo|FILES… --out NEW_DIR [--model ID]… [--repeat 1..3] [--budget-usd N] [--prepare-only]
+      Read-only OpenRouter experiment. Renders input/current Auto/model candidates, with JSON &
+      HTML receipts. Uses OPENROUTER_API_KEY from environment; no key enters files or output.
+      --prepare-only makes local reference renders without uploading. Never opens saved libraries.
   lightcraft-cli calibrate [--max N] [--out DIR] FOLDERS/FILES…
       Fit a colour profile per camera model from raw files and their embedded camera JPEGs
       (Sony ARW, Nikon NEF, Fujifilm RAF): up to N files spread over the folders (default 300; 0 = all), pooled per
@@ -145,6 +150,7 @@ fn main() -> ExitCode {
         Some("merge") => merge(&args[1..]),
         Some("synth-merge") => synth_merge(&args[1..]),
         Some("controls") => controls(&args[1..]),
+        Some("ai") => photo_ai::run(&args[1..]),
         Some("calibrate") => calibrate(&args[1..]),
         Some("--version" | "-V" | "version") => {
             println!("lightcraft-cli {}", env!("CARGO_PKG_VERSION"));
