@@ -57,7 +57,7 @@ function collectMacForegroundBaseline(root, record) {
 export async function qualify(record, root) {
   if (process.env.GITHUB_ACTIONS !== 'true') fail('candidate qualification requires generated Actions');
   const executable = record.artifacts.find(artifact => artifact.target === 'lightcraft-desktop' && artifact.kind === 'executable');
-  if (!executable) fail('candidate lacks LightCraft desktop executable');
+  if (!executable) fail('candidate lacks Ember desktop executable');
   const { config } = await loadReleaseConfig();
   const targetName = record.platform === 'macos' ? 'mac' : 'win';
   const target = config.development.targets[targetName];
@@ -75,7 +75,7 @@ export async function qualify(record, root) {
   if (record.platform === 'macos') {
     // GitHub directory artifacts lose Unix modes. Retain the exact installed,
     // ad-hoc signed bundle exercised above in Apple's resource-preserving ZIP.
-    const archive = path.join(root, 'packages', 'LightCraft-Preview-macos-arm64-qualified.zip');
+    const archive = path.join(root, 'packages', 'Ember-macos-arm64-qualified.zip');
     mkdirSync(path.dirname(archive), { recursive: true });
     const packed = spawnSync('/usr/bin/ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', target.install.destination, archive], { stdio: 'inherit' });
     if (packed.error || packed.status !== 0) fail(`qualified Mac bundle archive failed: ${packed.error?.message || packed.status}`);

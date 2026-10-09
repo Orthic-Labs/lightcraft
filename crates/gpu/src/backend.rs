@@ -1,4 +1,4 @@
-//! Which wgpu backends LightCraft lets wgpu use — for its compute device and for the desktop
+//! Which wgpu backends Ember lets wgpu use — for its compute device and for the desktop
 //! window (eframe) — and the crash sentinel around device creation (issue #136).
 //!
 //! wgpu loads the system driver of *every* backend in the instance's set while it enumerates
@@ -249,7 +249,7 @@ mod tests {
         assert_eq!(choose(None, Some("dx12")), BackendChoice::Use(Backends::DX12));
         assert_eq!(choose(Some("vulkan"), Some("dx12")), BackendChoice::Use(Backends::VULKAN));
         assert_eq!(choose(Some("off"), Some("dx12")), BackendChoice::Off);
-        // unknown LightCraft value: WGPU_BACKEND still applies
+        // unknown Ember value: WGPU_BACKEND still applies
         assert_eq!(choose(Some("bogus"), Some("gl")), BackendChoice::Use(Backends::GL));
         // WGPU_BACKEND never turns the GPU off
         assert_eq!(choose(None, Some("off")), BackendChoice::Auto);

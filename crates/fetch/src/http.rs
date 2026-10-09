@@ -490,7 +490,7 @@ pub fn post_json(url: &Url, headers: &[(&str, String)], body: &[u8], limits: &Li
 
 fn request(url: &Url, headers: &[(&str, String)], limits: &Limits, method: &str, body: &[u8]) -> Result<Response, HttpError> {
     let mut req = format!(
-        "{method} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: LightCraft/{}\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
+        "{method} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Ember/{}\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
         url.path,
         url.host_header(),
         env!("CARGO_PKG_VERSION")

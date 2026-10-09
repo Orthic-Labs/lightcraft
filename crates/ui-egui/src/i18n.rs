@@ -194,10 +194,10 @@ include!(concat!(env!("OUT_DIR"), "/tr-formats.rs"));
 /// (issue #260), in the UI language: the error and, when there is one, the log file to look in.
 pub fn startup_failed_message(error: &str, log_file: Option<&str>) -> (String, String) {
     let text = match log_file {
-        Some(path) => tr_format!("LightCraft could not open its window: {e}\n\nThe log file has the details: {path}", e = error, path = path),
-        None => tr_format!("LightCraft could not open its window: {e}", e = error),
+        Some(path) => tr_format!("Ember could not open its window: {e}\n\nThe log file has the details: {path}", e = error, path = path),
+        None => tr_format!("Ember could not open its window: {e}", e = error),
     };
-    (tr("LightCraft could not start").to_string(), text)
+    (tr("Ember could not start").to_string(), text)
 }
 
 pub fn builtin_label(source: &str, builtin: bool) -> &str {
@@ -420,7 +420,7 @@ mod tests {
     #[test]
     fn startup_failure_message_names_the_error_and_the_log() {
         let (title, text) = startup_failed_message("no adapter", Some("/home/a/.config/lightcraft/logs/lightcraft.log"));
-        assert_eq!(title, "LightCraft could not start");
+        assert_eq!(title, "Ember could not start");
         assert!(text.contains("no adapter") && text.ends_with("lightcraft.log"), "{text}");
         assert!(!startup_failed_message("no adapter", None).1.contains("log file"));
     }
@@ -724,7 +724,7 @@ mod tests {
         app.ui.view = crate::state::ViewMode::People;
         let text = painted_text(&ctx, &mut app, Locale::De);
         assert!(text.contains("Benannte Personen"), "{text}");
-        for (command, title) in [("app.about", "Über LightCraft"), ("app.shortcuts", "Tastenkürzel"), ("app.settings", "Einstellungen")] {
+        for (command, title) in [("app.about", "Über Ember"), ("app.shortcuts", "Tastenkürzel"), ("app.settings", "Einstellungen")] {
             app.ui.dialog = None;
             app.run(command, serde_json::json!({})).unwrap();
             let text = painted_text(&ctx, &mut app, Locale::De);
@@ -910,7 +910,7 @@ mod tests {
             // replacement-glyph face, which there is Hack, the face that draws Latin.)
             for family in [egui::FontFamily::Proportional, egui::FontFamily::Name(crate::theme::FONT_SEMIBOLD.into())] {
                 let font = egui::FontId::new(13.0, family);
-                assert!("LightCraft".chars().all(|ch| fonts.has_glyph(&font, ch)), "{font:?}");
+                assert!("Ember".chars().all(|ch| fonts.has_glyph(&font, ch)), "{font:?}");
             }
         });
         let mut app = crate::LightcraftApp::new(lightcraft_engine::Session::with_demo(), Default::default());

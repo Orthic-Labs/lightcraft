@@ -107,7 +107,7 @@ if (mode === "build") {
   if (platform === "macos") {
     // Retain the SDK-installed bundle's signature & executable modes even if
     // later qualification fails. This is a preview candidate, never a green default.
-    const archive = path.join(root, "packages", "LightCraft-Preview-macos-arm64-installed.zip");
+    const archive = path.join(root, "packages", "Ember-macos-arm64-installed.zip");
     mkdirSync(path.dirname(archive), { recursive: true });
     const packed = spawnSync("/usr/bin/ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", install.destination, archive], { stdio: "inherit" });
     if (packed.error || packed.status !== 0) fail(`installed Mac bundle archive failed: ${packed.error?.message || packed.status}`);

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Ember</title>
+  <rect width="512" height="512" rx="112" fill="#161618"/>
+  <path fill="#ffad57" d="M256 90 C280 151 357 187 357 270 C357 337 312 384 252 384 C195 384 153 343 153 287 C153 244 175 209 218 168 C220 210 228 226 237 234 C259 188 273 147 256 90 Z"/>
+  <path fill="#fff0d9" d="M260 225 C283 259 302 282 302 308 C302 338 282 357 256 357 C230 357 209 339 209 312 C209 283 236 260 260 225 Z"/>
+</svg>

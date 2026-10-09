@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Regenerate background.tiff and dmg-layout.DS_Store for the macOS DMG window (see README.md here).
 
-Needs resvg on PATH and:
-    pip install 'pillow>=12' ds_store==1.3.3 mac_alias==2.2.3
+Asset-only tooling:
+    pip install pillow==12.1.1 ds_store==1.3.3 mac_alias==2.2.3
 
 Runs on any OS, no Mac needed. Both outputs come from this script alone, so they carry nothing
 from the machine that made them: no local paths, user or disk names, dates or volume UUIDs.
@@ -12,37 +12,63 @@ from the machine that made them: no local paths, user or disk names, dates or vo
 
 import datetime
 import os
-import shutil
-import subprocess
 import sys
 import tempfile
 
 from ds_store import DSStore
 from mac_alias import Alias, TargetInfo, VolumeInfo
-from PIL import Image, ImageCms
+from PIL import Image, ImageCms, ImageDraw, ImageFont
+from pathlib import Path
+import importlib.util
+import xml.etree.ElementTree as ET
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Keep in sync with package.sh (volume name) and README.md (layout).
-VOLUME = "LightCraft"
+VOLUME = "Ember"
 WIDTH, HEIGHT = 660, 400  # window content, pt; the background's 1x size
 TITLE_BAR = 32
 ICON_SIZE = 128
-ICONS = {"LightCraft.app": (326, 205), "Applications": (574, 205)}
+ICONS = {"Ember.app": (326, 205), "Applications": (574, 205)}
 # A fixed date for the alias and the colour profile. Finder never matches it against the image
 # (each build is a new volume): it finds the background by volume name and path.
 FIXED_DATE = datetime.datetime(2026, 10, 8, tzinfo=datetime.timezone.utc)
 
 
 def render(svg, width, out):
-    # The SVG's text is already outlined and no fonts are loaded, so every machine draws the
-    # same pixels.
-    subprocess.run(
-        ["resvg", "--skip-system-fonts", "-w", str(width), svg, out],
-        check=True,
-    )
-    with Image.open(out) as im:
-        return im.convert("RGB")
+    # Render our small SVG vocabulary using only repository Inter & original Ember artwork.
+    root = Path(HERE).parents[2]
+    spec = importlib.util.spec_from_file_location("ember_icons", root / "packaging/render-icons.py")
+    icons = importlib.util.module_from_spec(spec)
+    sys.dont_write_bytecode = True
+    spec.loader.exec_module(icons)
+    scale = width * 4 / WIDTH
+    image = Image.new("RGB", (width * 4, int(HEIGHT * scale)))
+    draw = ImageDraw.Draw(image)
+    def coordinate(node, name, default=0):
+        return float(node.attrib.get(name, default)) * scale
+    for shape in ET.parse(svg).getroot():
+        tag = shape.tag.rsplit("}", 1)[-1]
+        if tag == "rect":
+            x, y = coordinate(shape, "x"), coordinate(shape, "y")
+            draw.rectangle((x, y, x + coordinate(shape, "width") - 1, y + coordinate(shape, "height") - 1), fill=shape.attrib["fill"])
+        elif tag == "image":
+            source = (Path(svg).parent / shape.attrib["href"]).resolve()
+            if source != (root / "assets/app-icon/ember.svg").resolve():
+                raise ValueError("only original Ember artwork is supported")
+            mark = icons.render(round(coordinate(shape, "width")))
+            image.paste(mark, (round(coordinate(shape, "x")), round(coordinate(shape, "y"))), mark)
+        elif tag == "line":
+            draw.line((coordinate(shape, "x1"), coordinate(shape, "y1"), coordinate(shape, "x2"), coordinate(shape, "y2")), fill=shape.attrib["stroke"], width=round(coordinate(shape, "stroke-width", 1)))
+        elif tag == "text":
+            face = "Inter-SemiBold.ttf" if shape.attrib.get("font-weight") == "600" else "Inter-Regular.ttf"
+            font = ImageFont.truetype(str(root / "assets/fonts" / face), round(coordinate(shape, "font-size")))
+            draw.text((coordinate(shape, "x"), coordinate(shape, "y")), shape.text or "", font=font, anchor="ls", fill=shape.attrib["fill"])
+        else:
+            raise ValueError(f"unsupported background shape: {tag}")
+    image = image.resize((width, round(HEIGHT * width / WIDTH)), Image.Resampling.LANCZOS)
+    image.save(out)
+    return image.copy()  # Drop PNG encoder settings before TIFF serialization.
 
 
 def srgb_profile():
@@ -60,13 +86,13 @@ def write_tiff(svg, out):
     with tempfile.TemporaryDirectory() as tmp:
         one, two = (render(svg, WIDTH * s, os.path.join(tmp, f"{s}x.png")) for s in (1, 2))
     two.encoderinfo = {"dpi": (144, 144)}  # the rest as the first page
-    # Opaque RGB, Deflate without a predictor: the paper grain is noise, which a predictor inflates.
+    # Opaque RGB, deterministic Deflate compression.
     one.save(
         out,
         "TIFF",
         save_all=True,
         append_images=[two],
-        compression="tiff_adobe_deflate",  # brand-ok: Pillow's name for TIFF compression 8 (Deflate)
+        compression="tiff_adobe_deflate",  # TIFF compression 8 (Deflate)
         dpi=(72, 72),
         icc_profile=srgb_profile(),
     )
@@ -139,8 +165,6 @@ def write_ds_store(out):
 
 
 def main():
-    if not shutil.which("resvg"):
-        sys.exit("error: resvg not found (brew install resvg / cargo install resvg --locked)")
     write_tiff(os.path.join(HERE, "background.svg"), os.path.join(HERE, "background.tiff"))
     write_ds_store(os.path.join(HERE, "dmg-layout.DS_Store"))
 

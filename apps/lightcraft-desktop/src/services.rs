@@ -19,18 +19,24 @@ const PHOTO_EXTENSIONS: &[&str] =
     &["jpg", "jpeg", "png", "tif", "tiff", "webp", "dng", "cr2", "cr3", "nef", "nrw", "arw", "raf", "orf", "rw2", "pef", "psd", "jxl", "gif", "bmp"];
 const PRESET_EXTENSIONS: &[&str] = &["lcpreset", "xmp", "lrtemplate", "zip", "dng", "lmp", "mplumpack", "cube"];
 
-/// Return legacy LightCraft's UI state location for one-time migration.
-pub fn legacy_preferences_path() -> Option<PathBuf> {
+/// Previous desktop IDs & egui settings, in precedence order. Sources stay unchanged.
+pub fn legacy_preferences_paths() -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        return std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Application Support/LightCraft/ui.json"));
+        return std::env::var_os("HOME")
+            .map(|home| legacy_preferences_under(&PathBuf::from(home).join("Library/Application Support")))
+            .unwrap_or_default();
     }
     #[cfg(target_os = "windows")]
     {
-        return std::env::var_os("APPDATA").map(|app_data| PathBuf::from(app_data).join("LightCraft/ui.json"));
+        return std::env::var_os("APPDATA").map(|app_data| legacy_preferences_under(&PathBuf::from(app_data))).unwrap_or_default();
     }
     #[allow(unreachable_code)]
-    None
+    Vec::new()
+}
+
+fn legacy_preferences_under(root: &Path) -> Vec<PathBuf> {
+    ["ai.storyteller.lightcraft", "ai.storyteller.lightcraft.preview", "LightCraft"].into_iter().map(|name| root.join(name).join("ui.json")).collect()
 }
 
 /// Copy valid legacy preferences into a missing destination without touching the source.
@@ -128,7 +134,7 @@ pub fn run(action: &str, params: &Value) -> Result<Value, String> {
             || path_value(rfd::FileDialog::new().set_title("Auto-Tag from Tracklog").add_filter("GPS Track Log", &["gpx"]).pick_file()),
             |path| path_value(Some(path)),
         )),
-        "savePresetFile" => save_file(params, "Export Presets", "LightCraft Preset", "lcpreset"),
+        "savePresetFile" => save_file(params, "Export Presets", "Ember Preset", "lcpreset"),
         "saveCurvePresetFile" => save_file(params, "Export Point Curve Presets", "Point Curve Preset", "lccurve"),
         "dropImport" => drop_import(params),
         "reveal" => reveal(required_string(params, "path")?.as_str()).map(|_| Value::Null),
@@ -296,7 +302,7 @@ fn save_file(params: &Value, title: &str, filter: &str, extension: &str) -> Resu
     if params.get("path").is_some() {
         return Ok(path_value(provided_path(params)?));
     }
-    let name = params.get("name").and_then(Value::as_str).unwrap_or("LightCraft Preset");
+    let name = params.get("name").and_then(Value::as_str).unwrap_or("Ember Preset");
     if name.is_empty() || name.contains('\0') {
         return Err("invalid file name".into());
     }
@@ -307,9 +313,9 @@ fn save_file(params: &Value, title: &str, filter: &str, extension: &str) -> Resu
 }
 
 fn save_file_with_params(params: &Value) -> Result<Value, String> {
-    let suggested = params.get("suggestedName").and_then(Value::as_str).unwrap_or("LightCraft Export");
+    let suggested = params.get("suggestedName").and_then(Value::as_str).unwrap_or("Ember Export");
     let extension = params.get("extensions").and_then(Value::as_array).and_then(|items| items.first()).and_then(Value::as_str).unwrap_or("lcpreset");
-    save_file(&json!({"name": suggested}), "Save File", "LightCraft file", extension)
+    save_file(&json!({"name": suggested}), "Save File", "Ember file", extension)
 }
 
 fn drop_import(params: &Value) -> Result<Value, String> {
@@ -431,6 +437,19 @@ mod tests {
     fn fixture_dir() -> PathBuf {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_nanos()).unwrap_or(0);
         std::env::temp_dir().join(format!("lightcraft-native-preferences-{}-{stamp}", std::process::id()))
+    }
+
+    #[test]
+    fn legacy_preferences_candidates_keep_primary_before_preview() {
+        let root = Path::new("profiles");
+        assert_eq!(
+            legacy_preferences_under(root),
+            vec![
+                root.join("ai.storyteller.lightcraft/ui.json"),
+                root.join("ai.storyteller.lightcraft.preview/ui.json"),
+                root.join("LightCraft/ui.json"),
+            ]
+        );
     }
 
     #[test]

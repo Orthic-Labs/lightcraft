@@ -1,3 +1,4 @@
+import { APP_NAME } from '../branding';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type KeyboardEvent, type UIEvent } from 'react';
 import { navNeighborIndex } from '@rightkit/app-shell';
 import { AppearanceMenu, NavList, PaletteTrigger, useShell, type NavGroup } from '@rightkit/app-shell/react';
@@ -147,7 +148,7 @@ export function LibraryShellSidebar({ groups, sectionIds, activeId, onNavigate }
         </section>;
       })}
     </div>
-    <div className="rk-side__foot"><footer className="rk-brand-foot"><span className="rk-wordmark"><span>Light</span>Craft</span><AppearanceMenu value={ui.theme} onChange={(theme) => setUi({ theme })} labels={{ appearance: t('Appearance'), theme: { system: t('System'), light: t('Light'), dark: t('Dark') } }} /></footer></div>
+    <div className="rk-side__foot"><footer className="rk-brand-foot"><span className="rk-wordmark">{APP_NAME}</span><AppearanceMenu value={ui.theme} onChange={(theme) => setUi({ theme })} labels={{ appearance: t('Appearance'), theme: { system: t('System'), light: t('Light'), dark: t('Dark') } }} /></footer></div>
   </aside>;
 }
 

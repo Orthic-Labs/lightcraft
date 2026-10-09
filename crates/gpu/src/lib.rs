@@ -1,4 +1,4 @@
-//! The LightCraft develop pipeline on the GPU (wgpu compute, WGSL kernels).
+//! The Ember develop pipeline on the GPU (wgpu compute, WGSL kernels).
 //!
 //! The CPU pipeline (`lightcraft-pipeline`) is the reference: every kernel here is a port of a CPU
 //! stage, both read the same resolved parameters ([`lightcraft_pipeline::Plan`],

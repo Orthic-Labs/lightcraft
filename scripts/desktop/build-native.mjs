@@ -45,7 +45,7 @@ if (compiler.error || compiler.status !== 0) {
 }
 const nativeRoot = path.join(repoRoot, 'apps/lightcraft-desktop');
 run(['exec', 'tauri', 'build', '--ci', '--no-sign', '--target', target, '--features', 'qa-native,custom-protocol', '--bundles', platform === 'macos' ? 'app,dmg' : 'nsis', '--', '--profile=release-iterate', '--locked'], nativeRoot, env);
-const descriptor = { productName: 'LightCraft Preview', targetTriple: target, manifestPath: 'apps/lightcraft-desktop/Cargo.toml' };
+const descriptor = { productName: 'Ember', targetTriple: target, manifestPath: 'apps/lightcraft-desktop/Cargo.toml' };
 const bundle = resolveTauriBundleDirectory(descriptor, { root: repoRoot, platform: platform === 'macos' ? 'mac' : 'win', env });
 const destination = path.join(root, 'packages', path.basename(bundle.installer));
 mkdirSync(path.dirname(destination), { recursive: true });

@@ -1,4 +1,4 @@
-//! The LightCraft engine façade.
+//! The Ember engine façade.
 //!
 //! Every user-visible action is a command with a stable id (`photo.rate`, `develop.set`,
 //! `album.create`, `mask.add`…) and JSON parameters. The egui UI, the CLI, the control channel and
@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 pub mod availability;
+pub mod branding;
 mod camera_preview;
 pub mod camera_profiles;
 pub mod cmd;
@@ -68,7 +69,7 @@ pub enum EngineError {
     Catalog(#[from] lightcraft_catalog::CatalogError),
     /// The command's change is applied (in memory, undoable) but its journal records could not
     /// be written. They stay queued and are written by the next successful save.
-    #[error("saved in memory but not written to disk: {0}; LightCraft will retry")]
+    #[error("saved in memory but not written to disk: {0}; Ember will retry")]
     NotSaved(String),
     /// Another process (the app, `lightcraft-cli`, another computer) has the library open.
     #[error("{0}")]

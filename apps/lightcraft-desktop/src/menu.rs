@@ -41,7 +41,7 @@ fn group(label: &str, entries: &[(&str, &str, Option<&str>)]) -> MenuGroup {
 /// `rightkit-shell://menu` so command routing remains authoritative in engine/session.
 pub fn spec() -> MenuSpec {
     MenuSpec {
-        app_name: "LightCraft".into(),
+        app_name: "Ember".into(),
         settings: Some(("app.settings".into(), accelerator("Cmd+,"))),
         groups: vec![
             group(
@@ -60,7 +60,7 @@ pub fn spec() -> MenuSpec {
                     ("file.exportCurvePresets", "Export Point Curve Presets…", None),
                     ("dialog.export", "Export…", None),
                     ("app.openLibrary", "Open Library…", None),
-                    ("app.quit", "Quit LightCraft", Some("Cmd+Q")),
+                    ("app.quit", "Quit Ember", Some("Cmd+Q")),
                 ],
             ),
             group(
@@ -129,9 +129,9 @@ pub fn spec() -> MenuSpec {
             ),
         ],
         help: vec![
-            MenuEntry::item("app.about", "About LightCraft"),
-            MenuEntry::item("app.help", "LightCraft Help"),
-            MenuEntry::item("app.github", "LightCraft on GitHub"),
+            MenuEntry::item("app.about", "About Ember"),
+            MenuEntry::item("app.help", "Ember Help"),
+            MenuEntry::item("app.github", "Ember on GitHub"),
         ],
     }
 }

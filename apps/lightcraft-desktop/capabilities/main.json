@@ -1,6 +1,6 @@
 {
   "identifier": "main",
-  "description": "LightCraft main & secondary photo windows",
+  "description": "Ember main & secondary photo windows",
   "windows": [
     "main",
     "second-*"
