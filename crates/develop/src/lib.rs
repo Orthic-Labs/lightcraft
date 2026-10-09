@@ -8,10 +8,12 @@
 
 pub mod controls;
 pub mod presets;
+pub mod segmask;
 pub mod settings;
 
 pub use controls::{CONTROLS, ControlSpec, Section, Track};
 pub use presets::{Preset, SettingsGroup, apply_partial, extract_groups};
+pub use segmask::SegMask;
 pub use settings::*;
 
 use serde_json::Value;
@@ -64,6 +66,32 @@ impl DevelopSettings {
 
     pub fn section_enabled(&self, section: &str) -> bool {
         !self.disabled_sections.iter().any(|s| s == section)
+    }
+
+    /// The settings as rendered: an Edit-panel section whose eye is off contributes nothing (issue
+    /// #316). Light (with its tone curve), Color (white balance, presence, the mixers, colour grading
+    /// and point colour) and Detail are reset to their defaults here; Effects, Optics, Geometry and
+    /// Calibration the pipeline switches off where it applies them. Borrowed when every section is on.
+    pub fn effective(&self) -> std::borrow::Cow<'_, DevelopSettings> {
+        let off = |section: &str| !self.section_enabled(section);
+        if !(off("light") || off("color") || off("detail")) {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut d = self.clone();
+        if off("light") {
+            d.reset_section(Section::Light);
+            d.reset_section(Section::Curve);
+        }
+        if off("color") {
+            for section in [Section::Color, Section::Mixer, Section::BwMix, Section::Grading, Section::PointColor] {
+                d.reset_section(section);
+            }
+            d.point_colors.clear();
+        }
+        if off("detail") {
+            d.reset_section(Section::Detail);
+        }
+        std::borrow::Cow::Owned(d)
     }
 
     pub fn set_section_enabled(&mut self, section: &str, on: bool) {

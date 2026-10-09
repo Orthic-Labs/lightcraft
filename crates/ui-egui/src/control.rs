@@ -54,8 +54,21 @@ fn wrap(r: Result<Value, String>) -> Outcome {
 }
 
 pub fn all_commands(app: &LightcraftApp) -> Value {
-    let mut v: Vec<Value> = app.session.commands().into_iter().map(|c| serde_json::to_value(c).unwrap_or_default()).collect();
+    let keymap = &app.ui.settings.keymap;
+    let mut v: Vec<Value> = app
+        .session
+        .commands()
+        .into_iter()
+        .map(|c| {
+            let mut v = serde_json::to_value(&c).unwrap_or_default();
+            if let Some(o) = v.as_object_mut() {
+                o.insert("shortcut".into(), json!(crate::shortcuts::shortcut_of(keymap, c.id)));
+            }
+            v
+        })
+        .collect();
     for (id, label, sc, menu) in crate::menus::ui_commands() {
+        let sc = crate::shortcuts::binding(keymap, id, *sc);
         v.push(json!({"id": id, "label": label, "shortcut": sc, "menu": [menu], "enabled": crate::menus::ui_enabled(app, id), "ui": true}));
     }
     Value::Array(v)
@@ -79,7 +92,15 @@ pub fn inspect(app: &LightcraftApp, ctx: &egui::Context) -> Value {
         "activeMask": app.session.active_mask,
         "widgetCount": app.widgets.len(),
         "perf": {"frameMs": app.perf.frame_ms, "logicMs": app.perf.logic_ms, "updateMs": app.perf.update_ms, "maxUpdateMs": app.perf.max_update_ms, "fps": app.perf.fps, "lastRenderMs": app.renderer.last_main_ms, "renderQueue": app.renderer.queued(), "rendersInFlight": app.renderer.in_flight(), "pendingSlots": app.renderer.pending_slots(), "mergeRunning": app.merge.busy(), "lastMerge": app.merge.last_result, "rendersDone": app.renderer.completed, "thumbTextures": app.renderer.thumb_textures(), "variantTextures": app.renderer.variant_textures(), "gpu": (lightcraft_engine::gpu::ready() && lightcraft_engine::gpu::available()).then(lightcraft_engine::gpu::adapter_name).flatten(), "gpuReason": lightcraft_engine::gpu::unavailable_reason(), "gpuFallback": lightcraft_engine::gpu::last_fallback()},
-        "loupe": app.loupe_shown.map(|(p, src)| json!({"photo": p.0, "source": src, "pending": app.renderer.is_pending(crate::render::Slot::Main)})),
+        "loupe": app.loupe_shown.map(|(p, src)| json!({
+            "photo": p.0,
+            "source": src,
+            "pending": app.renderer.is_pending(crate::render::Slot::Main),
+            // zoomed past the whole-frame render: the window rendered at no more than 100 % (pixels of its frame)
+            "region": app.region_view.map(|r| json!({"full": [r.full.0, r.full.1], "window": [r.window.x, r.window.y, r.window.w, r.window.h], "pending": app.renderer.is_pending(crate::render::Slot::Region)})),
+            // …and the same for the Before side of a Before/After view
+            "regionBefore": app.region_before_view.map(|r| json!({"full": [r.full.0, r.full.1], "window": [r.window.x, r.window.y, r.window.w, r.window.h], "pending": app.renderer.is_pending(crate::render::Slot::RegionBefore)})),
+        })),
         "hoverPreview": app.hover_preview.as_ref().map(|h| h.label.clone()),
         "status": app.ui.status,
         "notices": app.notices,
@@ -90,6 +111,8 @@ pub fn inspect(app: &LightcraftApp, ctx: &egui::Context) -> Value {
         "export": {"running": app.export.as_ref().map(crate::export_task::ExportTask::status), "last": app.last_export_result},
         "import": app.import.as_ref().map(crate::import::ImportTask::status),
         "tasks": app.tasks.labels(),
+        // commands waiting on a native file dialog shown off the UI thread (`pick`)
+        "fileDialogs": app.pending_picks.iter().map(|p| p.command.clone()).collect::<Vec<_>>(),
         "memory": memory(app),
     })
 }
@@ -258,6 +281,14 @@ pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context, req: &ControlRequest
             ctx.request_repaint();
             ok(Value::Null)
         }
+        "ui.zoom" => {
+            let Some(factor) = f("factor").map(|v| v as f32).filter(|v| v.is_finite() && *v > 0.0) else {
+                return err("ui.zoom: factor must be a finite positive number (1 = unchanged)");
+            };
+            app.synthetic.push(egui::Event::Zoom(factor));
+            ctx.request_repaint();
+            ok(Value::Null)
+        }
         "ui.set" => {
             let mut v = serde_json::to_value(&app.ui).unwrap_or_default();
             lightcraft_develop::presets::deep_merge(&mut v, p);
@@ -278,7 +309,9 @@ pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context, req: &ControlRequest
             Some(d) => {
                 let r = crate::panels::dialogs::confirm_dialog(app, &d);
                 // the import review stays open on an error, as with its button
-                if r.is_err() && matches!(d, crate::state::Dialog::Import { .. }) {
+                if (r.is_err() && matches!(d, crate::state::Dialog::Import { .. } | crate::state::Dialog::SamModel { .. }))
+                    || (r.is_ok() && crate::panels::dialogs::keeps_open(app, &d))
+                {
                     app.ui.dialog = Some(d);
                 }
                 wrap(r)
@@ -332,9 +365,16 @@ pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context, req: &ControlRequest
     }
 }
 
-/// Default export folder: `~/Pictures/LightCraft Exports` (falls back to the working directory).
+/// Shown when an export has nowhere to go (no folder typed or chosen, and no home folder to default to).
+pub const NO_EXPORT_FOLDER: &str = "Choose an export folder first.";
+
+/// Default export folder: `~/Pictures/LightCraft Exports` (`%USERPROFILE%\Pictures\LightCraft Exports`
+/// on Windows, where `HOME` usually isn't set). Empty when no home folder is known.
 pub fn default_export_dir() -> String {
-    std::env::var("HOME").map(|h| format!("{h}/Pictures/LightCraft Exports")).unwrap_or_default()
+    let home = if cfg!(windows) { std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) } else { std::env::var_os("HOME") };
+    home.filter(|h| !h.is_empty())
+        .map(|h| std::path::PathBuf::from(h).join("Pictures").join("LightCraft Exports").to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Export the selected photos (UI command `app.export`). Params: see
@@ -343,7 +383,7 @@ pub fn default_export_dir() -> String {
 pub fn export_active(app: &mut LightcraftApp, p: &Value) -> Result<Value, String> {
     use lightcraft_engine::export::{Destination, ExportOptions, export_batch};
     let p = &app.session.export_params(p)?;
-    let mut opts = ExportOptions::from_json(p);
+    let mut opts = ExportOptions::from_params(p).map_err(|e| e.to_string())?;
     if let (Some(path), None) = (p.get("path").and_then(Value::as_str), p.get("format")) {
         let ext = path.rsplit_once('.').map_or("", |(_, e)| e);
         opts.format = lightcraft_engine::export::ExportFormat::parse(ext).unwrap_or(opts.format);
@@ -363,10 +403,23 @@ pub fn export_active(app: &mut LightcraftApp, p: &Value) -> Result<Value, String
     if ids.is_empty() {
         return Err("no photo selected".into());
     }
-    // no folder given (e.g. File → Export with Preset): the last export's, else the default
-    let last_dir = app.session.last_export.as_ref().and_then(|l| l.get("dir")).and_then(Value::as_str).map(str::to_string);
-    let dir = p.get("dir").and_then(Value::as_str).map(str::to_string).or(last_dir).filter(|d| !d.is_empty()).unwrap_or_else(default_export_dir);
-    let to = Destination { dir: dir.clone(), exact: p.get("path").and_then(Value::as_str).map(str::to_string) };
+    // An exact output file needs no folder. A folder given but left blank (the Export dialog's Folder
+    // field cleared) is an error, like Lightroom refusing to export to an unspecified folder, rather
+    // than a silent write into the working directory. No folder at all (e.g. File → Export with
+    // Preset): the last export's, else the default.
+    let exact = p.get("path").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).map(str::to_string);
+    let dir = match p.get("dir").and_then(Value::as_str) {
+        Some(d) => d.trim().to_string(),
+        None => {
+            let last_dir =
+                app.session.last_export.as_ref().and_then(|l| l.get("dir")).and_then(Value::as_str).map(str::trim).filter(|d| !d.is_empty());
+            last_dir.map(str::to_string).unwrap_or_else(default_export_dir)
+        }
+    };
+    if dir.is_empty() && exact.is_none() {
+        return Err(NO_EXPORT_FOLDER.into());
+    }
+    let to = Destination { dir: dir.clone(), exact };
     let background = p.get("background").and_then(Value::as_bool).unwrap_or(false) && app.services.write_shared.is_some();
     let out = if background {
         let items = lightcraft_engine::export::prepare_batch(&mut app.session, &ids, &opts)?;

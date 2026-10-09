@@ -13,8 +13,8 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::backend::Backend;
 use crate::backup::{
-    ACTIVE_LIBRARY, README, ZipWriter, data_offset, find_central, original_entry, parse_central, restore_key, restored_dir_name, tail_len,
-    valid_hash, verify,
+    ACTIVE_LIBRARY, MAX_RESTORE_DIRECTORY_BYTES, MAX_RESTORE_ENTRY_BYTES, README, ZipEntry, ZipWriter, data_offset, find_central, original_entry,
+    parse_central, preflight_restore_entry, restore_key, restored_dir_name, tail_len, valid_hash, verify, verify_original_hash,
 };
 use crate::files::{Files, LIBRARY_FILES};
 use crate::store::storage_key;
@@ -185,30 +185,84 @@ async fn read_range(file: &web_sys::File, start: u64, end: u64) -> Result<Vec<u8
     Ok(Uint8Array::new(&buf).to_vec())
 }
 
+/// Read & verify one accepted archive entry. A restore never allocates based on an unbounded zip
+/// size field: browser memory is capped per entry before slicing the picked file.
+async fn read_entry(file: &web_sys::File, file_len: u64, entry: &ZipEntry) -> Result<Vec<u8>, String> {
+    if entry.size > MAX_RESTORE_ENTRY_BYTES {
+        return Err(format!("{}: entry exceeds the {} MiB restore limit", entry.name, MAX_RESTORE_ENTRY_BYTES >> 20));
+    }
+    let local_end = entry.header.checked_add(30).ok_or_else(|| format!("{}: damaged entry", entry.name))?;
+    if local_end > file_len {
+        return Err(format!("{}: damaged entry", entry.name));
+    }
+    let local = read_range(file, entry.header, local_end).await?;
+    let start = data_offset(entry, &local)?;
+    let end = start.checked_add(entry.size).ok_or_else(|| format!("{}: damaged entry", entry.name))?;
+    if end > file_len {
+        return Err(format!("{}: damaged entry", entry.name));
+    }
+    let data = read_range(file, start, end).await?;
+    verify(entry, &data)?;
+    Ok(data)
+}
+
+struct RestoreEntry<'a> {
+    zip: &'a ZipEntry,
+    key: String,
+    original_hash: Option<String>,
+}
+
 /// Restore a backup into a new library folder (nothing in storage is deleted or overwritten),
 /// then point [`ACTIVE_LIBRARY`] at it. Returns the folder's name; the caller reloads the page.
 pub async fn restore(file: web_sys::File, backend: Backend) -> Result<String, String> {
     let len = file.size() as u64;
     let tail = read_range(&file, len - tail_len(len), len).await?;
     let (cd_offset, cd_size) = find_central(&tail)?;
-    let cd = read_range(&file, cd_offset, cd_offset + cd_size).await?;
+    if cd_size > MAX_RESTORE_DIRECTORY_BYTES {
+        return Err(format!("central directory exceeds the {} MiB restore limit", MAX_RESTORE_DIRECTORY_BYTES >> 20));
+    }
+    let cd_end = cd_offset.checked_add(cd_size).ok_or("central directory is outside the backup")?;
+    if cd_end > len {
+        return Err("central directory is outside the backup".into());
+    }
+    let cd = read_range(&file, cd_offset, cd_end).await?;
     let entries = parse_central(&cd)?;
     if !entries.iter().any(|e| e.name == "library/catalog.snap" || e.name == "library/catalog.log") {
         return Err("this isn't a LightCraft library backup (no library/catalog files)".into());
     }
     let dir = restored_dir_name(js_sys::Date::now());
+    let accepted: Vec<RestoreEntry<'_>> = entries
+        .iter()
+        .filter_map(|zip| {
+            let key = restore_key(&zip.name, &dir)?;
+            let original_hash = key.strip_prefix("originals/").map(str::to_string);
+            Some(RestoreEntry { zip, key, original_hash })
+        })
+        .collect();
+
+    // Preflight every accepted entry before touching storage. In particular, an existing original
+    // key does not exempt archive bytes from CRC or content-hash validation, nor does a corrupt
+    // existing payload get reused.
+    let mut writes = Vec::with_capacity(accepted.len());
+    for entry in &accepted {
+        let data = read_entry(&file, len, entry.zip).await?;
+        if let Some(hash) = entry.original_hash.as_deref() {
+            verify_original_hash(hash, &data)?;
+        }
+        let existing = if entry.original_hash.is_some() { backend.read(&entry.key).await? } else { None };
+        let write = preflight_restore_entry(entry.zip, &data, entry.original_hash.as_deref(), existing.as_deref())?;
+        writes.push(write);
+    }
+
+    // All archive validation passed. Read entries again for writes so memory stays bounded to one
+    // entry and a later invalid archive entry can never leave an earlier original behind.
     let mut written = 0usize;
-    for e in &entries {
-        let Some(key) = restore_key(&e.name, &dir) else { continue };
-        // originals are named by their content: one already stored is the same file
-        if key.starts_with("originals/") && backend.exists(&key).await? {
+    for (entry, write) in accepted.iter().zip(writes) {
+        if !write {
             continue;
         }
-        let local = read_range(&file, e.header, e.header + 30).await?;
-        let start = data_offset(e, &local)?;
-        let data = read_range(&file, start, start + e.size).await?;
-        verify(e, &data)?;
-        backend.write(&key, &data).await.map_err(|err| format!("storing {}: {err}", e.name))?;
+        let data = read_entry(&file, len, entry.zip).await?;
+        backend.write(&entry.key, &data).await.map_err(|err| format!("storing {}: {err}", entry.zip.name))?;
         written += 1;
     }
     backend.write(ACTIVE_LIBRARY, dir.as_bytes()).await?;

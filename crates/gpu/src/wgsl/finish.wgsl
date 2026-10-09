@@ -1,7 +1,7 @@
 // The per-pixel stage: a straight port of `lightcraft_pipeline::finish` (keep in step with it).
 // Bindings: img (rgb, pre-exposure), log_l, base, clar, tex, dark, masks (NMASK planes, then the
 // blurred chromaticity when HAS_CHROMA), aux
-// (tone LUT | sRGB LUT | curve LUTs | mask terms), out (packed RGBA8).
+// (tone LUT | chroma curve | sRGB LUT | curve LUTs | mask terms), out (packed RGBA8).
 
 fn tone_apply(y: f32) -> f32 {
     if (y <= 0.0) {
@@ -16,6 +16,19 @@ fn tone_apply(y: f32) -> f32 {
         return v * (y / (GREY * TONE_MIN_GAIN));
     }
     return v;
+}
+
+// The camera chroma curve follows the tone LUT in `aux` (`ToneMap::chroma_scale`).
+fn chroma_scale(o: f32) -> f32 {
+    let f = clamp(o, 0.0, 1.0) * f32(CHROMA_N - 1u);
+    let i = min(u32(f), CHROMA_N - 2u);
+    let t = f - f32(i);
+    let a = aux[TONE_N + i];
+    let b = aux[TONE_N + i + 1u];
+    if (a == b) {
+        return a;
+    }
+    return a + (b - a) * t;
 }
 
 fn encode_srgb(v: f32) -> f32 {
@@ -400,6 +413,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (yl > 1e-9) {
         d = c * o / yl;
     }
+    let k = chroma_scale(o);
+    if (k != 1.0) {
+        d = vec3<f32>(o) + (d - vec3<f32>(o)) * k;
+    }
     let mx = max(d.x, max(d.y, d.z));
     if (mx > 1.0) {
         let t = clamp((mx - 1.0) / max(mx - o, 1e-6), 0.0, 1.0);
@@ -415,14 +432,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // --- vignette (display linear, post-crop)
     if (pu(F_VIG) != 0u) {
-        let fw = f32(w);
-        let fh = f32(h);
+        // the vignette belongs to the whole output frame, not to the window being drawn
+        let fw = pf(F_VIG_VIEW + 2u);
+        let fh = pf(F_VIG_VIEW + 3u);
         let aspect = fw / fh;
         let amount = pf(F_VIG_AMOUNT);
         let mixa = pf(F_VIG_ASPECT_MIX);
         let power = pf(F_VIG_POWER);
-        let u = (f32(x) + 0.5) / fw * 2.0 - 1.0;
-        let vv = (f32(y) + 0.5) / fh * 2.0 - 1.0;
+        let u = (pf(F_VIG_VIEW) + f32(x) + 0.5) / fw * 2.0 - 1.0;
+        let vv = (pf(F_VIG_VIEW + 1u) + f32(y) + 0.5) / fh * 2.0 - 1.0;
         let sx = 1.0 + (aspect - 1.0) * mixa;
         let sy = 1.0 + (1.0 / aspect - 1.0) * mixa;
         let ax = abs(u * max(sx, 1.0) / max(sx, sy));

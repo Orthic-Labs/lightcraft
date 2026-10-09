@@ -57,6 +57,8 @@ const FIELDS: &[(&str, usize)] = &[
     ("VIG_POWER", 1),
     ("VIG_HL", 1),
     ("VIG_STYLE", 1),
+    // the window's offset in the whole output and the whole output's size (pixels)
+    ("VIG_VIEW", 4),
     ("GRAIN", 1),
     ("GRAIN_AMT", 1),
     ("GRAIN_SC", 1),
@@ -136,10 +138,11 @@ pub struct Present {
     pub chroma: bool,
 }
 
-/// The `finish` kernel's parameter block and auxiliary table (tone LUT | sRGB LUT | curve LUTs |
+/// The `finish` kernel's parameter block and auxiliary table (tone LUT | chroma curve | sRGB LUT | curve LUTs |
 /// mask terms) for `fp` with `masks` (their local adjustments' terms).
 pub fn finish_block(fp: &FinishParams, masks: &[[f32; MASK_TERMS]], present: &Present) -> (Vec<u32>, Vec<f32>) {
     let mut aux: Vec<f32> = fp.tone.lut().to_vec();
+    aux.extend_from_slice(fp.tone.chroma_lut());
     let srgb_off = aux.len();
     aux.extend_from_slice(&srgb_lut()[..]);
     let curve_off = aux.len();
@@ -210,6 +213,7 @@ pub fn finish_block(fp: &FinishParams, masks: &[[f32; MASK_TERMS]], present: &Pr
         p.f("VIG_ASPECT_MIX", v.aspect_mix);
         p.f("VIG_POWER", v.power);
         p.f("VIG_HL", v.highlights);
+        p.fs("VIG_VIEW", &fp.view);
         p.u(
             "VIG_STYLE",
             match v.style {

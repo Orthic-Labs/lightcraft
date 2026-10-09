@@ -1,0 +1,17 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "visible": false,
+        "title": "LightCraft",
+        "width": 1600,
+        "height": 1000,
+        "minWidth": 960,
+        "minHeight": 640,
+        "decorations": false,
+        "shadow": false
+      }
+    ]
+  }
+}

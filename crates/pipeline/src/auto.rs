@@ -1,6 +1,7 @@
 //! Auto tone and auto white balance (histogram / grey-world statistics on a proxy).
 
 use lightcraft_color::cct::xy_to_temp_tint;
+use lightcraft_color::perceptual::oklab_from_2020;
 use lightcraft_color::{REC2020, Xy, bradford, luminance_2020};
 use lightcraft_develop::DevelopSettings;
 use lightcraft_raster::Rgb32f;
@@ -25,27 +26,85 @@ fn percentile(sorted: &[f32], q: f32) -> f32 {
     if sorted.is_empty() {
         return 0.0;
     }
-    sorted[((sorted.len() - 1) as f32 * q.clamp(0.0, 1.0)) as usize]
+    let q = if q.is_finite() { q.clamp(0.0, 1.0) } else { 0.5 };
+    sorted[((sorted.len() - 1) as f32 * q) as usize]
 }
 
 /// Compute auto tone values for `src` under the current white balance (ignores current tone values).
 pub fn auto_tone(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings) -> AutoTone {
+    if src.width == 0 || src.height == 0 || src.data.is_empty() {
+        return AutoTone::default();
+    }
     let mut img = lightcraft_raster::resample::fit(src, 512, 512, lightcraft_raster::resample::Filter::Box);
     let mut base = DevelopSettings { wb: s.wb, ..DevelopSettings::default() };
     base.light.exposure = 0.0;
     crate::local::scene_linear_pre(&mut img, info, &base);
-    let mut ev: Vec<f32> = img.data.iter().map(|c| (luminance_2020(*c).max(1e-6) / 0.18).log2()).collect();
+    let mut ev = Vec::with_capacity(img.data.len());
+    let mut chroma = Vec::with_capacity(img.data.len());
+    for c in &img.data {
+        let y = luminance_2020(*c);
+        if !y.is_finite() || y <= 1e-6 {
+            continue;
+        }
+        let e = (y / 0.18).log2();
+        if !e.is_finite() {
+            continue;
+        }
+        ev.push(e);
+        let lab = oklab_from_2020(*c);
+        let c = (lab[1] * lab[1] + lab[2] * lab[2]).sqrt();
+        if c.is_finite() {
+            chroma.push(c);
+        }
+    }
+    if ev.is_empty() {
+        return AutoTone::default();
+    }
     ev.sort_by(|a, b| a.total_cmp(b));
+    chroma.sort_by(|a, b| a.total_cmp(b));
     let median = percentile(&ev, 0.5);
-    let exposure = (-median * 0.85 - 0.1).clamp(-4.0, 4.0);
-    let (p01, p05, p95, p995) =
-        (percentile(&ev, 0.01) + exposure, percentile(&ev, 0.05) + exposure, percentile(&ev, 0.95) + exposure, percentile(&ev, 0.995) + exposure);
+    let (p01_pre, p05_pre, p95_pre, p995_pre) = (percentile(&ev, 0.01), percentile(&ev, 0.05), percentile(&ev, 0.95), percentile(&ev, 0.995));
+
+    // Keep deliberately dark and bright scenes in their intended key. A median-only target
+    // turns a night frame grey and pushes snow/high-key frames too far down.
+    let low_key = median < -1.35 && p95_pre < 0.7;
+    let high_key = median > 0.8 && p05_pre > -1.5;
+    let backlit = p995_pre > 2.4 && p05_pre < -2.8 && p995_pre - median > 4.0;
+    let target = if low_key {
+        -0.9
+    } else if high_key {
+        0.65
+    } else {
+        0.0
+    };
+    let median_gain = if low_key || high_key { 0.85 } else { 1.0 };
+    // BaselineExposure has already been applied by the RAW loader. Keep an ordinary scene's
+    // median on target instead of adding a second, undocumented underexposure bias here.
+    let mut exposure = ((target - median) * median_gain).clamp(-4.0, 4.0);
+    if backlit {
+        // Let highlight recovery work, but do not spend several stops on a dark foreground
+        // when a small bright tail (sun, window, or lamp) defines the upper percentile.
+        exposure = exposure.min(2.0);
+    }
+    let (p01, p05, p95, p995) = (p01_pre + exposure, p05_pre + exposure, p95_pre + exposure, p995_pre + exposure);
     let highlights = if p995 > 2.2 { -((p995 - 2.2) * 38.0).min(90.0) } else { 0.0 };
     let shadows = if p05 < -4.0 { ((-4.0 - p05) * 22.0).min(70.0) } else { 0.0 };
     let spread = p95 - p05;
-    let contrast = ((6.5 - spread) * 6.0).clamp(-20.0, 30.0);
-    let whites = if p995 < 1.8 { ((1.8 - p995) * 25.0).min(40.0) } else { -((p995 - 3.5).max(0.0) * 10.0).min(30.0) };
-    let blacks = if p01 > -5.0 { -((p01 + 5.0) * 10.0).min(35.0) } else { ((-7.0 - p01).max(0.0) * 8.0).min(20.0) };
+    let scene_damping = if backlit {
+        0.55
+    } else if low_key || high_key {
+        0.45
+    } else {
+        1.0
+    };
+    let contrast = (((6.5 - spread) * 6.0).clamp(-20.0, 30.0) * scene_damping).round();
+    let key_damping = if low_key || high_key { 0.55 } else { 1.0 };
+    let whites = ((if p995 < 1.8 { ((1.8 - p995) * 25.0).min(40.0) } else { -((p995 - 3.5).max(0.0) * 10.0).min(30.0) }) * key_damping).round();
+    let blacks = ((if p01 > -5.0 { -((p01 + 5.0) * 10.0).min(35.0) } else { ((-7.0 - p01).max(0.0) * 8.0).min(20.0) }) * key_damping).round();
+    let chroma_p90 = percentile(&chroma, 0.9);
+    let colour_headroom = ((0.16 - chroma_p90) / 0.16).clamp(0.0, 1.0);
+    let vibrance = (14.0 * colour_headroom).round();
+    let saturation = (3.0 - 8.0 * (1.0 - colour_headroom)).round();
     AutoTone {
         exposure: (exposure as f64 * 100.0).round() / 100.0,
         contrast: contrast.round() as f64,
@@ -53,8 +112,8 @@ pub fn auto_tone(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings) -> AutoTo
         shadows: shadows.round() as f64,
         whites: whites.round() as f64,
         blacks: blacks.round() as f64,
-        vibrance: 12.0,
-        saturation: 3.0,
+        vibrance: vibrance as f64,
+        saturation: saturation as f64,
     }
 }
 
@@ -189,5 +248,33 @@ mod bw_tests {
         // an image without colour leaves the mix alone
         let grey = Rgb32f::from_fn(16, 16, |x, _| [x as f32 / 16.0; 3]);
         assert_eq!(auto_bw_mix(&grey, &SourceInfo::default(), &DevelopSettings::default()), [0.0; 8]);
+    }
+}
+
+#[cfg(test)]
+mod auto_regression;
+
+#[cfg(test)]
+mod tint_tests {
+    use super::*;
+
+    #[test]
+    fn auto_wb_and_picker_correct_green_with_positive_tint() {
+        // The picker delegates a sampled patch to this same auto_wb implementation.
+        for (rgb, sign) in [([0.18, 0.24, 0.18], 1.0), ([0.24, 0.18, 0.24], -1.0)] {
+            let img = Rgb32f::filled(16, 16, rgb);
+            let info = SourceInfo { raw: true, relative_wb: true, ..Default::default() };
+            let (temp, tint) = auto_wb(&img, &info);
+            assert!(tint * sign > 0.0, "{rgb:?}: temp {temp}, tint {tint}");
+            let mut s = DevelopSettings::default();
+            s.wb.mode = lightcraft_develop::WbMode::Custom;
+            s.wb.temp = temp;
+            s.wb.tint = tint;
+            let mut corrected = img;
+            crate::local::white_balance(&mut corrected, &info, &s);
+            let p = corrected.get(0, 0);
+            let spread = p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]);
+            assert!(spread < 0.003, "{rgb:?} -> {p:?}");
+        }
     }
 }

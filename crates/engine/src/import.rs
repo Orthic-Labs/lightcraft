@@ -28,13 +28,47 @@ use lightcraft_catalog::{MediaKind, Op, Photo, PhotoId, Source};
 use serde::{Deserialize, Serialize};
 
 use crate::Session;
+pub use crate::import_pairs::{RawJpegImportPolicy, RawJpegPair, RawJpegPairKind};
 use crate::media::ProbeInfo;
 
 /// File extensions LightCraft imports (lower case).
 pub const EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "png", "tif", "tiff", "webp", "dng", "cr2", "cr3", "nef", "nrw", "arw", "raf", "orf", "rw2", "pef", "psd", "jxl", "gif", "bmp",
-    "heic", "avif",
+    "jpg", "jpeg", "png", "tif", "tiff", "webp", "dng", "cr2", "cr3", "nef", "nrw", "arw", "raf", "orf", "rw2", "rwl", "raw", "pef", "psd", "jxl",
+    "gif", "bmp", "heic", "avif", // containers LightCraft cannot decode but imports as preview only (their embedded JPEG)
+    "iiq", "crw", "mrw", "x3f", "kdc", "mos", "erf",
 ];
+
+/// File-system choices used by import review. Empty extension lists retain all supported formats.
+/// Explicit file paths are always retained; options only filter files discovered in folders.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ImportScanOptions {
+    pub include_subfolders: bool,
+    pub allowed_extensions: Vec<String>,
+    pub excluded_extensions: Vec<String>,
+}
+
+impl Default for ImportScanOptions {
+    fn default() -> Self {
+        Self { include_subfolders: true, allowed_extensions: Vec::new(), excluded_extensions: Vec::new() }
+    }
+}
+
+impl ImportScanOptions {
+    fn allows_extension(&self, path: &Path) -> bool {
+        let extension = path.extension().map(|value| value.to_string_lossy().to_ascii_lowercase());
+        let matches = |values: &[String]| {
+            extension.as_deref().is_some_and(|ext| values.iter().any(|value| value.trim().trim_start_matches('.').eq_ignore_ascii_case(ext)))
+        };
+        if matches(&self.excluded_extensions) {
+            return false;
+        }
+        self.allowed_extensions.is_empty() || matches(&self.allowed_extensions)
+    }
+}
+
+/// Upper bound on concurrent native probe reads. Memory gating bounds bytes in flight as well.
+const MAX_IMPORT_PROBE_WORKERS: usize = 8;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ImportMode {
@@ -48,9 +82,36 @@ pub enum ImportMode {
     Move,
 }
 
+/// What an import does with a file the library already has in Recently Deleted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OnDeleted {
+    /// Leave it there; the report says so ([`Duplicate::existing_deleted`]).
+    #[default]
+    Skip,
+    /// Bring the trashed photo back, with its edits ([`ImportReport::restored`]).
+    Restore,
+    /// Delete the trashed record permanently and import the file as a new photo.
+    Fresh,
+}
+
+impl OnDeleted {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "skip" => Some(Self::Skip),
+            "restore" => Some(Self::Restore),
+            "fresh" => Some(Self::Fresh),
+            _ => None,
+        }
+    }
+}
+
 /// What an import does besides adding the photos.
 #[derive(Clone, Debug, Default)]
 pub struct ImportOptions {
+    /// Folder expansion choices shared by import review & direct imports.
+    pub scan: ImportScanOptions,
+    /// A file that is in Recently Deleted: skip (default), restore, or import afresh.
+    pub on_deleted: OnDeleted,
     pub mode: ImportMode,
     /// Applied to every imported photo (one History entry).
     pub preset: Option<lightcraft_develop::Preset>,
@@ -71,6 +132,8 @@ pub struct ImportOptions {
     pub metadata_preset: Option<String>,
     /// Copy: raws are copied as DNG (Copy as DNG).
     pub convert_dng: bool,
+    /// How confidently paired RAW/JPEG variants are selected. Keep both is the default.
+    pub raw_jpeg_policy: RawJpegImportPolicy,
 }
 
 /// How copies are filed in the destination. The date is the capture time, else the time of the
@@ -138,6 +201,15 @@ pub struct ImportCandidate {
     /// A raw variant that can't be decoded yet (why): it imports as preview only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview_only: Option<String>,
+    /// A presentation hint for a confidently paired RAW/JPEG variant; this is not a duplicate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pairing: Option<RawJpegPair>,
+    /// Set by a caller that requested RawOnly. The file remains visible so the user can keep it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_excluded: Option<String>,
+    /// Camera metadata retained for conservative descendant export pairing.
+    #[serde(skip)]
+    pub pairing_camera: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -147,12 +219,18 @@ pub struct Duplicate {
     pub existing: Option<u64>,
     /// `"path"` (already imported from there) or `"content"` (same bytes elsewhere).
     pub reason: &'static str,
+    /// That photo is in Recently Deleted (see [`OnDeleted`]).
+    #[serde(rename = "existingDeleted", skip_serializing_if = "std::ops::Not::not")]
+    pub existing_deleted: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ImportReport {
     pub imported: Vec<u64>,
     pub duplicates: Vec<Duplicate>,
+    /// [`OnDeleted::Restore`]: photos brought back from Recently Deleted instead of imported.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub restored: Vec<u64>,
     /// Move: the originals that were moved (and removed from the source).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub moved: Vec<Moved>,
@@ -286,32 +364,130 @@ pub fn is_supported(path: &Path) -> bool {
 }
 
 /// Expand files and folders (recursively) into supported files. `skip` (e.g. the library folder)
-/// is never descended into.
+/// is never descended into. Each folder's walk is bounded ([`crate::walk::Limits::default`]); a
+/// walk that stops at a bound is logged.
 pub fn expand(paths: &[String], skip: Option<&Path>) -> Vec<String> {
-    fn walk(p: &Path, skip: Option<&Path>, out: &mut Vec<String>, top: bool) {
-        let hidden = p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'));
-        if (hidden && !top) || skip.is_some_and(|s| p == s) {
-            return;
+    expand_within(paths, skip, crate::walk::Limits::default()).0
+}
+
+/// Expand using import review options. Directory children are filtered before probing; explicitly
+/// named files remain candidates even when extension filters would exclude them.
+pub fn expand_with_options(paths: &[String], skip: Option<&Path>, options: &ImportScanOptions) -> Vec<String> {
+    let limits = if options.include_subfolders {
+        crate::walk::Limits::default()
+    } else {
+        // `files_in` counts the root's entries as level one; limiting depth to one keeps
+        // direct children while avoiding any descent when Include Subfolders is off.
+        crate::walk::Limits { max_depth: 1, ..Default::default() }
+    };
+    let mut out = Vec::new();
+    let mut truncated = false;
+    for raw in paths {
+        let p = Path::new(raw);
+        if skip.is_some_and(|s| p == s) {
+            continue;
         }
         if p.is_dir() {
-            let Ok(rd) = std::fs::read_dir(p) else { return };
-            let mut v: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-            v.sort();
-            for c in v {
-                walk(&c, skip, out, false);
-            }
-        } else if top || is_supported(p) {
-            // explicitly named files are attempted even with an unknown extension (sniffed)
+            let w = crate::walk::files_in(p, skip, limits, |child| is_supported(child) && options.allows_extension(child));
+            truncated |= w.truncated;
+            out.extend(w.files.into_iter().map(|f| f.to_string_lossy().to_string()));
+        } else {
+            // Explicitly named files are attempted even with an unknown or excluded extension.
             out.push(p.to_string_lossy().to_string());
         }
     }
-    let mut out = Vec::new();
-    for p in paths {
-        walk(Path::new(p), skip, &mut out, true);
+    if truncated && options.include_subfolders {
+        log::warn!("import: folder scan stopped at a walk limit");
     }
     let mut seen = std::collections::HashSet::new();
     out.retain(|p| seen.insert(p.clone()));
     out
+}
+
+/// [`expand`] with the walk bounded by `limits` → (files, whether a walk stopped at a bound).
+pub fn expand_within(paths: &[String], skip: Option<&Path>, limits: crate::walk::Limits) -> (Vec<String>, bool) {
+    let mut out = Vec::new();
+    let mut truncated = false;
+    for p in paths {
+        let p = Path::new(p);
+        if skip.is_some_and(|s| p == s) {
+            continue;
+        }
+        if p.is_dir() {
+            let w = crate::walk::files_in(p, skip, limits, is_supported);
+            if w.truncated {
+                log::warn!(
+                    "import: stopped looking in {} after {} entries (limits: {} entries, {} folder levels)",
+                    p.display(),
+                    w.entries,
+                    limits.max_entries,
+                    limits.max_depth
+                );
+            }
+            truncated |= w.truncated;
+            out.extend(w.files.into_iter().map(|f| f.to_string_lossy().to_string()));
+        } else {
+            // explicitly named files are attempted even with an unknown extension (sniffed)
+            out.push(p.to_string_lossy().to_string());
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|p| seen.insert(p.clone()));
+    (out, truncated)
+}
+
+/// What a path given on the command line at launch becomes ([`launch_path`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LaunchPath {
+    /// Import this (absolute) file or folder, in the background.
+    Import(String),
+    /// Not imported: `path` (absolute) is a whole drive or the whole home folder, which is never
+    /// walked without being chosen in the app (issue #374).
+    Refused { path: String, why: String },
+}
+
+/// Resolve a launch argument for importing (issue #374). An empty argument is ignored (`None`);
+/// a relative one (`.`, `..`, `photos`; `/` or `\` on Windows, the current drive's root) is
+/// resolved against `cwd` — the working folder a launcher picked, often a drive root or
+/// `C:\Windows\System32` — and refused when that leaves no folder (`cwd` unknown). A drive
+/// or file-system root is replaced by its camera folder (`DCIM`, from `dcim`: a memory card) or
+/// refused, and so is the home folder `home`: either would walk most of the disk.
+pub fn launch_path(arg: &str, cwd: Option<&Path>, home: Option<&Path>, dcim: impl Fn(&Path) -> Option<PathBuf>) -> Option<LaunchPath> {
+    if arg.trim().is_empty() {
+        return None;
+    }
+    let given = Path::new(arg);
+    let joined = if given.is_absolute() {
+        given.to_path_buf()
+    } else {
+        match cwd {
+            Some(c) => c.join(given),
+            None => return Some(LaunchPath::Refused { path: arg.to_string(), why: "a relative path, and the working folder is unknown".into() }),
+        }
+    };
+    // `.` and `..` resolved by name (no file-system access)
+    let mut abs = PathBuf::new();
+    for c in joined.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                abs.pop();
+            }
+            other => abs.push(other.as_os_str()),
+        }
+    }
+    let shown = abs.to_string_lossy().to_string();
+    if abs.parent().is_none() {
+        return Some(match dcim(&abs) {
+            Some(d) => LaunchPath::Import(d.to_string_lossy().to_string()),
+            None => LaunchPath::Refused { path: shown, why: "a whole drive".into() },
+        });
+    }
+    let key = lightcraft_catalog::query::folder_key;
+    if home.is_some_and(|h| key(&h.to_string_lossy()) == key(&shown)) {
+        return Some(LaunchPath::Refused { path: shown, why: "the whole home folder".into() });
+    }
+    Some(LaunchPath::Import(shown))
 }
 
 /// Probe files (headers + content hash) as an import would.
@@ -320,9 +496,19 @@ pub(crate) fn probe_paths(s: &Session, paths: &[String]) -> Vec<Result<ProbeInfo
 }
 
 fn probe_all(probe: Option<&crate::media::FileProbe>, paths: &[String], progress: &ScanProgress) -> Vec<Result<ProbeInfo, String>> {
+    probe_all_with_cancel(probe, paths, progress, &progress.cancel)
+}
+
+fn probe_all_with_cancel(
+    probe: Option<&crate::media::FileProbe>,
+    paths: &[String],
+    progress: &ScanProgress,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Vec<Result<ProbeInfo, String>> {
     use std::sync::atomic::Ordering::Relaxed;
+    let started = web_time::Instant::now();
     let Some(probe) = probe.cloned() else {
-        return paths
+        let results = paths
             .iter()
             .map(|p| {
                 Ok(ProbeInfo {
@@ -331,10 +517,12 @@ fn probe_all(probe: Option<&crate::media::FileProbe>, paths: &[String], progress
                 })
             })
             .collect();
+        progress.metrics.probe_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+        return results;
     };
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8).min(paths.len().max(1));
+        let n = workers(paths.len());
         if n > 1 {
             let mut results: Vec<Option<Result<ProbeInfo, String>>> = vec![None; paths.len()];
             let next = std::sync::atomic::AtomicUsize::new(0);
@@ -347,30 +535,138 @@ fn probe_all(probe: Option<&crate::media::FileProbe>, paths: &[String], progress
                             if i >= paths.len() {
                                 break;
                             }
-                            if progress.cancel.load(Relaxed) {
+                            if cancel.load(Relaxed) {
                                 break;
                             }
                             let r = probe(&paths[i]);
+                            if r.is_ok() {
+                                progress.metrics.probes.fetch_add(1, Relaxed);
+                            } else {
+                                progress.metrics.probe_failures.fetch_add(1, Relaxed);
+                            }
+                            if let Ok(info) = &r {
+                                progress.metrics.bytes_read.fetch_add(info.file_size, Relaxed);
+                            }
                             progress.done.fetch_add(1, Relaxed);
                             out.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(r);
                         }
                     });
                 }
             });
+            progress.metrics.probe_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+            if cancel.load(Relaxed) {
+                progress.metrics.cancelled.store(true, Relaxed);
+            }
             return results.into_iter().map(|r| r.unwrap_or_else(|| Err("not probed".into()))).collect();
         }
     }
-    paths
+    let results: Vec<Result<ProbeInfo, String>> = paths
         .iter()
         .map(|p| {
-            if progress.cancel.load(Relaxed) {
+            if cancel.load(Relaxed) {
+                progress.metrics.cancelled.store(true, Relaxed);
                 return Err("cancelled".into());
             }
             let r = probe(p);
+            if r.is_ok() {
+                progress.metrics.probes.fetch_add(1, Relaxed);
+            } else {
+                progress.metrics.probe_failures.fetch_add(1, Relaxed);
+            }
+            if let Ok(info) = &r {
+                progress.metrics.bytes_read.fetch_add(info.file_size, Relaxed);
+            }
             progress.done.fetch_add(1, Relaxed);
             r
         })
-        .collect()
+        .collect();
+    progress.metrics.probe_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+    results
+}
+
+/// Read/parse sidecars concurrently after probes finish. Results stay indexed by source path, so
+/// naming, capture-time fallback, copy order, and duplicate decisions remain deterministic; file
+/// placement itself stays serial in [`ImportJob::prepare_files`].
+const MAX_SIDECAR_BYTES: u64 = 4 << 20;
+
+fn read_sidecar_packet(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let metadata = std::fs::metadata(path).ok()?;
+    if metadata.len() > MAX_SIDECAR_BYTES {
+        log::warn!("import {}: XMP sidecar exceeds {} bytes", path.display(), MAX_SIDECAR_BYTES);
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let mut packet = String::new();
+    let mut limited = file.take(MAX_SIDECAR_BYTES.saturating_add(1));
+    limited.read_to_string(&mut packet).ok()?;
+    (packet.len() as u64 <= MAX_SIDECAR_BYTES).then_some(packet)
+}
+
+fn read_sidecars(
+    paths: &[String],
+    probes: &[Result<ProbeInfo, String>],
+    eligible: &[bool],
+    naming: crate::sidecar::SidecarNaming,
+    cancel: &std::sync::atomic::AtomicBool,
+    metrics: &ImportMetrics,
+) -> Vec<Option<crate::sidecar::SidecarData>> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut out: Vec<Option<crate::sidecar::SidecarData>> = vec![None; paths.len()];
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    #[cfg(not(target_arch = "wasm32"))]
+    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, MAX_IMPORT_PROBE_WORKERS).min(paths.len().max(1));
+    #[cfg(target_arch = "wasm32")]
+    let workers = 1;
+    let read_one = |i: usize| {
+        if !eligible.get(i).copied().unwrap_or(false) {
+            return None;
+        }
+        let Some(Ok(info)) = probes.get(i) else { return None };
+        let started = web_time::Instant::now();
+        let raw = info.kind == MediaKind::Raw;
+        let packet =
+            crate::sidecar::find_sidecar(&paths[i], naming).and_then(|f| read_sidecar_packet(&f)).or_else(|| info.xmp.clone().filter(|_| raw));
+        let sidecar = packet.and_then(|x| match crate::sidecar::parse_sidecar(&x, raw) {
+            Ok(sc) => Some(sc),
+            Err(e) => {
+                log::warn!("import {}: XMP: {e}", paths[i]);
+                None
+            }
+        });
+        metrics.sidecar_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+        if sidecar.is_some() {
+            metrics.sidecars.fetch_add(1, Relaxed);
+        }
+        sidecar
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    if workers > 1 {
+        let shared = std::sync::Mutex::new(&mut out);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, Relaxed);
+                        if i >= paths.len() || cancel.load(Relaxed) {
+                            break;
+                        }
+                        let sidecar = read_one(i);
+                        shared.lock().unwrap_or_else(|e| e.into_inner())[i] = sidecar;
+                    }
+                });
+            }
+        });
+        return out;
+    }
+    for i in 0..paths.len() {
+        if cancel.load(Relaxed) {
+            metrics.cancelled.store(true, Relaxed);
+            break;
+        }
+        out[i] = read_one(i);
+    }
+    out
 }
 
 /// Copy `src` into `root`/`folders` as `name` (default: its own name), made unique with -1, -2…;
@@ -393,9 +689,11 @@ pub struct ScanInput {
     probe: Option<crate::media::FileProbe>,
     skip: Option<PathBuf>,
     /// path → (photo, its summary) for files already in the library.
-    by_path: HashMap<String, (PhotoId, ImportCandidate)>,
+    by_path: HashMap<PathBuf, (PhotoId, ImportCandidate)>,
     by_hash: HashMap<String, PhotoId>,
     cache: HashMap<String, ProbeInfo>,
+    pub raw_jpeg_policy: RawJpegImportPolicy,
+    pub scan_options: ImportScanOptions,
 }
 
 /// Progress and cancellation of a running [`scan_with`].
@@ -405,6 +703,78 @@ pub struct ScanProgress {
     pub total: std::sync::atomic::AtomicUsize,
     pub done: std::sync::atomic::AtomicUsize,
     pub cancel: std::sync::atomic::AtomicBool,
+    /// Fixed-size counters/timers for import diagnostics. No per-file history is retained.
+    pub metrics: std::sync::Arc<ImportMetrics>,
+}
+
+impl ScanProgress {
+    fn with_metrics(metrics: std::sync::Arc<ImportMetrics>) -> Self {
+        Self { total: Default::default(), done: Default::default(), cancel: Default::default(), metrics }
+    }
+}
+
+/// Bounded import instrumentation suitable for a progress panel or a CI probe. Counters are
+/// monotonic for one scan/job; stage times are nanoseconds and never retain paths or samples.
+#[derive(Default)]
+pub struct ImportMetrics {
+    pub expanded: std::sync::atomic::AtomicUsize,
+    pub skipped_paths: std::sync::atomic::AtomicUsize,
+    pub cache_hits: std::sync::atomic::AtomicUsize,
+    pub cache_misses: std::sync::atomic::AtomicUsize,
+    pub probes: std::sync::atomic::AtomicUsize,
+    pub probe_failures: std::sync::atomic::AtomicUsize,
+    pub bytes_read: std::sync::atomic::AtomicU64,
+    pub sidecars: std::sync::atomic::AtomicUsize,
+    pub transfers: std::sync::atomic::AtomicUsize,
+    pub transfer_failures: std::sync::atomic::AtomicUsize,
+    pub cancelled: std::sync::atomic::AtomicBool,
+    pub expand_ns: std::sync::atomic::AtomicU64,
+    pub probe_ns: std::sync::atomic::AtomicU64,
+    pub sidecar_ns: std::sync::atomic::AtomicU64,
+    pub transfer_ns: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportMetricsSnapshot {
+    pub expanded: usize,
+    pub skipped_paths: usize,
+    pub cache_hits: usize,
+    pub cache_misses: usize,
+    pub probes: usize,
+    pub probe_failures: usize,
+    pub bytes_read: u64,
+    pub sidecars: usize,
+    pub transfers: usize,
+    pub transfer_failures: usize,
+    pub cancelled: bool,
+    pub expand_ns: u64,
+    pub probe_ns: u64,
+    pub sidecar_ns: u64,
+    pub transfer_ns: u64,
+}
+
+impl ImportMetrics {
+    pub fn snapshot(&self) -> ImportMetricsSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        ImportMetricsSnapshot {
+            expanded: self.expanded.load(Relaxed),
+            skipped_paths: self.skipped_paths.load(Relaxed),
+            cache_hits: self.cache_hits.load(Relaxed),
+            cache_misses: self.cache_misses.load(Relaxed),
+            probes: self.probes.load(Relaxed),
+            probe_failures: self.probe_failures.load(Relaxed),
+            bytes_read: self.bytes_read.load(Relaxed),
+            sidecars: self.sidecars.load(Relaxed),
+            transfers: self.transfers.load(Relaxed),
+            transfer_failures: self.transfer_failures.load(Relaxed),
+            cancelled: self.cancelled.load(Relaxed),
+            expand_ns: self.expand_ns.load(Relaxed),
+            probe_ns: self.probe_ns.load(Relaxed),
+            sidecar_ns: self.sidecar_ns.load(Relaxed),
+            transfer_ns: self.transfer_ns.load(Relaxed),
+        }
+    }
 }
 
 /// The result of [`scan_with`]: the candidates, and the probes to keep for the import that follows.
@@ -415,6 +785,16 @@ pub struct ScanOutput {
 
 impl ScanInput {
     pub fn new(s: &mut Session, paths: &[String]) -> (Self, Vec<String>) {
+        Self::new_with_options(s, paths, ImportScanOptions::default())
+    }
+
+    pub fn new_with_policy(s: &mut Session, paths: &[String], raw_jpeg_policy: RawJpegImportPolicy) -> (Self, Vec<String>) {
+        let (mut input, paths) = Self::new_with_options(s, paths, ImportScanOptions::default());
+        input.raw_jpeg_policy = raw_jpeg_policy;
+        (input, paths)
+    }
+
+    pub fn new_with_options(s: &mut Session, paths: &[String], scan_options: ImportScanOptions) -> (Self, Vec<String>) {
         let skip = s.library.as_ref().filter(|l| l.on_disk).map(|l| l.dir.clone());
         let mut by_path = HashMap::new();
         let mut by_hash = HashMap::new();
@@ -432,13 +812,21 @@ impl ScanInput {
                     existing: Some(p.id.0),
                     ..Default::default()
                 };
-                by_path.insert(path.clone(), (p.id, c));
+                by_path.insert(PathBuf::from(path), (p.id, c));
             }
             if let Some(h) = &p.content_hash {
                 by_hash.insert(h.clone(), p.id);
             }
         }
-        let input = ScanInput { probe: s.media.file_probe.clone(), skip, by_path, by_hash, cache: std::mem::take(&mut s.import_probes) };
+        let input = ScanInput {
+            probe: s.media.file_probe.clone(),
+            skip,
+            by_path,
+            by_hash,
+            cache: std::mem::take(&mut s.import_probes),
+            raw_jpeg_policy: RawJpegImportPolicy::KeepBoth,
+            scan_options,
+        };
         (input, paths.to_vec())
     }
 }
@@ -447,26 +835,47 @@ impl ScanInput {
 /// against the library and earlier candidates). Nothing is added; the probes are kept for the
 /// import that follows.
 pub fn scan(s: &mut Session, paths: &[String]) -> Vec<ImportCandidate> {
-    let (input, paths) = ScanInput::new(s, paths);
+    scan_with_policy(s, paths, RawJpegImportPolicy::KeepBoth)
+}
+
+pub fn scan_with_policy(s: &mut Session, paths: &[String], policy: RawJpegImportPolicy) -> Vec<ImportCandidate> {
+    let (input, paths) = ScanInput::new_with_policy(s, paths, policy);
     let out = scan_with(input, &paths, &ScanProgress::default());
     s.import_probes = out.probes;
     out.candidates
+}
+
+fn cached_probe_is_current(path: &str, info: &ProbeInfo) -> bool {
+    let Some(metadata) = std::fs::metadata(path).ok() else { return false };
+    metadata.len() == info.file_size
+        && info.source_stamp.is_none_or(|stamp| {
+            metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).is_some_and(|d| d.as_nanos() == stamp)
+        })
 }
 
 /// [`scan`] without the session, so it can run on a worker thread. Stops early (returning what it
 /// has) when `progress.cancel` is set.
 pub fn scan_with(mut input: ScanInput, paths: &[String], progress: &ScanProgress) -> ScanOutput {
     use std::sync::atomic::Ordering::Relaxed;
-    let files = expand(paths, input.skip.as_deref());
-    let todo: Vec<String> = files.iter().filter(|f| !input.by_path.contains_key(f.as_str())).cloned().collect();
+    let expand_started = web_time::Instant::now();
+    let files = expand_with_options(paths, input.skip.as_deref(), &input.scan_options);
+    progress.metrics.expanded.fetch_add(files.len(), Relaxed);
+    progress.metrics.expand_ns.fetch_add(expand_started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+    let todo: Vec<String> = files.iter().filter(|f| !input.by_path.contains_key(Path::new(f))).cloned().collect();
+    progress.metrics.skipped_paths.fetch_add(files.len().saturating_sub(todo.len()), Relaxed);
     progress.total.store(todo.len(), Relaxed);
-    // probes from a preceding `scan` are reused when the file is unchanged (same size)
+    // probes from a preceding `scan` are reused only when size and native modification stamp match
     let cached: Vec<Option<ProbeInfo>> = todo
         .iter()
         .map(|f| {
             let info = input.cache.remove(f)?;
-            let size = std::fs::metadata(f).map(|m| m.len()).ok();
-            (size.is_none() || size == Some(info.file_size)).then_some(info)
+            let valid = cached_probe_is_current(f, &info);
+            if valid {
+                progress.metrics.cache_hits.fetch_add(1, Relaxed);
+            } else {
+                progress.metrics.cache_misses.fetch_add(1, Relaxed);
+            }
+            valid.then_some(info)
         })
         .collect();
     let missing: Vec<String> = todo.iter().zip(&cached).filter(|(_, c)| c.is_none()).map(|(f, _)| f.clone()).collect();
@@ -480,7 +889,7 @@ pub fn scan_with(mut input: ScanInput, paths: &[String], progress: &ScanProgress
     let mut out = Vec::with_capacity(files.len());
     let mut kept = HashMap::new();
     for f in files {
-        if let Some((_, c)) = input.by_path.get(&f) {
+        if let Some((_, c)) = input.by_path.get(Path::new(&f)) {
             let mut c = c.clone();
             c.name = Path::new(&f).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| f.clone());
             out.push(c);
@@ -492,6 +901,7 @@ pub fn scan_with(mut input: ScanInput, paths: &[String], progress: &ScanProgress
             Some(Ok(info)) => {
                 (c.format, c.kind, c.width, c.height, c.file_size, c.captured) =
                     (info.format.clone(), info.kind, info.width, info.height, info.file_size, info.captured.clone());
+                c.pairing_camera = info.meta.camera.clone();
                 c.preview_only = info.preview_only.clone();
                 if let Some(h) = &info.content_hash {
                     match seen_hash.get(h) {
@@ -511,7 +921,31 @@ pub fn scan_with(mut input: ScanInput, paths: &[String], progress: &ScanProgress
         }
         out.push(c);
     }
+    annotate_pairings(&mut out, input.raw_jpeg_policy);
     ScanOutput { candidates: out, probes: kept }
+}
+
+fn annotate_pairings(candidates: &mut [ImportCandidate], policy: RawJpegImportPolicy) {
+    let inputs: Vec<crate::import_pairs::PairInput> = candidates
+        .iter()
+        .map(|c| crate::import_pairs::PairInput {
+            path: c.path.clone(),
+            kind: c.kind,
+            captured: c.captured.clone(),
+            camera: c.pairing_camera.clone(),
+            width: c.width,
+            height: c.height,
+        })
+        .collect();
+    for pair in crate::import_pairs::classify(&inputs) {
+        let raw_path = inputs[pair.raw].path.clone();
+        let jpeg_path = inputs[pair.jpeg].path.clone();
+        candidates[pair.raw].pairing = Some(RawJpegPair { with: jpeg_path.clone(), kind: RawJpegPairKind::Raw, relation: pair.relation.into() });
+        candidates[pair.jpeg].pairing = Some(RawJpegPair { with: raw_path, kind: RawJpegPairKind::Jpeg, relation: pair.relation.into() });
+        if policy == RawJpegImportPolicy::RawOnly {
+            candidates[pair.jpeg].policy_excluded = Some("rawOnly".into());
+        }
+    }
 }
 
 /// Import files/folders. See the module docs.
@@ -556,6 +990,8 @@ pub struct ImportJob {
     /// Files found so far (folders expanded) and handled so far, for progress.
     pub total: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub done: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Fixed-size diagnostics shared by preparation workers and their caller.
+    pub metrics: std::sync::Arc<ImportMetrics>,
 }
 
 /// The outcome of [`ImportJob::prepare`] for one batch, in file order.
@@ -610,6 +1046,50 @@ impl Prepared {
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
+
+    /// Recheck Add-only entries against the owner catalog immediately before commit.
+    /// Preparation may have run while another import added the same path or content.
+    pub fn revalidate_add(&mut self, s: &Session) {
+        let mut paths = HashMap::new();
+        let mut hashes = HashMap::new();
+        for photo in s.catalog.photos() {
+            if let Source::File { path } = &photo.source {
+                paths.insert(normalize_import_path(path), photo.id);
+            }
+            if let Some(hash) = &photo.content_hash {
+                hashes.insert(hash.clone(), photo.id);
+            }
+        }
+        let mut items = Vec::with_capacity(self.items.len());
+        for item in std::mem::take(&mut self.items) {
+            let PreparedItem::Ready(ready) = item else {
+                items.push(item);
+                continue;
+            };
+            let ReadyFile { path, stored, info, sidecar, placed } = *ready;
+            let existing_path = paths.get(&normalize_import_path(&stored)).copied().or_else(|| paths.get(&normalize_import_path(&path)).copied());
+            let existing_hash = info.content_hash.as_ref().and_then(|hash| hashes.get(hash).copied());
+            if let Some(existing) = existing_path.or(existing_hash) {
+                if let Some(placed) = &placed {
+                    crate::import_move::rollback(placed);
+                }
+                items.push(PreparedItem::Duplicate {
+                    path,
+                    existing: Some(existing),
+                    reason: if existing_path.is_some() { "path" } else { "content" },
+                    hash: info.content_hash,
+                });
+            } else {
+                items.push(PreparedItem::Ready(Box::new(ReadyFile { path, stored, info, sidecar, placed })));
+            }
+        }
+        self.items = items;
+    }
+}
+
+fn normalize_import_path(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    if cfg!(windows) { path.to_lowercase() } else { path }
 }
 
 impl ImportJob {
@@ -638,6 +1118,10 @@ impl ImportJob {
         let mut by_path = HashMap::new();
         let mut by_hash = HashMap::new();
         for p in s.catalog.photos() {
+            // a trashed photo is replaced by a fresh import, so it doesn't count as a duplicate
+            if p.deleted && opts.on_deleted == OnDeleted::Fresh {
+                continue;
+            }
             if let Source::File { path } = &p.source {
                 by_path.insert(path.clone(), (p.id, p.local));
             }
@@ -660,6 +1144,7 @@ impl ImportJob {
             now: (s.clock)(),
             total: Default::default(),
             done: Default::default(),
+            metrics: Default::default(),
         })
     }
 
@@ -674,8 +1159,11 @@ impl ImportJob {
     /// Expand `paths` (folders recursively, the library's own folder skipped) into the files an
     /// import would handle; counted in [`ImportJob::total`].
     pub fn expand(&self, paths: &[String]) -> Vec<String> {
-        let files = expand(paths, self.lib_dir.as_deref());
+        let started = web_time::Instant::now();
+        let files = expand_with_options(paths, self.lib_dir.as_deref(), &self.opts.scan);
         self.total.fetch_add(files.len(), std::sync::atomic::Ordering::Relaxed);
+        self.metrics.expanded.fetch_add(files.len(), std::sync::atomic::Ordering::Relaxed);
+        self.metrics.expand_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, std::sync::atomic::Ordering::Relaxed);
         files
     }
 
@@ -694,7 +1182,6 @@ impl ImportJob {
         for f in files {
             match self.by_path.get(f.as_str()).copied() {
                 Some((id, true)) if !opts.local => {
-                    // a file that was only browsed (Local) joins the library when it is imported for real
                     self.by_path.insert(f, (id, false));
                     out.items.push(PreparedItem::Promote(id));
                     self.done.fetch_add(1, Relaxed);
@@ -707,57 +1194,87 @@ impl ImportJob {
             }
         }
 
-        // files a preceding scan already probed are not read again (a network share is slow to read)
-        let cached: Vec<Option<ProbeInfo>> = todo.iter().map(|f| self.cache.remove(f)).collect();
+        // Files a preceding scan already probed are not read again; native stamps reject stale
+        // entries before they can participate in deduplication or copying.
+        // Keep a stale review entry as a failure instead of silently re-probing it. The user
+        // reviewed bytes from that probe; importing replacement bytes in same operation would
+        // make review & import disagree. A later import, with no stale cache entry, probes anew.
+        let cached: Vec<Option<Result<ProbeInfo, String>>> = todo
+            .iter()
+            .map(|f| {
+                let info = self.cache.remove(f)?;
+                if cached_probe_is_current(f, &info) {
+                    self.metrics.cache_hits.fetch_add(1, Relaxed);
+                    Some(Ok(info))
+                } else {
+                    self.metrics.cache_misses.fetch_add(1, Relaxed);
+                    Some(Err(format!("{f}: file changed meanwhile")))
+                }
+            })
+            .collect();
         let missing: Vec<String> = todo.iter().zip(&cached).filter(|(_, c)| c.is_none()).map(|(f, _)| f.clone()).collect();
-        let progress = ScanProgress::default();
-        let mut fresh = probe_all(self.probe.as_ref(), &missing, &progress).into_iter();
+        let progress = ScanProgress::with_metrics(self.metrics.clone());
+        let mut fresh = probe_all_with_cancel(self.probe.as_ref(), &missing, &progress, cancel).into_iter();
         let probed: Vec<Result<ProbeInfo, String>> =
-            cached.into_iter().map(|c| c.map(Ok).unwrap_or_else(|| fresh.next().unwrap_or_else(|| Err("not probed".into())))).collect();
+            cached.into_iter().map(|c| c.unwrap_or_else(|| fresh.next().unwrap_or_else(|| Err("not probed".into())))).collect();
         crate::memory::release();
-        for (path, info) in todo.into_iter().zip(probed) {
+
+        // Sidecars are prefetched in bounded workers, indexed by source order. This keeps metadata
+        // and capture-time decisions deterministic while transfer workers run independently.
+        let mut sidecar_hashes: std::collections::HashSet<String> = self.by_hash.keys().cloned().collect();
+        let sidecar_eligible: Vec<bool> = probed
+            .iter()
+            .map(|r| match r {
+                Ok(_) if opts.local => true,
+                Ok(info) => info.content_hash.as_ref().is_none_or(|h| sidecar_hashes.insert(h.clone())),
+                Err(_) => false,
+            })
+            .collect();
+        let sidecars = read_sidecars(&todo, &probed, &sidecar_eligible, self.naming, cancel, &self.metrics);
+
+        // Plan metadata and deduplication in source order. Transfer jobs run in bounded workers;
+        // family barriers keep suffix allocation deterministic for same-named files.
+        let mut plan = Plan::default();
+        for ((path, info), sidecar) in todo.into_iter().zip(probed).zip(sidecars) {
             if cancel.load(Relaxed) {
+                self.metrics.cancelled.store(true, Relaxed);
                 break;
             }
-            self.done.fetch_add(1, Relaxed);
             let mut info = match info {
                 Ok(i) => i,
                 Err(e) => {
                     log::warn!("import {path}: {e}");
-                    out.items.push(PreparedItem::Failed(path, e));
+                    self.done.fetch_add(1, Relaxed);
+                    plan.slots.push(Slot::Item(PreparedItem::Failed(path, e)));
                     continue;
                 }
             };
+            if !opts.local
+                && let Some(h) = &info.content_hash
+                && plan.transfers.iter().any(|t| t.info.content_hash.as_ref() == Some(h))
+            {
+                self.run_plan(&mut plan, &mut out, cancel);
+                if cancel.load(Relaxed) {
+                    self.metrics.cancelled.store(true, Relaxed);
+                    break;
+                }
+            }
             if let Some(h) = &info.content_hash
                 && !opts.local
                 && let Some(existing) = self.by_hash.get(h)
             {
-                out.items.push(PreparedItem::Duplicate { path, existing: *existing, reason: "content", hash: Some(h.clone()) });
+                self.done.fetch_add(1, Relaxed);
+                plan.slots.push(Slot::Item(PreparedItem::Duplicate { path, existing: *existing, reason: "content", hash: Some(h.clone()) }));
                 continue;
             }
-            // the XMP sidecar (or a raw's embedded XMP), read before copying: its capture time files
-            // and names the copy when the file itself has none
-            let raw = info.kind == MediaKind::Raw;
-            let packet = crate::sidecar::find_sidecar(&path, self.naming)
-                .and_then(|f| std::fs::read_to_string(f).ok())
-                .or_else(|| info.xmp.clone().filter(|_| raw));
-            let sidecar = packet.and_then(|x| match crate::sidecar::parse_sidecar(&x, raw) {
-                Ok(sc) => Some(sc),
-                Err(e) => {
-                    log::warn!("import {path}: XMP: {e}");
-                    None
-                }
-            });
             if info.captured.is_none() {
                 info.captured = sidecar.as_ref().and_then(|sc| sc.captured.clone());
             }
-            let mut placed = None;
             let stored = match (mode, &self.copy_root) {
                 (ImportMode::Copy | ImportMode::Move, Some(root))
                     if !crate::import_move::inside(Path::new(&path), root)
                         && !self.lib_dir.as_ref().is_some_and(|l| crate::import_move::inside(Path::new(&path), l)) =>
                 {
-                    // the templates see the photo as it will be catalogued (undated: the import time)
                     let own = Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                     let mut q = Photo::new(PhotoId(0), Source::File { path: path.clone() }, &own, &info.format, 0, 0, &self.now);
                     q.captured = info.captured.clone();
@@ -768,37 +1285,33 @@ impl ImportJob {
                         n
                     });
                     let folders = opts.organize.folders(&q);
-                    if mode == ImportMode::Move && !crate::import_move::is_symlink(Path::new(&path)) {
-                        let dir = folders.iter().fold(root.to_path_buf(), |d, f| d.join(f));
-                        let name = name.unwrap_or(own);
-                        match crate::import_move::place(Path::new(&path), &dir, &name) {
-                            Ok(pl) => {
-                                let dst = pl.dst.to_string_lossy().to_string();
-                                placed = Some(pl);
-                                dst
-                            }
-                            Err(e) => {
-                                out.items.push(PreparedItem::Failed(path, e));
-                                continue;
-                            }
+                    let dir = folders.iter().fold(root.to_path_buf(), |d, f| d.join(f));
+                    let as_named = name.as_deref().unwrap_or(if own.is_empty() { "photo" } else { own.as_str() });
+                    let family = (dir.to_string_lossy().to_lowercase(), name_family(as_named));
+                    if plan.transfers.iter().any(|t| t.family == family) {
+                        self.run_plan(&mut plan, &mut out, cancel);
+                        if cancel.load(Relaxed) {
+                            self.metrics.cancelled.store(true, Relaxed);
+                            break;
                         }
+                    }
+                    let how = if mode == ImportMode::Move && !crate::import_move::is_symlink(Path::new(&path)) {
+                        How::Place { name: name.unwrap_or(own) }
                     } else {
                         if mode == ImportMode::Move {
                             let reason = "a symbolic link: the file it points to was copied, the link and its target stay";
-                            out.items.push(PreparedItem::Kept(Kept { path: path.clone(), reason: reason.into() }));
+                            plan.slots.push(Slot::Item(PreparedItem::Kept(Kept { path: path.clone(), reason: reason.into() })));
                         }
-                        match copy_into(root, &path, &folders, name.as_deref(), info.content_hash.as_deref()) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                out.items.push(PreparedItem::Failed(path, e));
-                                continue;
-                            }
-                        }
-                    }
+                        How::Copy { name }
+                    };
+                    let dng = opts.convert_dng && mode == ImportMode::Copy && info.kind == MediaKind::Raw && !info.format.eq_ignore_ascii_case("DNG");
+                    plan.slots.push(Slot::Transfer);
+                    plan.transfers.push(Transfer { path, info, sidecar, dir, how, dng, family });
+                    continue;
                 }
                 (ImportMode::Move, _) => {
                     let reason = "already inside the destination or the library: added where it is";
-                    out.items.push(PreparedItem::Kept(Kept { path: path.clone(), reason: reason.into() }));
+                    plan.slots.push(Slot::Item(PreparedItem::Kept(Kept { path: path.clone(), reason: reason.into() })));
                     path.clone()
                 }
                 _ => path.clone(),
@@ -806,27 +1319,184 @@ impl ImportJob {
             if let Some(h) = &info.content_hash {
                 self.by_hash.insert(h.clone(), None);
             }
-            // Copy as DNG: the copied raw becomes a DNG (the copy is ours to replace)
-            let mut stored = stored;
-            if opts.convert_dng
-                && mode == ImportMode::Copy
-                && stored != path
-                && info.kind == MediaKind::Raw
-                && !info.format.eq_ignore_ascii_case("DNG")
-            {
-                match crate::cmd::convert::write_dng_with(self.file_bytes.as_ref(), &stored, String::new()) {
-                    Ok(dng) => {
-                        let _ = std::fs::remove_file(&stored);
-                        stored = dng;
-                        info.format = "DNG".into();
-                    }
-                    Err(e) => log::warn!("import {path}: copy as DNG: {e}"),
-                }
-            }
-            out.items.push(PreparedItem::Ready(Box::new(ReadyFile { path, stored, info, sidecar, placed })));
+            self.done.fetch_add(1, Relaxed);
+            plan.slots.push(Slot::Item(PreparedItem::Ready(Box::new(ReadyFile { path, stored, info, sidecar, placed: None }))));
         }
+        self.run_plan(&mut plan, &mut out, cancel);
         out
     }
+
+    /// Run planned transfers in bounded workers, restoring results to source order.
+    fn run_plan(&mut self, plan: &mut Plan, out: &mut Prepared, cancel: &std::sync::atomic::AtomicBool) {
+        let mut done = run_transfers(std::mem::take(&mut plan.transfers), self.file_bytes.as_ref(), cancel, &self.done, &self.metrics).into_iter();
+        for slot in std::mem::take(&mut plan.slots) {
+            let item = match slot {
+                Slot::Item(it) => it,
+                Slot::Transfer => match done.next().flatten() {
+                    Some(it) => it,
+                    None => continue,
+                },
+            };
+            if let PreparedItem::Ready(r) = &item
+                && let Some(h) = &r.info.content_hash
+            {
+                self.by_hash.insert(h.clone(), None);
+            }
+            out.items.push(item);
+        }
+    }
+}
+
+/// A batch's items in file order while its transfers are pending.
+#[derive(Default)]
+struct Plan {
+    slots: Vec<Slot>,
+    transfers: Vec<Transfer>,
+}
+
+enum Slot {
+    Item(PreparedItem),
+    Transfer,
+}
+
+struct Transfer {
+    path: String,
+    info: ProbeInfo,
+    sidecar: Option<crate::sidecar::SidecarData>,
+    dir: PathBuf,
+    how: How,
+    dng: bool,
+    family: (String, String),
+}
+
+enum How {
+    Copy { name: Option<String> },
+    Place { name: String },
+}
+
+fn name_family(name: &str) -> String {
+    let mut stem = match name.rsplit_once('.') {
+        Some((s, _)) if !s.is_empty() => s,
+        _ => name,
+    };
+    while let Some((head, tail)) = stem.rsplit_once('-')
+        && !head.is_empty()
+        && !tail.is_empty()
+        && tail.bytes().all(|b| b.is_ascii_digit())
+    {
+        stem = head;
+    }
+    stem.to_lowercase()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn workers(jobs: usize) -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, MAX_IMPORT_PROBE_WORKERS).min(jobs.max(1))
+}
+
+pub fn batch_size() -> usize {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        workers(usize::MAX).saturating_mul(2).clamp(8, 16)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        8
+    }
+}
+
+fn run_transfers(
+    transfers: Vec<Transfer>,
+    file_bytes: Option<&crate::merge::ByteReader>,
+    cancel: &std::sync::atomic::AtomicBool,
+    done: &std::sync::atomic::AtomicUsize,
+    metrics: &ImportMetrics,
+) -> Vec<Option<PreparedItem>> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let one = |t: Transfer| {
+        if cancel.load(Relaxed) {
+            return None;
+        }
+        let path = t.path.clone();
+        let started = web_time::Instant::now();
+        let item = crate::guard::catch("import", || run_transfer(t, file_bytes)).unwrap_or_else(|e| PreparedItem::Failed(path, e));
+        metrics.transfers.fetch_add(1, Relaxed);
+        if matches!(&item, PreparedItem::Failed(_, _)) {
+            metrics.transfer_failures.fetch_add(1, Relaxed);
+        }
+        metrics.transfer_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+        done.fetch_add(1, Relaxed);
+        Some(item)
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let n = workers(transfers.len());
+        if n > 1 {
+            let mut results: Vec<Option<PreparedItem>> = std::iter::repeat_with(|| None).take(transfers.len()).collect();
+            let queue = std::sync::Mutex::new(transfers.into_iter().enumerate());
+            let out = std::sync::Mutex::new(&mut results);
+            #[cfg(test)]
+            let fault = crate::import_move::injected_fault();
+            let work = &|| {
+                #[cfg(test)]
+                crate::import_move::inject(fault);
+                loop {
+                    let next = queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner).next();
+                    let Some((i, t)) = next else { break };
+                    let r = one(t);
+                    if let Some(slot) = out.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(i) {
+                        *slot = r;
+                    }
+                }
+            };
+            std::thread::scope(|scope| {
+                let handles: Vec<_> =
+                    (0..n).filter_map(|i| std::thread::Builder::new().name(format!("lc-import-copy-{i}")).spawn_scoped(scope, work).ok()).collect();
+                if handles.is_empty() {
+                    work();
+                }
+                for handle in handles {
+                    if handle.join().is_err() {
+                        log::error!("import: a copy worker stopped unexpectedly");
+                    }
+                }
+            });
+            return results;
+        }
+    }
+    transfers.into_iter().map(one).collect()
+}
+
+fn run_transfer(t: Transfer, file_bytes: Option<&crate::merge::ByteReader>) -> PreparedItem {
+    let Transfer { path, mut info, sidecar, dir, how, dng, .. } = t;
+    let mut placed = None;
+    let mut stored = match how {
+        How::Place { name } => match crate::import_move::place(Path::new(&path), &dir, &name) {
+            Ok(pl) => {
+                let dst = pl.dst.to_string_lossy().to_string();
+                placed = Some(pl);
+                dst
+            }
+            Err(e) => return PreparedItem::Failed(path, e),
+        },
+        How::Copy { name } => match copy_into(&dir, &path, &[], name.as_deref(), info.content_hash.as_deref()) {
+            Ok(p) => p,
+            Err(e) => return PreparedItem::Failed(path, e),
+        },
+    };
+    if dng {
+        let weight = usize::try_from(info.file_size).unwrap_or(usize::MAX).saturating_mul(6);
+        let _permit = crate::memory::work_gate().acquire(weight);
+        match crate::cmd::convert::write_dng_with(file_bytes, &stored, String::new()) {
+            Ok(dng) => {
+                let _ = std::fs::remove_file(&stored);
+                stored = dng;
+                info.format = "DNG".into();
+            }
+            Err(e) => log::warn!("import {path}: copy as DNG: {e}"),
+        }
+    }
+    PreparedItem::Ready(Box::new(ReadyFile { path, stored, info, sidecar, placed }))
 }
 
 /// The catalog half of an import: add the photos [`ImportJob::prepare`] readied (one undoable op;
@@ -840,6 +1510,20 @@ pub fn commit_prepared(s: &mut Session, opts: &ImportOptions, now: &str, prepare
     let mut placed: Vec<crate::import_move::Placed> = Vec::new();
     // photos added by this batch, by content (a duplicate of a file earlier in the import names it)
     let mut new_hash: HashMap<String, PhotoId> = HashMap::new();
+    // Fresh: trashed photos a new import replaces (by content or by file), each removed once
+    let (mut trash_hash, mut trash_path): (HashMap<String, PhotoId>, HashMap<String, PhotoId>) = Default::default();
+    if opts.on_deleted == OnDeleted::Fresh {
+        for p in s.catalog.photos().filter(|p| p.deleted) {
+            if let Some(h) = &p.content_hash {
+                trash_hash.insert(h.clone(), p.id);
+            }
+            if let Source::File { path } = &p.source {
+                trash_path.insert(path.clone(), p.id);
+            }
+        }
+    }
+    let mut purge: Vec<PhotoId> = Vec::new();
+    let mut purged: std::collections::HashSet<PhotoId> = Default::default();
     for it in prepared.items {
         match it {
             PreparedItem::Promote(id) => {
@@ -853,7 +1537,16 @@ pub fn commit_prepared(s: &mut Session, opts: &ImportOptions, now: &str, prepare
                     let h = hash?;
                     new_hash.get(&h).copied().or_else(|| s.catalog.photos().find(|p| p.content_hash.as_deref() == Some(h.as_str())).map(|p| p.id))
                 });
-                report.duplicates.push(Duplicate { path, existing: existing.map(|i| i.0), reason });
+                let trashed = existing.filter(|id| s.catalog.photo(*id).is_some_and(|p| p.deleted));
+                match trashed {
+                    Some(id) if opts.on_deleted == OnDeleted::Restore => {
+                        if !report.restored.contains(&id.0) {
+                            ops.push(Op::SetDeleted { id, deleted: false });
+                            report.restored.push(id.0);
+                        }
+                    }
+                    _ => report.duplicates.push(Duplicate { path, existing: existing.map(|i| i.0), reason, existing_deleted: trashed.is_some() }),
+                }
             }
             PreparedItem::Failed(path, e) => report.failed.push((path, e)),
             PreparedItem::Kept(k) => report.kept.push(k),
@@ -863,6 +1556,11 @@ pub fn commit_prepared(s: &mut Session, opts: &ImportOptions, now: &str, prepare
                 let id = s.catalog.alloc_photo_id();
                 if let Some(h) = &info.content_hash {
                     new_hash.insert(h.clone(), id);
+                }
+                for old in info.content_hash.as_ref().and_then(|h| trash_hash.get(h)).into_iter().chain(trash_path.get(&stored)) {
+                    if purged.insert(*old) {
+                        purge.push(*old);
+                    }
                 }
                 let sidecar = sidecar.map(|sc| sc.resolve_label(&s.catalog)).filter(|sc| *sc != crate::sidecar::SidecarData::default());
                 // a copy is catalogued under its new name
@@ -907,9 +1605,18 @@ pub fn commit_prepared(s: &mut Session, opts: &ImportOptions, now: &str, prepare
             }
         }
     }
+    // (built against the catalog as it is: one op list for all of them, ahead of the additions)
+    if !purge.is_empty() {
+        ops.insert(0, s.catalog.delete_photos_permanently_ops(&purge));
+    }
     let log0 = s.pending_log.len();
+    let (verb, n) = if report.imported.is_empty() && !report.restored.is_empty() {
+        ("Restore", report.restored.len())
+    } else {
+        ("Add", report.imported.len().max(1))
+    };
     if !ops.is_empty()
-        && let Err(e) = s.commit(&format!("Add {} Photo{}", ops.len(), if ops.len() == 1 { "" } else { "s" }), Op::Batch { ops })
+        && let Err(e) = s.commit(&format!("{verb} {n} Photo{}", if n == 1 { "" } else { "s" }), Op::Batch { ops })
     {
         // nothing was catalogued: take the moves back (their sources were never touched)
         placed.iter().for_each(crate::import_move::rollback);
@@ -993,6 +1700,9 @@ impl Session {
         let source = self.media.origin_ref(&p.source, level.max_edge());
         let key = lightcraft_preview::Hasher128::new().str(&c.path).u64(c.file_size).u64(edge as u64).finish().0 as u64;
         let small = crate::media::RenderJob {
+            request_id: 0,
+            cache_generation: self.media.rendered.generation(),
+            source_key: None,
             photo: id,
             level,
             source,
@@ -1009,12 +1719,166 @@ impl Session {
             (Some(l), MediaKind::Raw) => Some((c.path.clone(), l.clone(), edge)),
             _ => None,
         };
-        Some(crate::media::QuickJob { photo: id, key, cached: Vec::new(), embedded, small: Some(Box::new(small)) })
+        Some(crate::media::QuickJob { request_id: 0, photo: id, key, cached: Vec::new(), embedded, small: Some(Box::new(small)) })
     }
 
     /// Use the system clock for import/edit times (native hosts).
     pub fn with_system_clock(mut self) -> Self {
         self.clock = Box::new(system_clock);
         self
+    }
+}
+
+#[cfg(test)]
+mod prepared_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn revalidate_add_only_converts_matching_ready_item() {
+        let mut s = Session::new();
+        let existing_path = std::env::temp_dir().join("lightcraft-revalidate-existing.jpg");
+        let other_path = std::env::temp_dir().join("lightcraft-revalidate-other.jpg");
+        let existing = Photo::new(PhotoId(1), Source::File { path: existing_path.to_string_lossy().into() }, "existing.jpg", "JPG", 1, 1, "now");
+        s.commit("existing", Op::AddPhoto { photo: Box::new(existing) }).unwrap();
+        let ready = |path: &Path| ReadyFile {
+            path: path.to_string_lossy().into(),
+            stored: path.to_string_lossy().into(),
+            info: ProbeInfo { format: "JPG".into(), ..ProbeInfo::default() },
+            sidecar: None,
+            placed: None,
+        };
+        let mut prepared = Prepared {
+            scanned: 2,
+            items: vec![PreparedItem::Ready(Box::new(ready(&existing_path))), PreparedItem::Ready(Box::new(ready(&other_path)))],
+        };
+        prepared.revalidate_add(&s);
+        assert!(matches!(prepared.items.first(), Some(PreparedItem::Duplicate { reason: "path", .. })));
+        assert!(matches!(prepared.items.get(1), Some(PreparedItem::Ready(_))));
+    }
+
+    #[test]
+    fn scan_options_filter_extensions_case_insensitively_before_probe() {
+        let root = std::env::temp_dir().join(format!("lightcraft-import-filter-{}", std::process::id()));
+        let nested = root.join("nested");
+        let _ = std::fs::create_dir_all(&nested);
+        let _ = std::fs::write(root.join("raw.CR3"), b"raw");
+        let _ = std::fs::write(root.join("render.JPG"), b"jpg");
+        let _ = std::fs::write(nested.join("nested.CR3"), b"raw");
+        let options = ImportScanOptions { include_subfolders: false, allowed_extensions: vec![".cr3".into()], excluded_extensions: Vec::new() };
+        let files = expand_with_options(&[root.to_string_lossy().into()], None, &options);
+        assert_eq!(files, vec![root.join("raw.CR3").to_string_lossy().to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_options_keep_explicit_files_even_when_extension_excluded() {
+        let root = std::env::temp_dir().join(format!("lightcraft-import-explicit-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&root);
+        let explicit = root.join("photo.JPG");
+        let _ = std::fs::write(&explicit, b"jpg");
+        let options = ImportScanOptions { include_subfolders: true, allowed_extensions: vec!["cr3".into()], excluded_extensions: vec!["JPG".into()] };
+        let files = expand_with_options(&[explicit.to_string_lossy().into()], None, &options);
+        assert_eq!(files, vec![explicit.to_string_lossy().to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cancelled_scan_does_not_start_probe_workers() {
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let calls_for_probe = calls.clone();
+        let probe: crate::media::FileProbe = std::sync::Arc::new(move |_| {
+            calls_for_probe.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(ProbeInfo { format: "JPEG".into(), file_size: 1, ..Default::default() })
+        });
+        let input = ScanInput {
+            probe: Some(probe),
+            skip: None,
+            by_path: HashMap::new(),
+            by_hash: HashMap::new(),
+            cache: HashMap::new(),
+            raw_jpeg_policy: Default::default(),
+            scan_options: Default::default(),
+        };
+        let progress = ScanProgress::default();
+        progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let out = scan_with(input, &["cancel-a.jpg".into(), "cancel-b.raw".into()], &progress);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(out.candidates.iter().all(|c| c.error.as_deref() == Some("not probed")));
+        assert!(progress.metrics.snapshot().cancelled);
+    }
+
+    #[test]
+    fn scan_keeps_order_and_content_dedup_after_partial_probe_failure() {
+        let probe: crate::media::FileProbe = std::sync::Arc::new(|path| {
+            if path.ends_with("bad.jpg") {
+                return Err("synthetic read failure".into());
+            }
+            let hash = if path.ends_with("same-1.jpg") || path.ends_with("same-2.jpg") { "same" } else { path };
+            Ok(ProbeInfo { format: "JPEG".into(), file_size: 4, content_hash: Some(hash.into()), ..Default::default() })
+        });
+        let input = ScanInput {
+            probe: Some(probe),
+            skip: None,
+            by_path: HashMap::new(),
+            by_hash: HashMap::new(),
+            cache: HashMap::new(),
+            raw_jpeg_policy: Default::default(),
+            scan_options: Default::default(),
+        };
+        let out = scan_with(input, &["same-1.jpg".into(), "bad.jpg".into(), "same-2.jpg".into()], &ScanProgress::default());
+        assert_eq!(out.candidates.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(), ["same-1.jpg", "bad.jpg", "same-2.jpg"]);
+        assert_eq!(out.candidates[1].error.as_deref(), Some("synthetic read failure"));
+        assert_eq!(out.candidates[2].duplicate.as_deref(), Some("content"));
+    }
+
+    #[test]
+    fn cache_stamp_reprobes_same_size_replacement() {
+        let path = std::env::temp_dir().join(format!("lightcraft-import-stamp-{}.jpg", std::process::id()));
+        std::fs::write(&path, b"abc").unwrap();
+        let path_s = path.to_string_lossy().to_string();
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let calls_for_probe = calls.clone();
+        let probe: crate::media::FileProbe = std::sync::Arc::new(move |_| {
+            calls_for_probe.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(ProbeInfo { format: "JPEG".into(), file_size: 3, source_stamp: Some(1), ..Default::default() })
+        });
+        let mut cache = HashMap::new();
+        cache.insert(path_s.clone(), ProbeInfo { format: "JPEG".into(), file_size: 3, source_stamp: Some(0), ..Default::default() });
+        let input = ScanInput {
+            probe: Some(probe),
+            skip: None,
+            by_path: HashMap::new(),
+            by_hash: HashMap::new(),
+            cache,
+            raw_jpeg_policy: Default::default(),
+            scan_options: Default::default(),
+        };
+        let out = scan_with(input, &[path_s], &ScanProgress::default());
+        let _ = std::fs::remove_file(path);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(out.candidates.len(), 1);
+    }
+
+    #[test]
+    fn sidecar_prefetch_preserves_order_and_honors_cancel() {
+        let root = std::env::temp_dir().join(format!("lightcraft-import-sidecars-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let paths: Vec<String> = ["a.jpg", "b.jpg"].iter().map(|name| root.join(name).to_string_lossy().into()).collect();
+        for path in &paths {
+            std::fs::write(Path::new(path).with_extension("xmp"), r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"/>"#).unwrap();
+        }
+        let probes = vec![
+            Ok(ProbeInfo { format: "JPEG".into(), file_size: 1, ..Default::default() }),
+            Ok(ProbeInfo { format: "JPEG".into(), file_size: 2, ..Default::default() }),
+        ];
+        let metrics = ImportMetrics::default();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let sidecars = read_sidecars(&paths, &probes, &[true, true], crate::sidecar::SidecarNaming::Stem, &cancel, &metrics);
+        assert!(sidecars.iter().all(Option::is_some));
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let cancelled = read_sidecars(&paths, &probes, &[true, true], crate::sidecar::SidecarNaming::Stem, &cancel, &metrics);
+        assert!(cancelled.iter().all(Option::is_none));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

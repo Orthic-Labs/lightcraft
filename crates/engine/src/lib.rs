@@ -12,6 +12,7 @@
 
 pub mod availability;
 mod camera_preview;
+pub mod camera_profiles;
 pub mod cmd;
 pub mod crs;
 pub mod crs_masks;
@@ -23,7 +24,13 @@ pub mod fonts;
 pub mod guard;
 pub mod import;
 mod import_move;
+pub mod import_pairs;
 pub mod library;
+mod lightroom_archive;
+pub mod lightroom_catalog;
+pub mod lightroom_job;
+mod lightroom_sqlite;
+pub mod logging;
 pub mod media;
 pub mod memory;
 pub mod merge;
@@ -32,9 +39,11 @@ pub mod preset_import;
 pub mod preset_luminar;
 pub mod presets;
 pub mod rename;
+pub mod segment;
 pub mod sidecar;
 pub mod smart;
 mod view;
+pub mod walk;
 
 use std::sync::Arc;
 
@@ -44,7 +53,7 @@ use lightcraft_catalog::{Catalog, Filter, Op, PhotoId, Sort};
 use lightcraft_develop::DevelopSettings;
 pub use media::{RenderJob, SourceLevel};
 use serde_json::Value;
-pub use view::{Browse, FilterChip, LibrarySource, Selection, filter_chips};
+pub use view::{Browse, FilterChip, LibrarySource, Selection, SelectionState, filter_chips};
 pub use {lightcraft_catalog as catalog, lightcraft_develop as develop, lightcraft_gpu as gpu, lightcraft_pipeline as pipeline};
 
 #[derive(Debug, thiserror::Error)]
@@ -80,6 +89,27 @@ pub struct UndoEntry {
     pub folder: Option<FolderMove>,
 }
 
+/// The one photo an undo step changes, when it changes exactly one through its edit, rating, flag,
+/// label, metadata or versions (`depth` bounds nested batches).
+fn single_photo(op: &Op, depth: usize) -> Option<PhotoId> {
+    match op {
+        Op::SetDevelop { id, .. }
+        | Op::SetRating { id, .. }
+        | Op::SetFlag { id, .. }
+        | Op::SetLabel { id, .. }
+        | Op::SetMeta { id, .. }
+        | Op::SetVersions { id, .. }
+        | Op::SetHistory { id, .. }
+        | Op::PushHistory { id, .. } => Some(*id),
+        Op::Batch { ops } if depth < 8 => {
+            let mut ids = ops.iter().map(|o| single_photo(o, depth + 1));
+            let first = ids.next()??;
+            ids.all(|id| id == Some(first)).then_some(first)
+        }
+        _ => None,
+    }
+}
+
 /// A folder renamed or moved on disk as part of an undo step.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FolderMove {
@@ -99,6 +129,10 @@ pub struct Interaction {
     pub label: String,
     pub photo: PhotoId,
     pub original: Arc<DevelopSettings>,
+    /// Original settings for every explicit target staged during this interaction.
+    /// Active-photo edits keep `photo`/`original` for existing callers; this list lets
+    /// multi-photo slider gestures commit as one undo step too.
+    pub(crate) originals: Vec<(PhotoId, Arc<DevelopSettings>)>,
 }
 
 /// Source of [`Session::visible_shared`] generations (process-wide, so two sessions never share one).
@@ -132,6 +166,9 @@ pub struct Session {
     pub clipboard: Option<Value>,
     /// The folder on disk the [`LibrarySource::Folder`] view browses.
     pub browse: Option<Browse>,
+    /// The folder the [`LibrarySource::LibraryFolder`] view shows: the library's photos imported
+    /// from it and from the folders inside it.
+    pub library_folder: Option<String>,
     /// Copied metadata (`photo.copyMetadata`): photo.setMeta params.
     pub meta_clipboard: Option<Value>,
     /// The photo that was active before the current one (Paste Settings from Previous).
@@ -153,10 +190,14 @@ pub struct Session {
     depth: u32,
     /// Selected mask (Masking panel), by mask id.
     pub active_mask: Option<u32>,
+    /// AI masks (SAM 3): the model and the last photo prepared for it.
+    pub segmenter: segment::Segmenter,
     /// Selected spot (Remove panel), by index into the active photo's spots.
     pub active_spot: Option<usize>,
     /// The persistent library this session writes to (`None` = in-memory only).
     pub library: Option<library::Library>,
+    /// Identity of current library opening; refreshed only after a successful open.
+    pub(crate) library_identity: Arc<()>,
     /// XMP sidecar preferences (persisted with the library).
     pub xmp: sidecar::XmpPrefs,
     /// Parameters of the last export (`app.export` params, minus targets), persisted in prefs.json.
@@ -230,6 +271,7 @@ impl Session {
             clipboard: None,
             meta_clipboard: None,
             browse: None,
+            library_folder: None,
             previous_active: None,
             copy_groups: lightcraft_develop::SettingsGroup::default_copy(),
             presets: presets::builtin(),
@@ -241,8 +283,10 @@ impl Session {
             clock: Box::new(|| "2026-09-30T12:00:00".to_string()),
             depth: 0,
             active_mask: None,
+            segmenter: segment::Segmenter::default(),
             active_spot: None,
             library: None,
+            library_identity: Arc::new(()),
             xmp: sidecar::XmpPrefs::default(),
             last_export: None,
             export_presets: Vec::new(),
@@ -418,6 +462,7 @@ impl Session {
                 return Err(err);
             }
         };
+        self.show_undone(&e.op);
         self.pending_log.push(e.op);
         self.redo.push(UndoEntry { label: e.label.clone(), op: redo, folder: e.folder.as_ref().map(FolderMove::reversed) });
         Ok(e.label)
@@ -432,9 +477,28 @@ impl Session {
                 return Err(err);
             }
         };
+        self.show_undone(&e.op);
         self.pending_log.push(e.op);
         self.undo.push(UndoEntry { label: e.label.clone(), op: undo, folder: e.folder.as_ref().map(FolderMove::reversed) });
         Ok(e.label)
+    }
+
+    /// After an undo or redo that changed one photo (its edit, rating, flag, label, metadata or
+    /// versions), that photo becomes the active one, as in Lightroom Classic, so the change is on
+    /// screen (issue #293). It joins the selection if it isn't in it; nothing changes for steps
+    /// that touch several photos, albums or files, or for a photo not in the current view.
+    fn show_undone(&mut self, op: &Op) {
+        let Some(id) = single_photo(op, 0) else { return };
+        if self.selection.active == Some(id) || !self.visible().contains(&id) {
+            return;
+        }
+        if !self.selection.contains(id) {
+            self.selection = Selection { ids: vec![id], active: Some(id) };
+        } else {
+            self.selection.active = Some(id);
+        }
+        self.active_mask = None;
+        self.active_spot = None;
     }
 
     /// Apply an undo/redo op, first renaming the step's folder and moving the files its renames
@@ -558,25 +622,46 @@ impl Session {
         }
         let id = self.active().ok_or_else(|| EngineError::Other("no active photo".into()))?;
         let original = self.develop_of(id).unwrap_or_default();
-        self.interaction = Some(Interaction { label: label.into(), photo: id, original });
+        self.interaction = Some(Interaction { label: label.into(), photo: id, original: original.clone(), originals: vec![(id, original)] });
         Ok(())
     }
 
     /// Commit the interaction as one undo step (no-op if nothing changed).
     pub fn end_interaction(&mut self) -> Result<()> {
         let Some(i) = self.interaction.take() else { return Ok(()) };
-        let Some(cur) = self.develop_of(i.photo) else { return Ok(()) };
-        if *cur == *i.original {
+        if i.originals.len() == 1 {
+            let Some((id, original)) = i.originals.into_iter().next() else { return Ok(()) };
+            let Some(cur) = self.develop_of(id) else { return Ok(()) };
+            if *cur == *original {
+                return Ok(());
+            }
+            // Preserve normal active-photo semantics, including Auto Sync, for one-target drags.
+            self.apply_silent(Op::SetDevelop { id, settings: original, label: i.label.clone(), edited: None })?;
+            return self.set_develop(id, (*cur).clone(), &i.label);
+        }
+        let mut ops = Vec::new();
+        for (id, original) in i.originals {
+            let Some(cur) = self.develop_of(id) else { continue };
+            if *cur == *original {
+                continue;
+            }
+            // Restore originals silently, then commit every changed target as one step.
+            self.apply_silent(Op::SetDevelop { id, settings: original, label: i.label.clone(), edited: None })?;
+            if let Some(op) = self.develop_op(id, (*cur).clone(), &i.label) {
+                ops.push(op);
+            }
+        }
+        if ops.is_empty() {
             return Ok(());
         }
-        // Restore the original silently, then commit the final value as one step.
-        self.apply_silent(Op::SetDevelop { id: i.photo, settings: i.original.clone(), label: i.label.clone(), edited: None })?;
-        self.set_develop(i.photo, (*cur).clone(), &i.label)
+        self.commit(&i.label, Op::Batch { ops })
     }
 
     pub fn cancel_interaction(&mut self) -> Result<()> {
         if let Some(i) = self.interaction.take() {
-            self.apply_silent(Op::SetDevelop { id: i.photo, settings: i.original, label: i.label, edited: None })?;
+            for (id, original) in i.originals {
+                self.apply_silent(Op::SetDevelop { id, settings: original, label: i.label.clone(), edited: None })?;
+            }
         }
         Ok(())
     }
@@ -585,7 +670,8 @@ impl Session {
 
     /// Photos shown in the grid/filmstrip for the current source, filter and sort.
     pub fn visible(&mut self) -> &[PhotoId] {
-        let mut key = (self.catalog.revision, format!("{:?}|{:?}|{:?}|{:?}", self.source, self.filter, self.sort, self.browse));
+        let mut key =
+            (self.catalog.revision, format!("{:?}|{:?}|{:?}|{:?}|{:?}", self.source, self.filter, self.sort, self.browse, self.library_folder));
         if self.source == LibrarySource::Missing && self.media.availability.is_background() {
             // the view fills in as the background checks find files gone
             key.1.push_str(&format!("|{}", self.media.availability.generation()));
@@ -600,7 +686,18 @@ impl Session {
                 f.folder = Some(b.path);
                 f.subfolders = b.subfolders;
             }
+            if self.source == LibrarySource::LibraryFolder {
+                // no folder chosen: nothing (`.` names no folder)
+                f.library_folder = Some(self.library_folder.clone().unwrap_or_else(|| ".".into()));
+            }
             let mut visible = self.catalog.query(&f, &self.sort);
+            if visible.is_empty() && self.source == LibrarySource::LibraryFolder && !self.folder_holds_photos() {
+                // the shown folder lost its last photo (deleted, moved, removed): everything, not
+                // an empty grid under the name of a folder that is gone from the sidebar
+                self.source = LibrarySource::All;
+                self.library_folder = None;
+                return self.visible();
+            }
             if matches!(self.source, LibrarySource::Album(_))
                 && self.sort.key == lightcraft_catalog::SortKey::CaptureDate
                 && let LibrarySource::Album(a) = self.source
@@ -637,19 +734,29 @@ impl Session {
         &self.visible
     }
 
+    /// Whether the library still holds a photo imported from the folder a `LibraryFolder` source
+    /// shows.
+    fn folder_holds_photos(&self) -> bool {
+        let f = Filter { library_folder: self.library_folder.clone(), ..Default::default() };
+        self.library_folder.is_some() && !self.catalog.query(&f, &Sort::default()).is_empty()
+    }
+
     /// Photos in the current source (folder, album, …) before the filter bar and search narrow
     /// them; `None` where that is not a separate number (Missing Photos).
     pub fn source_total(&mut self) -> Option<usize> {
         if self.source == LibrarySource::Missing {
             return None;
         }
-        let key = (self.catalog.revision, format!("{:?}|{:?}", self.source, self.browse));
+        let key = (self.catalog.revision, format!("{:?}|{:?}|{:?}", self.source, self.browse, self.library_folder));
         if self.total.as_ref().map(|t| &t.0) != Some(&key) {
             let mut f = self.source.to_filter(&Filter::default(), &self.catalog);
             if self.source == LibrarySource::Folder {
                 let b = self.browse.clone().unwrap_or_default();
                 f.folder = Some(b.path);
                 f.subfolders = b.subfolders;
+            }
+            if self.source == LibrarySource::LibraryFolder {
+                f.library_folder = Some(self.library_folder.clone().unwrap_or_else(|| ".".into()));
             }
             let n = self.catalog.query(&f, &self.sort).len();
             self.total = Some((key, n));
@@ -704,6 +811,8 @@ mod tests_color;
 #[cfg(test)]
 mod tests_export;
 #[cfg(test)]
+mod tests_folders;
+#[cfg(test)]
 mod tests_forget_local;
 #[cfg(test)]
 mod tests_import;
@@ -721,6 +830,8 @@ mod tests_organize;
 mod tests_persist;
 #[cfg(test)]
 mod tests_prefs;
+#[cfg(test)]
+mod tests_segment;
 #[cfg(test)]
 mod tests_settings_files;
 #[cfg(test)]

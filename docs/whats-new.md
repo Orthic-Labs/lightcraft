@@ -2,14 +2,113 @@
 
 ## October 2026
 
+### Library keyboard culling
+- Colour labels tint thumbnail surrounds in Square Grid and the Detail filmstrip, and a translucent footer along the bottom of the photo in Photo Grid. Label confirmations use a matching pale colour.
+- Setting or clearing a colour label shows a brief bottom confirmation, like rating a photo; custom label names appear in the message too.
+- On macOS, ratings `0–5`, labels `6–9` and pick/unflag `P/U` now reach the app even when shown in the native menu (issue #283; adapted from PR #261).
+- `Shift+6–9` labels and advances. `Shift+P` picks and advances in Photo Grid and Square Grid; it opens Presets in other views. With Auto Advance on, Shift still moves only once.
+- Help → Keyboard Shortcuts includes the number-key bindings. See [library shortcuts](library-shortcuts.md).
+
+### Keyboard shortcuts
+- Shortcuts are editable: Help ▸ Keyboard Shortcuts (⌘/) lists every command with a search box; click a shortcut and
+  press the new keys (Esc cancels), × removes it, ↺ restores the original, Reset All undoes every change. A key that
+  belonged to another command moves to the new one. Menus show the new keys; agents use `app.setShortcut`.
+
+### RAW decoding
+- Canon CR2 and Pentax PEF raws get the same starting look fitted to the camera's own JPEG as ARW, NEF, RW2, RAF
+  and CR3, instead of opening flat and desaturated (issue #310). Photos already imported pick it up when re-rendered.
+- Panasonic and Leica raws (RW2, RWL) are now corrected for lens distortion the way the camera corrects its own JPEG
+  (issue #256): the correction the camera records in the file is applied under Lens Corrections ▸ Enable Profile
+  Corrections, on by default for newly imported photos, with the same framing as the camera's JPEG. At 12 mm the
+  12–32 mm kit zoom was off by about 5 % of the image width at the corners before. Files shot with the correction off
+  are unchanged; photos imported before this change get it when imported again.
+- Canon CR3 raws now develop from their sensor data: lossless RAW and C-RAW, checked sample for sample on the EOS
+  M50, R100 and R8. CR3 files the decoder can't read yet still open from their embedded JPEG, as before.
+- Canon CRW, Minolta MRW, Sigma X3F, Kodak KDC, Leaf MOS and Epson ERF files that LightCraft can't decode yet
+  now import as "preview only" with their embedded JPEG instead of failing. A raw whose data is damaged but whose
+  preview is intact does the same.
+- Raw files whose raw data sits in a private block of a TIFF (Phase One / Leaf IIQ, Canon EOS-1D / 1Ds and Kodak DCS
+  TIFFs) are no longer opened as a thumbnail-sized ordinary image. They are recognised as raws LightCraft can't decode
+  yet and import as "preview only", with the reason.
+- Sony ILCE-7M4 downsized lossless ARWs now decode subsampled YCbCr tiles into linear RGB,
+  preserving RAW editing & full-resolution export instead of using embedded JPEG previews.
+- Sony A7R II (and other) raws whose camera JPEG is lens-corrected no longer open grey and too dark (issue #232): the
+  starting look is fitted to the camera JPEG away from edges when the misaligned edges spoil the fit on all pixels.
+
+### Lightroom Classic catalogs
+- File → Import Lightroom Catalog… opens `.lrcat` directly, with originals referenced in place.
+  Ratings, flags, labels, keywords, collections/sets, virtual copies and supported edits migrate;
+  existing LightCraft edits are preserved by default. Source settings/history are archived, unsupported
+  fields are reported, and the original Lightroom database stays read-only. Rendering is approximate.
+
 ### Presets and profiles
 - Import presets from other editors: XMP presets, classic `.lrtemplate` files, "DNG presets" from mobile apps and `.zip`
   bundles of any of these — whole folders at once, grouped by pack. Masks inside presets come along.
 - Luminar looks: `.lmp` files and `.mplumpack` collections import as presets (grouped by collection); the sliders
   with a counterpart here come along, the rest is listed.
 - 23 new built-in presets: Portrait, Landscape, Urban, Food, Seasons, Vintage and B&W toners.
+- Importing XMP presets no longer lists bookkeeping fields (`Cluster`, `SortName`, `SupportsAmount2`, the as-shot
+  white, empty Point Color slots…) as settings that couldn't be carried over.
+- A preset whose lens-profile switch is off no longer turns off the lens corrections built into a DNG (iPhone ProRAW
+  and other files with embedded distortion / vignetting corrections), matching what the preset does elsewhere.
+- A red / green / blue curve in an XMP preset without the master curve is ignored, as Lightroom ignores it.
+- Imported `.cube` LUT profiles appear in the Profile menu and the profile browser, grouped by their folder, and stay
+  favourites across restarts (issue #328).
+
+### Editing
+- The Tint slider works the right way round (issues #188, #321): left adds green, right adds magenta, as its track
+  shows and as in Lightroom, and Tint values in Lightroom XMP sidecars now render as they do there. A custom Tint
+  saved in an earlier version now shifts the other way; set it again (or re-run Auto / the white-balance picker).
+- Crop (issue #295): a Lock toggle keeps the aspect ratio on every handle, Custom takes your own ratio (Apply), and
+  dragging a handle into the image edge stops there instead of pushing the crop out of shape.
+
+### Library and views
+- Trackpads: pinch to zoom around the pointer and scroll with two fingers to pan the photo; panning keeps the photo
+  inside the view. A plain mouse wheel over a zoomed photo pans it too.
+- A Folders section in the sidebar lists the folders your photos were imported from; choose one to see its photos.
+- Select All and multi-selection show every selected photo in the grid and filmstrip, not only the active one
+  (issues #187, #298). Importing files that are in Recently Deleted asks whether to leave them there, restore them
+  (with their edits) or import them as new; the trash view's Photo menu has Empty Recently Deleted.
+- The Import Photos review opens bigger and can be resized; its photo grid fills it (issue #337). Shift-click checks
+  or unchecks a range of photos (issue #338).
+- When a folder holds several file types, the Import Photos review has a toggle per type (`ARW · 120`, `JPG · 120`):
+  import only the raws and leave the JPEGs beside them (issue #344).
+
+### Languages
+- The interface is available in Spanish (issue #371), German and Russian (Edit ▸ Language), alongside English,
+  Chinese (Simplified and Traditional), Japanese and Brazilian Portuguese.
+
+### Editing
+- Type an exact value into any slider (issue #322): click the number next to its name, type (`1.5`, `-20`, `5600`)
+  and press Return; Esc keeps the old value.
+
+### Editing
+- The eye on the Light, Color and Detail section headers now hides their adjustments, as it already did for Effects,
+  Optics, Geometry and Calibration (issue #316).
+
+### Library
+- Choosing a date under By Date or a keyword under Keywords shows those photos from All Photos, as their counts
+  promise, instead of filtering whatever album or folder was open, which often showed nothing (issue #341).
+)
+)
 
 ### Reliability
+- If the desktop app can't open its window (for example when no graphics device can be used), it now says so in a
+  message box that names the log file, instead of quitting without a trace (issue #260).
+- On macOS, single-key shortcuts that appear in the menu bar now work: E, C, H, M, ⇧P, I, K, D, ratings 0–5,
+  labels 6–9, P / U and the rest did nothing, because macOS only passes ⌘ / ⌃ combinations and function keys
+  to the menu bar and the app ignored those keys, assuming the menu bar would handle them. Keys outside the menus
+  (Space, G, X, ⌫) and ⌘ shortcuts were not affected.
+- `--memory` sessions keep their promise to save nothing (issues #164, #169): UI changes made in one no longer
+  land in `ui.json` (where they replaced the saved settings), and the GPU crash sentinel no longer creates the
+  settings folder there. The same goes for the temporary session offered when the library can't be opened.
+- The desktop app keeps a log file: `logs/lightcraft.log` in its settings folder (Linux `~/.config/lightcraft/logs/`),
+  with the logs of the two previous runs beside it, so warnings and crashes of a run started from a desktop menu or the
+  Dock can be attached to a bug report. `LIGHTCRAFT_LOG` works as before; `RUST_LOG` takes env_logger-style
+  directives. See README → Quick start → Logs.
+- Help → Open Log Folder shows that log file in the file manager (Finder, Explorer, or the folder on Linux), so it
+  can be attached to a report without hunting for the settings folder (issue #260).
+- `lightcraft-cli` logs warnings on stderr too (issue #168); `LIGHTCRAFT_LOG` or `RUST_LOG` picks another level.
 - LightCraft no longer crashes at launch on Windows PCs whose Vulkan driver is broken (issue #136, e.g. some Intel UHD
   630 drivers): on Windows the window and GPU rendering use DirectX 12 only and never load the Vulkan driver unless
   asked to. `LIGHTCRAFT_GPU_BACKEND=dx12 | vulkan | metal | off` (or wgpu's `WGPU_BACKEND`, which GPU rendering
@@ -131,6 +230,12 @@
   lost everything at quit; a temporary session shows a banner the whole time and never writes to your library.
 
 ### Editing
+- AI masks with SAM 3 (Object and Describe in the Masking panel): click an object to select it (⌥-click leaves a
+  part out), or type what to select ("sky", "the red car", "car, road"); both combine with other masks, have an
+  Edge setting, and get a sharper zoomed-in pass in the background. The model runs inside LightCraft in pure Rust
+  and never freezes the window. It is optional and not part of LightCraft (Meta's SAM License, about 3.4 GB): the
+  first time you use an AI mask, LightCraft asks before downloading it, shows the progress, can cancel and resume,
+  and checks the file before using it. Masks keep their selection, so they render and export without the model.
 - Auto Sync: edits apply to every selected photo. Auto B&W mix. Automatic versions.
 - Colour-range masks: click the photo to sample. Luminance ranges: range bar, smoothness, luminance map.
 - ⌘-drag to straighten, ⇧G Guided Upright, a grid while transforming.
@@ -147,6 +252,12 @@
   now develop from the raw data instead of the camera's embedded JPEG, so a B&W or other picture style set in the
   camera no longer gets baked in. Photos already imported as "preview only" switch over on Reload. (Files that
   Nikon splits into two differently compressed halves still use the preview for now.)
+- Panasonic and Leica raws (RW2, RWL and the older RAW files, DMC-LX1 to DC-S1R II) develop from the raw data in
+  every format the cameras write. Most bodies opened as preview only before: GH1–GH5, the G, GX, GF, GM, FZ, LX and
+  TZ/ZS series, Leica D-Lux, V-Lux and C-Lux, and the GH6, GH7, G9 II, S5 II and S9 generation. They start from a
+  colour and tone look fitted to the camera's own JPEG, as Nikon and Sony raws do, framed in the aspect ratio set in
+  the camera; mapped-out sensor defects are filled in. `.rwl` and `.raw` files are imported too. Photos already
+  imported as "preview only" switch over on Reload.
 - Sony ARWs from before about 2017 (RX100, RX100 II–V, RX10, NEX, SLT, ILCE-6000, A7 / A7 II / A7R II and their
   siblings) no longer open bright green (issue #148): their as-shot white balance and black level are read from the
   file (Sony stores them only in scrambled maker-note data on these bodies), the few columns of padding at the right

@@ -16,7 +16,8 @@
 //! embedded JPEG for an unedited raw, else a thumbnail-level render — while the real render is
 //! prepared. Grid thumbnails of unedited raws likewise start from the embedded preview.
 
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Weak};
 
 use lightcraft_catalog::{MediaKind, Photo, PhotoId, Source};
 use lightcraft_develop::DevelopSettings;
@@ -25,11 +26,50 @@ use lightcraft_preview::{Hash128, Hasher128, Lru, PreviewCache};
 use lightcraft_raster::{Histogram, Rgb32f, Rgba8};
 use serde::{Deserialize, Serialize};
 
+const SETTINGS_HASH_ENTRIES: usize = 1024;
+
+#[derive(Default)]
+struct SettingsHashes {
+    entries: HashMap<PhotoId, (Weak<DevelopSettings>, u64)>,
+    order: VecDeque<PhotoId>,
+    #[cfg(test)]
+    computations: usize,
+}
+
+impl SettingsHashes {
+    fn get(&mut self, id: PhotoId, settings: &Arc<DevelopSettings>) -> u64 {
+        if let Some((old, hash)) = self.entries.get(&id)
+            && old.as_ptr() == Arc::as_ptr(settings)
+        {
+            return *hash;
+        }
+        let hash = settings.hash64();
+        #[cfg(test)]
+        {
+            self.computations += 1;
+        }
+        if !self.entries.contains_key(&id) {
+            if self.entries.len() >= SETTINGS_HASH_ENTRIES
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.entries.remove(&oldest);
+            }
+            self.order.push_back(id);
+        }
+        self.entries.insert(id, (Arc::downgrade(settings), hash));
+        hash
+    }
+}
+
 /// Bump when the pipeline's output changes, to invalidate cached thumbnails.
-pub const RENDER_CACHE_VERSION: u64 = 9;
+pub const RENDER_CACHE_VERSION: u64 = 15;
 
 /// Thumbnails render at one of these long edges (so window/cell size changes reuse the cache).
 pub const THUMB_SIZES: [usize; 4] = [128, 256, 384, 512];
+
+pub fn thumb_bucket(long_edge: usize) -> usize {
+    THUMB_SIZES.iter().copied().find(|s| *s >= long_edge).unwrap_or(512)
+}
 
 /// Memory budgets.
 const THUMB_SOURCE_BYTES: usize = 384 << 20;
@@ -62,6 +102,20 @@ impl SourceLevel {
             _ => SourceLevel::Full,
         }
     }
+}
+
+/// Pixels along the source's long edge that an output `out_long` pixels long needs: a crop shows
+/// only part of the photo, so its pixels come from a source that many times larger (the source
+/// level is chosen from this, or a tight crop shown at its own pixels would be a stretched preview).
+fn source_edge_needed(p: &Photo, settings: &DevelopSettings, apply_crop: bool, out_long: usize) -> usize {
+    let (w, h) = (f64::from(p.width.max(1)), f64::from(p.height.max(1)));
+    let r = settings.crop.geometry.rect;
+    let shown = if apply_crop { (r.width() * w).max(r.height() * h) } else { w.max(h) };
+    if !shown.is_finite() || shown < 1.0 {
+        return out_long;
+    }
+    let needed = out_long as f64 * w.max(h) / shown;
+    if needed.is_finite() { needed.min(usize::MAX as f64 / 2.0) as usize } else { out_long }
 }
 
 /// Decodes a file into a linear Rec.2020 image no larger than `max_edge` (set by the app).
@@ -145,6 +199,7 @@ impl SourceRef {
 }
 
 pub struct MediaCache {
+    settings_hashes: SettingsHashes,
     /// Decoded thumbnail-level sources (LRU by bytes).
     thumbs: Lru<PhotoId, DecodedSource>,
     /// Decoded preview-level sources with their last use ([`lightcraft_preview::next_tick`]).
@@ -175,6 +230,7 @@ impl Default for MediaCache {
     fn default() -> Self {
         let budget = crate::memory::cache_share(crate::memory::budget());
         MediaCache {
+            settings_hashes: SettingsHashes::default(),
             thumbs: Lru::new(THUMB_SOURCE_BYTES.min(budget)),
             previews: Vec::new(),
             full: None,
@@ -202,13 +258,27 @@ fn source_bytes(img: &Rgb32f) -> usize {
 }
 
 impl MediaCache {
-    /// Keep rendered thumbnails on disk in `dir` as well.
+    /// Keep rendered thumbnails on disk in `dir` as well. The cache this replaces is retired
+    /// (its files stay): render jobs still holding it can't write through it any more, even
+    /// into a directory a later clear emptied (`dir` may be the same one).
     pub fn attach_disk_cache(&mut self, dir: &std::path::Path, disk_bytes: u64) {
+        self.rendered.retire();
         self.rendered = Arc::new(PreviewCache::with_disk(rendered_budget(self.budget), dir, disk_bytes));
+    }
+
+    /// Change the disk budget of the cache in `dir`: in place when that cache is attached (its
+    /// thumbnails are keyed by content, so they and the textures shown from them stay valid,
+    /// and the same cache object keeps its generation), else attach it.
+    pub fn set_disk_cache_bytes(&mut self, dir: &std::path::Path, disk_bytes: u64) {
+        match self.rendered.disk().filter(|d| d.dir() == dir) {
+            Some(d) => d.set_budget(disk_bytes),
+            None => self.attach_disk_cache(dir, disk_bytes),
+        }
     }
 
     /// Forget every decoded source (photo ids changed meaning, e.g. another library was opened).
     pub fn clear_sources(&mut self) {
+        self.settings_hashes = SettingsHashes::default();
         self.thumbs = Lru::new(THUMB_SOURCE_BYTES.min(self.budget));
         self.previews.clear();
         self.full = None;
@@ -333,6 +403,15 @@ impl MediaCache {
         (self.thumbs.len(), self.thumbs.cost())
     }
 
+    /// Whether the decoded source of `id` at `level` is held.
+    pub fn has_source(&self, id: PhotoId, level: SourceLevel) -> bool {
+        match level {
+            SourceLevel::Thumb => self.thumbs.contains(&id),
+            SourceLevel::Preview => self.previews.iter().any(|e| e.0 == id),
+            SourceLevel::Full => self.full.as_ref().is_some_and(|e| e.0 == id),
+        }
+    }
+
     /// Decoded sources held: (thumbnail level, preview level, full size).
     pub fn usage(&self) -> (crate::memory::Usage, crate::memory::Usage, crate::memory::Usage) {
         use crate::memory::Usage;
@@ -391,6 +470,11 @@ impl MediaCache {
 /// Everything needed to render one photo, detached from the session.
 #[derive(Clone)]
 pub struct RenderJob {
+    /// Assigned by a frontend to distinguish late completions, even for an identical render key.
+    pub request_id: u64,
+    pub cache_generation: u64,
+    /// Content identity for validating a decoded source returned after a reload.
+    pub source_key: Option<Hash128>,
     pub photo: PhotoId,
     pub level: SourceLevel,
     pub source: SourceRef,
@@ -412,6 +496,8 @@ pub struct RenderJob {
 }
 
 pub struct RenderResult {
+    pub request_id: u64,
+    pub source_key: Option<Hash128>,
     pub photo: PhotoId,
     pub level: SourceLevel,
     pub key: u64,
@@ -469,11 +555,13 @@ impl RenderJob {
 
     pub fn run(self) -> RenderResult {
         if let Some((cache, key)) = &self.cache
-            && let Some(img) = cache.get(*key)
+            && let Some(img) = cache.get_at(self.cache_generation, *key)
         {
             let image = Arc::unwrap_or_clone(img);
             let histogram = Histogram::of_srgb8(&image);
             return RenderResult {
+                request_id: self.request_id,
+                source_key: self.source_key,
                 photo: self.photo,
                 level: self.level,
                 key: self.key,
@@ -492,14 +580,16 @@ impl RenderJob {
                 let gpu = self.cache.is_none();
                 let rendered = develop(src, &info, &self.settings, &self.request, self.stages.as_deref(), gpu);
                 if let Some((cache, key)) = &self.cache {
-                    cache.put(*key, Arc::new(rendered.image.clone()));
+                    cache.put_at(self.cache_generation, *key, Arc::new(rendered.image.clone()));
                 }
                 if let Some((cache, key)) = &self.view_cache
                     && self.request.quality == Quality::Full
                 {
-                    cache.put_deferred(*key, Arc::new(rendered.image.clone()));
+                    cache.put_deferred_at(self.cache_generation, *key, Arc::new(rendered.image.clone()));
                 }
                 RenderResult {
+                    request_id: self.request_id,
+                    source_key: self.source_key,
                     photo: self.photo,
                     level: self.level,
                     key: self.key,
@@ -508,7 +598,16 @@ impl RenderJob {
                     quick: None,
                 }
             }
-            Err(e) => RenderResult { photo: self.photo, level: self.level, key: self.key, rendered: Err(e), loaded: None, quick: None },
+            Err(e) => RenderResult {
+                request_id: self.request_id,
+                source_key: self.source_key,
+                photo: self.photo,
+                level: self.level,
+                key: self.key,
+                rendered: Err(e),
+                loaded: None,
+                quick: None,
+            },
         }
     }
 }
@@ -548,6 +647,7 @@ pub enum QuickSource {
 /// renders, the embedded preview of an unedited raw, a thumbnail-level render.
 #[derive(Clone)]
 pub struct QuickJob {
+    pub request_id: u64,
     pub photo: PhotoId,
     pub key: u64,
     /// Cached renders to try first, in order: (cache, key).
@@ -561,7 +661,17 @@ pub struct QuickJob {
 impl QuickJob {
     pub fn run(self) -> RenderResult {
         let (photo, key) = (self.photo, self.key);
-        let done = |rendered: Result<Rendered, String>, quick| RenderResult { photo, level: SourceLevel::Thumb, key, rendered, loaded: None, quick };
+        let request_id = self.request_id;
+        let done = |rendered: Result<Rendered, String>, quick| RenderResult {
+            request_id,
+            source_key: None,
+            photo,
+            level: SourceLevel::Thumb,
+            key,
+            rendered,
+            loaded: None,
+            quick,
+        };
         let rendered = |image: Rgba8| {
             let histogram = Histogram::of_srgb8(&image);
             Ok(Rendered { image, histogram, deep: None })
@@ -578,7 +688,7 @@ impl QuickJob {
         }
         if let Some(job) = self.small {
             let r = job.run();
-            return RenderResult { key, quick: Some(QuickSource::Small), ..r };
+            return RenderResult { request_id, key, quick: Some(QuickSource::Small), ..r };
         }
         done(Err("no quick preview".into()), None)
     }
@@ -617,7 +727,7 @@ impl crate::Session {
     /// A grid/filmstrip thumbnail job: the long edge is rounded up to one of [`THUMB_SIZES`]
     /// (≥ `long_edge`) and the result comes from / goes to the thumbnail cache (memory + disk).
     pub fn thumb_job(&mut self, id: PhotoId, long_edge: usize) -> Option<RenderJob> {
-        let b = THUMB_SIZES.iter().copied().find(|s| *s >= long_edge).unwrap_or(THUMB_SIZES[THUMB_SIZES.len() - 1]);
+        let b = thumb_bucket(long_edge);
         self.build_job(id, b, b, false, true, Some(b))
     }
 
@@ -631,15 +741,23 @@ impl crate::Session {
         thumb_bucket: Option<usize>,
     ) -> Option<RenderJob> {
         let p = self.catalog.photo(id)?.clone();
-        let level = SourceLevel::for_size(max_w.max(max_h));
-        let source = self.media.source_ref(&p, level);
         let settings = if before { Arc::new(self.before_settings(&p)) } else { p.develop.clone() };
+        let level = SourceLevel::for_size(if thumb_bucket.is_some() {
+            max_w.max(max_h) // (grid thumbnails of tight crops stay cheap)
+        } else {
+            source_edge_needed(&p, &settings, apply_crop, max_w.max(max_h))
+        });
+        let source = self.media.source_ref(&p, level);
         let request = RenderRequest { apply_crop, ..RenderRequest::fit(max_w, max_h) };
         // the photo id is part of the key: two photos with the same settings and size must not
         // share a result (a view slot showing photo A would otherwise look current for photo B)
         // …and so is the file's content: a file changed on disk (Reload) renders afresh
-        let content = Hasher128::new().str(&content_key(&p)).finish().0 as u64;
-        let key = settings.hash64()
+        let content_key = content_key(&p);
+        let source_key = Hasher128::new().str(&content_key).finish();
+        let content = source_key.0 as u64;
+        // Temporary "before" settings must not replace the photo's cached develop hash.
+        let settings_hash = if before { settings.hash64() } else { self.media.settings_hashes.get(id, &settings) };
+        let key = settings_hash
             ^ ((max_w as u64) << 40)
             ^ ((max_h as u64) << 20)
             ^ (apply_crop as u64)
@@ -647,10 +765,19 @@ impl crate::Session {
             ^ id.0.wrapping_mul(0x9e37_79b9_7f4a_7c15)
             ^ content.rotate_left(17);
         let cache = thumb_bucket.map(|b| {
-            let k = Hasher128::new().str(&content_key(&p)).u64(settings.hash64()).u64(b as u64).u64(RENDER_CACHE_VERSION).finish();
+            let k = Hasher128::new()
+                .str(&content_key)
+                .u64(settings_hash)
+                .u64(b as u64)
+                .u64(RENDER_CACHE_VERSION)
+                .u64(crate::camera_profiles::cache_key())
+                .finish();
             (self.media.rendered.clone(), k)
         });
         Some(RenderJob {
+            request_id: 0,
+            cache_generation: self.media.rendered.generation(),
+            source_key: Some(source_key),
             photo: id,
             level,
             source,
@@ -676,7 +803,14 @@ impl crate::Session {
 
     /// Cache key of a variant thumbnail ([`Self::variant_job`]).
     pub fn variant_key(p: &Photo, settings: &DevelopSettings, edge: usize) -> Hash128 {
-        Hasher128::new().str(&content_key(p)).str("variant").u64(settings.hash64()).u64(edge as u64).u64(RENDER_CACHE_VERSION).finish()
+        Hasher128::new()
+            .str(&content_key(p))
+            .str("variant")
+            .u64(settings.hash64())
+            .u64(edge as u64)
+            .u64(RENDER_CACHE_VERSION)
+            .u64(crate::camera_profiles::cache_key())
+            .finish()
     }
 
     /// A thumbnail of `id` rendered with `settings` instead of its own (profile and preset
@@ -691,6 +825,9 @@ impl crate::Session {
         let source = self.media.source_ref(&p, level);
         let ck = Self::variant_key(&p, settings, edge);
         Some(RenderJob {
+            request_id: 0,
+            cache_generation: self.media.rendered.generation(),
+            source_key: Some(Hasher128::new().str(&content_key(&p)).finish()),
             photo: id,
             level,
             source,
@@ -733,6 +870,9 @@ impl crate::Session {
         let source = self.media.source_ref(&p, level);
         let ck = Self::variant_key(&p, &settings, edge);
         Some(RenderJob {
+            request_id: 0,
+            cache_generation: self.media.rendered.generation(),
+            source_key: Some(Hasher128::new().str(&content_key(&p)).finish()),
             photo: id,
             level,
             source,
@@ -749,7 +889,14 @@ impl crate::Session {
 
     /// Size-independent cache key of a photo's view render (loupe) for its current settings.
     fn view_key(p: &Photo, apply_crop: bool) -> Hash128 {
-        Hasher128::new().str(&content_key(p)).str("view").u64(p.develop.hash64()).u64(apply_crop as u64).u64(RENDER_CACHE_VERSION).finish()
+        Hasher128::new()
+            .str(&content_key(p))
+            .str("view")
+            .u64(p.develop.hash64())
+            .u64(apply_crop as u64)
+            .u64(RENDER_CACHE_VERSION)
+            .u64(crate::camera_profiles::cache_key())
+            .finish()
     }
 
     /// The loupe's render job: like [`Self::render_job`], and a full-quality result is kept as the
@@ -758,6 +905,69 @@ impl crate::Session {
         let mut job = self.render_job(id, max_w, max_h, false, apply_crop)?;
         let p = self.catalog.photo(id)?;
         job.view_cache = Some((self.media.rendered.clone(), Self::view_key(p, apply_crop)));
+        Some(job)
+    }
+
+    /// A render of one window of the loupe's frame, for a view zoomed past what one whole-frame
+    /// render can hold: the frame is `full_w × full_h` (the size the loupe would draw it at) and
+    /// the result is `window`'s pixels of it, at that scale, from the source level that size needs.
+    /// Nothing is cached here (a window is only worth keeping while it is on screen). `None`: no
+    /// such photo, or the window reads (spots, Auto Mask strokes) more than one render can hold.
+    pub fn region_job(
+        &mut self,
+        id: PhotoId,
+        full_w: usize,
+        full_h: usize,
+        window: lightcraft_pipeline::PixelWindow,
+        apply_crop: bool,
+    ) -> Option<RenderJob> {
+        self.region_job_of(id, full_w, full_h, window, apply_crop, false)
+    }
+
+    /// [`Self::region_job`] of the photo without its edits (its crop kept): the Before side.
+    pub fn region_job_before(
+        &mut self,
+        id: PhotoId,
+        full_w: usize,
+        full_h: usize,
+        window: lightcraft_pipeline::PixelWindow,
+        apply_crop: bool,
+    ) -> Option<RenderJob> {
+        self.region_job_of(id, full_w, full_h, window, apply_crop, true)
+    }
+
+    fn region_job_of(
+        &mut self,
+        id: PhotoId,
+        full_w: usize,
+        full_h: usize,
+        window: lightcraft_pipeline::PixelWindow,
+        apply_crop: bool,
+        before: bool,
+    ) -> Option<RenderJob> {
+        let mut job = self.render_job(id, full_w, full_h, before, apply_crop)?;
+        // what the window's spots and Auto Mask strokes read must fit in one render: else the
+        // caller keeps the whole-frame render (a window alone would come out wrong)
+        let p = self.catalog.photo(id)?;
+        let frame = lightcraft_pipeline::geometry::Frame::with_lens(
+            p.width.max(1) as usize,
+            p.height.max(1) as usize,
+            &job.settings,
+            apply_crop,
+            p.embedded_lens.as_ref(),
+        );
+        let ppl = frame.px_per_long(full_w);
+        lightcraft_pipeline::spots::window_for_reads_checked(&job.settings, &frame, full_w, full_h, ppl, window.clamped(full_w, full_h))?;
+        job.request.window = Some(window);
+        job.key = Hasher128::new()
+            .u64(job.key)
+            .str("window")
+            .u64(window.x as u64)
+            .u64(window.y as u64)
+            .u64(window.w as u64)
+            .u64(window.h as u64)
+            .finish()
+            .0 as u64;
         Some(job)
     }
 
@@ -779,7 +989,7 @@ impl crate::Session {
         let h = Hasher128::new().str(&content_key(&p)).str("quick").u64(p.develop.hash64()).u64(apply_crop as u64).finish();
         let key = h.0 as u64;
         let embedded = self.embedded_of(&p).map(|(path, l)| (path, l, max_edge.clamp(1, SourceLevel::Preview.max_edge())));
-        Some(QuickJob { photo: id, key, cached, embedded, small: apply_crop.then(|| Box::new(small)) })
+        Some(QuickJob { request_id: 0, photo: id, key, cached, embedded, small: apply_crop.then(|| Box::new(small)) })
     }
 
     /// A first grid thumbnail for an unedited raw: the cached render for `job` (the real
@@ -791,6 +1001,7 @@ impl crate::Session {
         let (path, l) = self.embedded_of(&p)?;
         let edge = job.request.max_w.max(job.request.max_h);
         Some(QuickJob {
+            request_id: 0,
             photo: job.photo,
             key: job.key,
             cached: job.cache.clone().into_iter().collect(),
@@ -801,7 +1012,9 @@ impl crate::Session {
 
     /// Accept a finished job's loaded source into the cache.
     pub fn accept(&mut self, r: &RenderResult) {
-        if let Some(src) = &r.loaded {
+        if let Some(src) = &r.loaded
+            && r.source_key.is_none_or(|key| self.catalog.photo(r.photo).is_some_and(|p| Hasher128::new().str(&content_key(p)).finish() == key))
+        {
             self.media.insert_source(r.photo, r.level, src.clone());
         }
     }
@@ -869,6 +1082,10 @@ pub struct ProbeInfo {
     pub format: String,
     pub kind: MediaKind,
     pub file_size: u64,
+    /// Native filesystem modification stamp captured with the probe. Import review caches use
+    /// this with [`file_size`](Self::file_size) to reject a stale probe when a file is replaced;
+    /// native probes use `Some(0)` when a filesystem cannot provide a stamp, disabling reuse.
+    pub source_stamp: Option<u128>,
     pub captured: Option<String>,
     pub meta: lightcraft_catalog::Meta,
     pub as_shot_wb: Option<(f64, f64)>,
@@ -886,6 +1103,101 @@ pub struct ProbeInfo {
 }
 
 pub type FileProbe = Arc<dyn Fn(&str) -> Result<ProbeInfo, String> + Send + Sync>;
+
+#[cfg(test)]
+mod thumbnail_hash_tests {
+    use super::*;
+    use lightcraft_catalog::Op;
+
+    fn session() -> crate::Session {
+        let mut s = crate::Session::new();
+        let p = Photo::new(PhotoId(1), Source::File { path: "hash-fixture.jpg".into() }, "fixture.jpg", "JPEG", 6000, 4000, "2026-01-01");
+        s.catalog.apply(Op::AddPhoto { photo: Box::new(p) }).unwrap();
+        s
+    }
+    #[test]
+    fn hashes_match_uncached_keys_and_are_not_recomputed_for_sizes_metadata_or_before() {
+        let mut s = session();
+        for edge in [256, 384, 512, 256] {
+            let p = s.catalog.photo(PhotoId(1)).unwrap().clone();
+            let b = thumb_bucket(edge);
+            // Independent original formula: never asks the new hash cache for expected values.
+            let settings = p.develop.hash64();
+            let content = Hasher128::new().str(&content_key(&p)).finish().0 as u64;
+            let expected =
+                settings ^ ((b as u64) << 40) ^ ((b as u64) << 20) ^ 1 ^ p.id.0.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ content.rotate_left(17);
+            let disk = Hasher128::new()
+                .str(&content_key(&p))
+                .u64(settings)
+                .u64(b as u64)
+                .u64(RENDER_CACHE_VERSION)
+                .u64(crate::camera_profiles::cache_key())
+                .finish();
+            let job = s.thumb_job(p.id, edge).unwrap();
+            assert_eq!(job.key, expected);
+            assert_eq!(job.cache.unwrap().1, disk);
+        }
+        s.catalog.apply(Op::SetRating { id: PhotoId(1), rating: 4 }).unwrap();
+        s.thumb_job(PhotoId(1), 256).unwrap();
+        s.render_job(PhotoId(1), 256, 256, true, true).unwrap();
+        s.thumb_job(PhotoId(1), 256).unwrap();
+        assert_eq!(s.media.settings_hashes.computations, 1);
+        let mut edit = DevelopSettings::default();
+        edit.light.exposure = 1.0;
+        let undo = s.catalog.apply(Op::SetDevelop { id: PhotoId(1), settings: Arc::new(edit), label: "edit".into(), edited: None }).unwrap();
+        s.thumb_job(PhotoId(1), 256).unwrap();
+        s.thumb_job(PhotoId(1), 384).unwrap();
+        assert_eq!(s.media.settings_hashes.computations, 2);
+        s.catalog.apply(undo).unwrap();
+        s.thumb_job(PhotoId(1), 256).unwrap();
+        assert_eq!(s.media.settings_hashes.computations, 3);
+    }
+    #[test]
+    fn hash_cache_is_bounded_weak_and_shared_settings_remain_independent() {
+        let mut hashes = SettingsHashes::default();
+        let shared = Arc::new(DevelopSettings::default());
+        for id in 1..=SETTINGS_HASH_ENTRIES as u64 * 3 {
+            assert_eq!(hashes.get(PhotoId(id), &shared), shared.hash64());
+        }
+        assert_eq!(hashes.entries.len(), SETTINGS_HASH_ENTRIES);
+        assert_eq!(hashes.order.len(), SETTINGS_HASH_ENTRIES);
+        assert_eq!(Arc::strong_count(&shared), 1);
+        let mut edit = (*shared).clone();
+        edit.light.exposure = 1.0;
+        let edit = Arc::new(edit);
+        let a = PhotoId(10000);
+        let b = PhotoId(10001);
+        let initial = hashes.get(a, &shared);
+        assert_eq!(hashes.get(b, &shared), initial);
+        assert_ne!(hashes.get(a, &edit), initial);
+        assert_eq!(hashes.get(b, &shared), initial);
+        let mut s = session();
+        s.thumb_job(PhotoId(1), 256).unwrap();
+        s.media.clear_sources();
+        assert!(s.media.settings_hashes.entries.is_empty());
+        assert!(s.media.settings_hashes.order.is_empty());
+    }
+    #[test]
+    fn source_from_before_content_reload_is_not_accepted() {
+        let mut s = session();
+        s.media.file_loader = Some(Arc::new(|_, _| Ok((Rgb32f::new(8, 8), SourceInfo::default()))));
+        let old = s.thumb_job(PhotoId(1), 256).unwrap().run();
+        assert!(old.loaded.is_some());
+        s.catalog
+            .apply(Op::SetContent {
+                id: PhotoId(1),
+                width: 6000,
+                height: 4000,
+                file_size: 99,
+                content_hash: Some("replacement".into()),
+                preview_only: None,
+            })
+            .unwrap();
+        s.media.forget(PhotoId(1));
+        s.accept(&old);
+        assert_eq!(s.media.source_usage().0, 0);
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -998,6 +1310,110 @@ mod tests {
         let plain: Vec<_> = s.catalog.photos().filter(|p| !p.is_edited()).map(|p| p.id).take(2).collect();
         let (a, b) = (s.render_job(plain[0], 1600, 1600, false, true).unwrap(), s.render_job(plain[1], 1600, 1600, false, true).unwrap());
         assert_ne!(a.key, b.key);
+    }
+
+    // Issue #323: a window of a 1:1 view is its own job: the window's pixels, at the zoom scale,
+    // from the original, with a key of its own
+    #[test]
+    fn region_jobs_render_a_window_of_the_zoomed_frame() {
+        use lightcraft_pipeline::PixelWindow;
+        let mut s = crate::Session::with_demo();
+        let p = s.catalog.photos().next().unwrap().clone();
+        let (w, h) = (p.width as usize, p.height as usize);
+        assert!(w.max(h) > 2560, "demo photos are camera-sized");
+        let win = PixelWindow { x: w / 3, y: h / 3, w: 300, h: 200 };
+        let job = s.region_job(p.id, w, h, win, true).unwrap();
+        assert_eq!(job.level, SourceLevel::Full, "a 1:1 window reads the original");
+        let img = job.run().rendered.unwrap().image;
+        assert_eq!((img.width, img.height), (300, 200));
+        // other windows, and the whole-frame job, never share a key
+        let other = s.region_job(p.id, w, h, PixelWindow { x: win.x + 64, ..win }, true).unwrap();
+        let whole = s.render_job(p.id, w, h, false, true).unwrap();
+        let again = s.region_job(p.id, w, h, win, true).unwrap();
+        assert_ne!(other.key, again.key);
+        assert_ne!(whole.key, again.key);
+        assert_eq!(s.region_job(p.id, w, h, win, true).unwrap().key, again.key, "the same window keeps its key");
+        // a window never writes the photo's view preview or the thumbnail cache
+        assert!(again.view_cache.is_none() && again.cache.is_none());
+    }
+
+    // Issue #323: a tight crop shown at its own pixels needs the original, not the 2560 px preview
+    #[test]
+    fn a_tight_crop_reads_the_source_level_its_pixels_need() {
+        let mut s = crate::Session::with_demo();
+        let p = s.catalog.photos().next().unwrap().clone();
+        let long = p.width.max(p.height) as usize;
+        assert!(long > 2560);
+        let id = p.id;
+        let mut d = (*s.develop_of(id).unwrap()).clone();
+        // the uncropped photo at 1600 px: the preview is plenty
+        assert_eq!(s.render_job(id, 1600, 1600, false, true).unwrap().level, SourceLevel::Preview);
+        // a crop to 30 % of each side shown 1600 px long needs 1600 / 0.3 px of the source
+        d.crop.geometry.rect = lightcraft_geom::Rect { x0: 0.2, y0: 0.2, x1: 0.5, y1: 0.5 };
+        s.set_develop(id, d, "Crop").unwrap();
+        assert_eq!(s.render_job(id, 1600, 1600, false, true).unwrap().level, SourceLevel::Full);
+        // …but with the crop tool open (the whole photo shown) it does not
+        assert_eq!(s.render_job(id, 1600, 1600, false, false).unwrap().level, SourceLevel::Preview);
+        // and a crop shown small enough still reads the preview
+        assert_eq!(s.render_job(id, 600, 600, false, true).unwrap().level, SourceLevel::Preview);
+    }
+
+    // a window whose spot reads from further away than a render can hold is refused
+    #[test]
+    fn a_region_job_is_refused_when_a_spot_reads_beyond_what_fits() {
+        use lightcraft_pipeline::PixelWindow;
+        let mut s = crate::Session::with_demo();
+        let id = s.active().unwrap();
+        let p = s.catalog.photo(id).unwrap().clone();
+        let (w, h) = (p.width as usize * 8, p.height as usize * 8);
+        let mut d = (*s.develop_of(id).unwrap()).clone();
+        d.spots.push(lightcraft_develop::Spot {
+            points: vec![lightcraft_geom::Point::new(0.2, 0.5)],
+            size: 0.01,
+            source_offset: Some(lightcraft_geom::Point::new(0.6, 0.0)),
+            ..Default::default()
+        });
+        s.set_develop(id, d, "Spot").unwrap();
+        let win = PixelWindow { x: (w as f64 * 0.2) as usize - 100, y: h / 2 - 100, w: 400, h: 300 };
+        assert!(s.region_job(id, w, h, win, true).is_none());
+        // a window elsewhere is fine
+        assert!(s.region_job(id, w, h, PixelWindow { x: 5000, y: 5000, w: 400, h: 300 }, true).is_some());
+    }
+
+    // Issue #323: the Before side of a Before/After view at 1:1 is a window too, of the photo
+    // without its edits (the crop is kept), with a key of its own
+    #[test]
+    fn a_before_window_shows_the_unedited_look() {
+        use lightcraft_pipeline::PixelWindow;
+        let mut s = crate::Session::with_demo();
+        let id = s.active().unwrap();
+        let p = s.catalog.photo(id).unwrap().clone();
+        let (w, h) = (p.width as usize, p.height as usize);
+        let mut d = (*s.develop_of(id).unwrap()).clone();
+        d.light.exposure = 2.0;
+        s.set_develop(id, d, "Exposure").unwrap();
+        let win = PixelWindow { x: w / 3, y: h / 3, w: 200, h: 150 };
+        let after = s.region_job(id, w, h, win, true).unwrap();
+        let before = s.region_job_before(id, w, h, win, true).unwrap();
+        assert_ne!(after.key, before.key);
+        let (a, b) = (after.run().rendered.unwrap().image, before.run().rendered.unwrap().image);
+        assert_eq!((a.width, a.height), (b.width, b.height));
+        let mean = |i: &Rgba8| i.data.iter().map(|p| p[1] as f64).sum::<f64>() / i.data.len() as f64;
+        assert!(mean(&a) > mean(&b) + 10.0, "two stops brighter after: {} vs {}", mean(&a), mean(&b));
+    }
+
+    #[test]
+    fn has_source_follows_what_the_session_accepted() {
+        let mut s = crate::Session::with_demo();
+        let id = s.active().unwrap();
+        let p = s.catalog.photo(id).unwrap().clone();
+        let long = p.width.max(p.height) as usize;
+        assert!(!s.media.has_source(id, SourceLevel::Full));
+        let r = s.render_job(id, long, long, false, true).unwrap().run();
+        s.accept(&r);
+        assert!(s.media.has_source(id, SourceLevel::Full));
+        assert!(!s.media.has_source(id, SourceLevel::Preview));
+        assert!(!s.media.has_source(PhotoId(id.0 + 1), SourceLevel::Full));
     }
 
     #[test]

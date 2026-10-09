@@ -158,6 +158,7 @@ impl WbMode {
 pub struct WhiteBalance {
     pub mode: WbMode,
     pub temp: f64,
+    /// Correction direction: negative adds green, positive adds magenta.
     pub tint: f64,
 }
 
@@ -539,8 +540,9 @@ impl Default for Optics {
     }
 }
 
-/// Lens corrections embedded in a DNG file (`OpcodeList3`: `WarpRectilinear`, `FixVignetteRadial`), converted
-/// to the oriented, default-cropped image. This is camera/file data (stored on the photo record, not in the develop
+/// Lens corrections embedded in the file, converted to the oriented, default-cropped image: a DNG's `OpcodeList3`
+/// (`WarpRectilinear`, `FixVignetteRadial`), or a raw reader's equivalent of the camera's own correction (Panasonic /
+/// Leica RW2 distortion, `lightcraft_raw`'s `vendor/rw2.rs`). This is camera/file data (stored on the photo record, not in the develop
 /// settings); "Enable Profile Corrections" applies it, scaled by the profile distortion/vignetting amounts.
 /// LightCraft never uses Adobe LCP lens profiles.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -772,8 +774,33 @@ pub enum MaskShape {
     Subject,
     Sky,
     Background,
+    /// One object picked by clicks (SAM 3 point prompts): `hint` holds the clicks that include,
+    /// `exclude` the ones that exclude; `seg` the segmentation computed from them.
     Object {
         hint: Vec<Point>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exclude: Vec<Point>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seg: Option<crate::SegMask>,
+        /// Zoomed-in passes over parts of the image (higher resolution than `seg`), used
+        /// inside their rectangles.
+        #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::segmask::de_detail")]
+        detail: Vec<crate::SegMask>,
+        /// Edge −100..100: below 0 harder (a steeper transition), above 0 softer (feathered).
+        #[serde(default, skip_serializing_if = "is_zero")]
+        edge: f64,
+    },
+    /// Everything a description names ("sky", "the red car": SAM 3 concept prompts); `seg` is
+    /// the segmentation computed for it.
+    Prompt {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seg: Option<crate::SegMask>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::segmask::de_detail")]
+        detail: Vec<crate::SegMask>,
+        /// Edge −100..100, as for `Object`.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        edge: f64,
     },
     People {
         person: u32,
