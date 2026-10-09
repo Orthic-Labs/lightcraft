@@ -21,9 +21,9 @@ Local Auto uses image statistics & deterministic processing; Adobe Auto quality 
 
 ## Release status
 
-This fork is under active development. React/Tauri work is [draft fork PR #1](https://github.com/Orthic-Labs/lightcraft/pull/1); OpenRouter experimentation is [draft fork PR #2](https://github.com/Orthic-Labs/lightcraft/pull/2). No React/Tauri PR has been submitted to upstream LightCraft.
+This fork is under active development. Fork `main` includes merged [React/Tauri PR #1](https://github.com/Orthic-Labs/lightcraft/pull/1), [OpenRouter PR #2](https://github.com/Orthic-Labs/lightcraft/pull/2) & [Ember branding PR #3](https://github.com/Orthic-Labs/lightcraft/pull/3). No React/Tauri PR has been submitted to upstream LightCraft.
 
-Public builds, Rust tests & native qualification run through generated **RightKit GitHub Actions** (`.rightgit.json`). Local work is source/static-only. Only qualified green artifacts are promoted to desktop default. GitHub currently rejects workflow dispatch for this fork; current Ember branding is a source snapshot pending native qualification.
+Public builds, Rust tests & native qualification run through generated **RightKit GitHub Actions** (`.rightgit.json`). Local work is source/static-only. Only qualified green artifacts are promoted to desktop default. GitHub currently rejects workflow dispatch for this fork; merged Ember source awaits native qualification. Source merges do not promote installed artifacts.
 
 ## Development
 
