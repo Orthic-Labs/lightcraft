@@ -682,6 +682,147 @@ fn diagnose_native_viewport_bounce(control: &rightkit_qa::control::Control, scen
     }
 }
 
+fn diagnose_fresh_dom_layout(control: &rightkit_qa::control::Control, scenario: &rightkit_qa::harness::Scenario) {
+    let setup = r#"return (() => {
+        const key = '__lcFreshDomLayoutProbe';
+        const selectors = ['.lc-library-layout.is-inspector-collapsed', '.lc-stage-layout.is-inspector-collapsed', '.lc-grid-spacer', '.lc-grid-window'];
+        const active = () => {
+            const node = document.activeElement;
+            return node ? { tag: node.tagName, id: node.id, className: typeof node.className === 'string' ? node.className : '', aria: node.getAttribute('aria-label') } : null;
+        };
+        const describe = (selector, node) => {
+            if (!node) return { selector, missing: true };
+            try {
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return {
+                    selector,
+                    className: typeof node.className === 'string' ? node.className : '',
+                    inlineStyle: node.getAttribute('style'),
+                    inlineCssText: node.style?.cssText || '',
+                    computed: {
+                        top: style.top,
+                        left: style.left,
+                        width: style.width,
+                        height: style.height,
+                        columns: style.gridTemplateColumns,
+                        display: style.display,
+                        position: style.position,
+                        visibility: style.visibility,
+                    },
+                    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, right: rect.right, bottom: rect.bottom },
+                    scrollTop: node.scrollTop,
+                    scrollHeight: node.scrollHeight,
+                    clientHeight: node.clientHeight,
+                };
+            } catch (error) {
+                return { selector, error: String(error) };
+            }
+        };
+        const state = {
+            key,
+            targets: [],
+            samples: {},
+            setupError: null,
+            live: true,
+            timeoutIds: [],
+            sample(phase) {
+                if (!state.live) return;
+                state.samples[phase] = {
+                    documentHidden: document.hidden,
+                    visibilityState: document.visibilityState,
+                    activeElement: active(),
+                    targets: state.targets.map(target => ({
+                        selector: target.selector,
+                        original: describe(target.selector, target.original),
+                        detached: describe(target.selector, target.detached),
+                        inserted: describe(target.selector, target.clone),
+                    })),
+                };
+            },
+        };
+        window[key] = state;
+        try {
+            for (const selector of selectors) {
+                const original = document.querySelector(selector);
+                if (!original) { state.targets.push({ selector, original: null, detached: null, clone: null, host: null }); continue; }
+                const parent = original.parentElement;
+                const parentRect = parent?.getBoundingClientRect();
+                const detached = original.cloneNode(true);
+                const clone = original.cloneNode(true);
+                clone.setAttribute('aria-hidden', 'true');
+                clone.setAttribute('inert', '');
+                const host = document.createElement('div');
+                host.setAttribute('aria-hidden', 'true');
+                host.inert = true;
+                host.style.cssText = `position:fixed;left:-100000px;top:-100000px;width:${Math.max(1, parentRect?.width || original.getBoundingClientRect().width)}px;height:${Math.max(1, parentRect?.height || original.getBoundingClientRect().height)}px;overflow:hidden;visibility:hidden;pointer-events:none;opacity:0;`;
+                const target = { selector, original, detached, clone, host };
+                state.targets.push(target);
+                const ancestors = [];
+                for (let ancestor = parent; ancestor && ancestor !== document.body; ancestor = ancestor.parentElement) ancestors.push(ancestor);
+                let context = host;
+                for (let index = ancestors.length - 1; index >= 0; index -= 1) {
+                    const wrapper = ancestors[index].cloneNode(false);
+                    context.appendChild(wrapper);
+                    context = wrapper;
+                }
+                context.appendChild(clone);
+                document.body.appendChild(host);
+            }
+            state.sample('original-and-clone-immediate');
+            queueMicrotask(() => { if (state.live) state.sample('original-and-clone-microtask'); });
+            state.timeoutIds.push(setTimeout(() => { if (state.live) state.sample('original-and-clone-after64ms'); }, 64));
+            state.timeoutIds.push(setTimeout(() => { if (state.live) state.sample('original-and-clone-after128ms'); }, 128));
+        } catch (error) {
+            state.setupError = String(error);
+            state.sample('original-and-clone-immediate');
+        }
+        return { sample: state.samples['original-and-clone-immediate'], setupError: state.setupError };
+    })();"#;
+    let cleanup_script = "return (() => { const state = window.__lcFreshDomLayoutProbe; if (!state) return false; state.live = false; for (const id of state.timeoutIds || []) clearTimeout(id); for (const target of state.targets || []) target.host?.remove(); delete window.__lcFreshDomLayoutProbe; return true; })();";
+    let setup_value = match control.eval(setup) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("[qa] fresh DOM diagnostics setup failed: {error}");
+            let _ = control.eval(cleanup_script);
+            return;
+        }
+    };
+    let sample = |phase: &str| {
+        let expression = format!("return window.__lcFreshDomLayoutProbe?.samples?.[{phase:?}] || null;");
+        control.eval(&expression).unwrap_or_else(|error| json!({"error": error.to_string()}))
+    };
+    let immediate = sample("original-and-clone-immediate");
+    sleep(Duration::from_millis(1));
+    let microtask = sample("original-and-clone-microtask");
+    sleep(Duration::from_millis(64));
+    let after64 = sample("original-and-clone-after64ms");
+    sleep(Duration::from_millis(64));
+    let after128 = sample("original-and-clone-after128ms");
+    let cleanup = control.eval(cleanup_script);
+    let evidence = json!({
+        "schema": 1,
+        "probe": "fresh-dom-layout-clone",
+        "journey": scenario.name(),
+        "geometry": {
+            "mode": "offscreen-fixed-hidden-clone",
+            "viewportEquivalent": false,
+            "context": "ancestor-chain attributes/classes/inline styles copied; ancestor siblings omitted",
+            "interpretationScope": ["inlineStyle", "computed.top", "computed.height", "computed.columns"]
+        },
+        "setup": setup_value,
+        "samples": { "immediate": immediate, "microtask": microtask, "after64ms": after64, "after128ms": after128 },
+        "cleanup": cleanup.unwrap_or_else(|error| json!({"error": error.to_string()})),
+    });
+    eprintln!("[qa] fresh DOM layout clone diagnostics={evidence}");
+    let path = scenario.dir().join("failure-fresh-dom-layout.json");
+    if let Ok(bytes) = serde_json::to_vec_pretty(&evidence)
+        && fs::write(&path, bytes).is_ok()
+    {
+        scenario.keep("failure-fresh-dom-layout.json", &path);
+    }
+}
+
 fn assert_layout_settled(control: &rightkit_qa::control::Control, selector: &str) {
     let expression = format!(
         "return (() => {{ const node = document.querySelector({selector:?}); if (!node) return false; const rect = node.getBoundingClientRect(); return rect.width >= 1 && rect.height >= 1 && getComputedStyle(node).display !== 'none'; }})();"
@@ -1171,6 +1312,9 @@ fn with_control<T>(
             && let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height))
         {
             diagnose_native_viewport_bounce(&control, scenario, width, height);
+        }
+        if cfg!(target_os = "macos") && matches!(scenario.name(), "ipc" | "scalability") {
+            diagnose_fresh_dom_layout(&control, scenario);
         }
     }
     let stopped = control.stop().expect("native app must stop cleanly");
