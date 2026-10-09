@@ -1018,6 +1018,12 @@ pub fn run() {
     let mut context = tauri::generate_context!();
     if unattended_qa_enabled() {
         for window in &mut context.config_mut().app.windows {
+            // Hidden WebKit otherwise suspends rendering, leaving DOM styles newer than
+            // measured geometry. Keep unattended hosts live without showing or focusing them.
+            #[cfg(target_os = "macos")]
+            {
+                window.background_throttling = Some(tauri::utils::config::BackgroundThrottlingPolicy::Disabled);
+            }
             if window.label == "main" {
                 // Tauri creates config windows before RightKit can receive a readiness event.
                 // Keep QA's initially invisible main window from becoming the foreground window
