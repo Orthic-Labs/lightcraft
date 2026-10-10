@@ -1,6 +1,6 @@
 {
   "schema": "ember.model-qualification/v1",
-  "status": "artifact-pinned-conversion-unqualified",
+  "status": "artifact-pinned-loader-source-unqualified",
   "observed_at": "2026-10-10",
   "qualification_state": {
     "source_revision": "ACHIEVED",
@@ -17,9 +17,9 @@
     "candle_core": "SOURCE_PRESENT_STATIC_ONLY",
     "position_tables": "CACHED_224_AND_518",
     "cosine": "FINITE_NONZERO_F32_384D_F64_ACCUMULATION",
-    "artifact_loader": "ABSENT",
-    "preprocessing": "ABSENT_CORE_ACCEPTS_NORMALIZED_INPUT",
-    "evaluator_cli_wiring": "ABSENT",
+    "artifact_loader": "SOURCE_PRESENT_IMMUTABLE_OWNED_BYTES_EXACT_SIZE_SHA_175_STATIC_DESCRIPTORS",
+    "preprocessing": "SOURCE_PRESENT_BOUNDED_ANTIALIASED_BICUBIC_RGB8_EXPERIMENTAL_NO_REFERENCE_PARITY",
+    "evaluator_cli_wiring": "OFFLINE_NATIVE_EXAMPLE_SOURCE_PRESENT_NO_PRODUCTION_CULLING_WIRING",
     "constructor_name": "DinoV2::from_var_builder",
     "constructor_identity_check": "CALLER_RESPONSIBILITY_NOT_ENFORCED_BY_CONSTRUCTOR"
   },
@@ -86,8 +86,16 @@
     "channels": "RGB",
     "tensor_layout": "NCHW",
     "tensor_range_before_normalize": "ToTensor-style [0,1]",
-    "normalize_mean": [0.485, 0.456, 0.406],
-    "normalize_std": [0.229, 0.224, 0.225],
+    "normalize_mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "normalize_std": [
+      0.229,
+      0.224,
+      0.225
+    ],
     "patch_size_px": 14,
     "source_eval_224": {
       "resize_size_px": 256,
@@ -105,7 +113,7 @@
       "518x518 as separate condition with transform frozen and recorded before comparison"
     ],
     "crop_warning": "224 and 518 are separate preprocessing conditions, not equivalent inputs; center crops can remove faces, blink evidence or intentional blur context",
-    "implementation_boundary": "crates/segment/src/dinov2.rs accepts only already normalized F32 [1,3,224,224] or [1,3,518,518] tensors; resize, crop, channel normalization, artifact loading and CLI wiring are absent"
+    "implementation_boundary": "dinov2.rs accepts normalized F32 [1,3,224,224] or [1,3,518,518]. dinov2_input.rs provides bounded RGB8 antialiased bicubic short-edge resize/center crop/ImageNet normalization; 224/256 and experimental518/592 are separate conditions. dinov2_artifact.rs verifies exact owned artifact bytes before tensors. examples/dinov2_qualify.rs is offline-only; source is uncompiled and preprocessing/reference agreement unmeasured."
   },
   "model_contract": {
     "parameters_reported": "21M",
@@ -155,13 +163,13 @@
       "existing Candle 0.9.2 dependency versions and existing Metal/CPU feature paths only",
       "DINOv2 source core in crates/segment/src/dinov2.rs with caller-supplied VarBuilder tensors"
     ],
-    "checkpoint_boundary": "official artifact is PyTorch .pth; no artifact loader or conversion exists. Candle 0.9.2 path-based VarBuilder::from_pth reopens its path per tensor, so evaluator use requires an immutable verified-byte conversion/loader before tensors reach the core; this record only inspected container and pickle opcodes statically",
-    "conversion_status": "UNQUALIFIED_NOT_RUN",
+    "checkpoint_boundary": "Official PyTorch .pth now has source loader using one bounded read, exact whole-byte SHA/size check, 175 static descriptors and finite F32 validation before Candle tensor creation; no runtime pickle/ZIP parser, path reopening or conversion dependency. Path-based Candle from_pth is not used. Execution and reference parity remain unqualified.",
+    "conversion_status": "OWNED_BYTE_LOADER_SOURCE_PRESENT_UNCOMPILED_UNQUALIFIED",
     "conversion_plan": [
-      "Build a bounded immutable-byte loader/converter against pinned source metadata; never execute pickle globals or load an unverified artifact",
-      "Map 175 FloatStorage-backed state keys to Candle VarBuilder names while preserving float32 dtype and recorded shapes",
-      "Emit safetensors plus manifest containing source URL, source revision, byte count, artifact SHA-256, data.pkl SHA-256 and key count",
-      "Compare reference tensors and CLS outputs for 224 and 518 preprocessing separately before evaluator use"
+      "Run immutable-byte loader through generated native CI against exact pinned artifact; no pickle execution or path-based tensor reopen",
+      "Compare all 175 F32 tensor names/shapes/values and 224/518 CLS outputs against an independent pinned reference; static descriptors alone do not qualify numerical parity",
+      "Record exact preprocessing, manifest/input/reference byte digests, source/hardware and timing receipts through offline qualification example",
+      "Separate source tensor/embedding parity from held-out similarity, blur-preservation and native performance gates before production use"
     ],
     "operator_inventory": [
       "Conv2d patch projection",
@@ -182,11 +190,11 @@
     }
   },
   "qualification_gate": {
-    "state": "artifact_hash_achieved_pending_conversion_reference_quality_platform",
+    "state": "artifact_and_loader_source_present_pending_execution_reference_quality_platform",
     "required_before_use": [
       "obtain artifact under approved license review",
       "verify captured b938bf1bc15cd2ec0feacfe3a1bb553fe8ea9ca46a7e1d8d00217f29aef60cd9 SHA-256 against exact 88283115-byte artifact",
-      "convert or obtain an equivalent safetensors representation without adding runtime dependencies",
+      "qualify immutable-byte loader and architecture numerically through generated native CI without adding runtime dependencies",
       "compare reference outputs for 224 and 518 preprocessing separately",
       "label held-out bursts for technical keeper, intentional-style keeper and tie/uncertain",
       "measure pairwise accuracy, tie coverage, blur-preservation rate, p50/p95 Metal and Windows CPU latency, peak memory and cold/warm costs",
@@ -197,11 +205,11 @@
   "minimal_implementation_task": {
     "scope": "offline evaluator only; no catalog, pipeline or dependency edits",
     "steps": [
-      "Add safe immutable-byte verified conversion/loader for the pinned official artifact without runtime dependency changes",
-      "call existing DINOv2 Candle core with already normalized 224 and 518 tensors; keep preprocessing outside core and record it separately",
-      "emit final-normalized 384-D CLS embedding and cosine pair scores for 224 and 518 conditions",
-      "compare against existing 8x8 luma signature on held-out bursts; expose score and uncertainty as review evidence only"
+      "Immutable-byte exact-size/SHA loader and static descriptor table are present in source; execute required native gates",
+      "Bounded RGB8 preprocessing plus offline evaluator are present in source; compare 224/256 and experimental518/592 conditions separately with pinned reference",
+      "Collect reference embedding agreement and held-out labelled pair metrics with frozen supplied threshold; receipts stay UNQUALIFIED without independent gates",
+      "Compare existing8x8 luma signature on held-out bursts, measure style/blur preservation and burst-winner evidence before catalog or pipeline changes"
     ],
-    "acceptance": "reference parity, artifact hash, license record and platform measurements are recorded before any consideration of shipping; current record has source pin, size, SHA-256, static container inspection and uncompiled Candle core/regression source"
+    "acceptance": "Reference parity, artifact/license record and native performance/quality gates required before shipping. Current record has pinned identity, static container/descriptors, uncompiled Candle core, verified-byte loader, antialiased preprocessing, offline measurement harness and source regressions only."
   }
 }

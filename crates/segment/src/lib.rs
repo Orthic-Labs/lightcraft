@@ -33,6 +33,12 @@ mod detector;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod dinov2;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod dinov2_artifact;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod dinov2_input;
+#[cfg(not(target_arch = "wasm32"))]
+mod dinov2_inventory;
+#[cfg(not(target_arch = "wasm32"))]
 mod dinov2_positions;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod fetch;

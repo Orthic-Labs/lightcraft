@@ -43,6 +43,14 @@ pub struct FileSpec<'a> {
     pub max: u64,
 }
 
+/// Lower-case SHA-256 receipt for already-read bytes, without reopening their source.
+///
+/// Caller bounds input size before reading or hashing it. A digest records identity;
+/// authenticity still requires comparison with an independently pinned value.
+pub fn sha256_bytes(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
 /// Verify already-read bytes so callers parse exactly what was hashed, without reopening files.
 pub fn verify_bytes(spec: &FileSpec<'_>, bytes: &[u8]) -> Result<bool, String> {
     validate_files(std::slice::from_ref(spec)).map_err(|error| error.to_string())?;
@@ -50,12 +58,18 @@ pub fn verify_bytes(spec: &FileSpec<'_>, bytes: &[u8]) -> Result<bool, String> {
     if size > spec.max || spec.size.is_some_and(|expected| expected != size) {
         return Ok(false);
     }
-    Ok(spec.sha256.is_none_or(|expected| format!("{:x}", Sha256::digest(bytes)) == expected))
+    Ok(spec.sha256.is_none_or(|expected| sha256_bytes(bytes) == expected))
 }
 
 #[cfg(test)]
 mod byte_verification_tests {
-    use super::{FileSpec, verify_bytes};
+    use super::{FileSpec, sha256_bytes, verify_bytes};
+
+    #[test]
+    fn digest_receipt_is_stable_lower_case_hex() {
+        assert_eq!(sha256_bytes(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(sha256_bytes(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
 
     #[test]
     fn verifies_exact_bytes_size_hash_and_spec() {

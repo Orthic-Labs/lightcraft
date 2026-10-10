@@ -38,6 +38,11 @@ Apache License, Version 2.0
 Copyright (c) Meta Platforms, Inc. and affiliates.
 The files were modified by Ember contributors (2026): translated to Rust on Candle,
 restricted to 224/518 inputs, with explicit validation & cached positional tables.
+dinov2_input.rs independently implements bounded RGB8 preprocessing using the pinned
+Meta evaluation transform as its policy reference. dinov2_inventory.rs records factual
+tensor names, shapes & byte ranges from static checkpoint inspection; dinov2_artifact.rs
+loads only exact size- and SHA-256-verified bytes. These additions are source-only,
+with no production culling integration or qualified model accuracy.
 DINOv2 weights are not distributed.
 The positional interpolation also follows PyTorch v2.4.0's native bicubic implementation
 (https://github.com/pytorch/pytorch/blob/v2.4.0/aten/src/ATen/native/cuda/UpSample.cuh); its

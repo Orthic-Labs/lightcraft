@@ -3,9 +3,9 @@
 //! Architecture follows Meta's pinned DINOv2 source at commit
 //! `7764ea0f912e53c92e82eb78a2a1631e92725fc8`: 384 channels, 12 blocks, 6 heads,
 //! patch size 14, MLP ratio 4, fused QKV, LayerScale initial value 1.0 and
-//! LayerNorm epsilon 1e-6. This module has no checkpoint-path loader. Callers must
-//! construct its `VarBuilder` from an independently size- and SHA-256-verified
-//! official artifact. It is not wired into catalog or culling decisions.
+//! LayerNorm epsilon 1e-6. Use [`crate::dinov2_artifact`] for the pinned, immutable
+//! size- and SHA-256-verified artifact & [`crate::dinov2_input`] for RGB8 input
+//! preparation. The core is not wired into catalog or culling decisions.
 //!
 //! Modified work (Apache License 2.0, §4(b)): translated to Rust on Candle by
 //! Ember contributors (2026), with bounded inputs & explicit validation.
@@ -134,9 +134,9 @@ impl DinoV2 {
     ///
     /// Candle 0.9.2's path-based `VarBuilder::from_pth` reopens its path for each
     /// tensor, so this constructor has no checkpoint-path input or artifact identity
-    /// check. It validates architecture shapes & dtype only. A strict official `.pth`
-    /// loader remains a separate integration task. Caller must provide immutable
-    /// verified tensors for this constructor's lifetime.
+    /// check. It validates architecture shapes & dtype only. Prefer
+    /// [`crate::dinov2_artifact::load_file`] or [`crate::dinov2_artifact::load_verified_bytes`],
+    /// which construct tensors from one immutable, verified copy of the pinned `.pth`.
     pub fn from_var_builder(vb: VarBuilder) -> Result<Self> {
         if vb.dtype() != DType::F32 {
             return Err(Error::Model(format!("DINOv2 VarBuilder expects F32 tensors, got {:?}", vb.dtype())));
