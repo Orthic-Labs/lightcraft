@@ -116,6 +116,8 @@ impl Controller {
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    // This host owner is disposable; process-wide GPU shutdown belongs to the
+                    // application lifecycle, so later hosts can still create/use the device.
                     let _ = self.tasks.cancel(None);
                     if let Err(error) = self.auto_import.stop() {
                         log::error!("desktop auto import worker did not stop: {error}");
@@ -126,13 +128,13 @@ impl Controller {
                     }
                     if let Err(error) = cancel_preview_build(&self.session, PREVIEW_SHUTDOWN_WAIT) {
                         log::error!("desktop owner disconnected before preview build stopped: {error}");
-                        break;
                     }
                     if let Err(error) = self.merge_previews.shutdown(&mut self.session, PREVIEW_SHUTDOWN_WAIT) {
                         log::error!("desktop owner disconnected before merge previews stopped: {error}");
-                        break;
                     }
-                    self.renderer.cancel_all();
+                    if !self.renderer.shutdown(PREVIEW_SHUTDOWN_WAIT) {
+                        log::error!("desktop owner disconnected while preview renders were still stopping");
+                    }
                     let _ = self.session.close_library();
                     break;
                 }
@@ -175,8 +177,8 @@ impl Controller {
                 let _ = reply.send(result);
                 false
             }
-            Request::Shutdown { reply } => {
-                let result = self.shutdown();
+            Request::Shutdown { process_exit, reply } => {
+                let result = self.shutdown(process_exit);
                 let stop = result.is_ok();
                 let _ = reply.send(result);
                 stop
@@ -485,12 +487,17 @@ impl Controller {
         self.merge_previews.poll(&mut self.session);
     }
 
-    pub(crate) fn shutdown(&mut self) -> Result<(), String> {
-        if let Some(mut task) = self.sam_validation.take() {
+    pub(crate) fn shutdown(&mut self, process_exit: bool) -> Result<(), String> {
+        if let Some(task) = self.sam_validation.as_mut() {
             task.cancel.store(true, Ordering::Relaxed);
-            if let Some(worker) = task.worker.take() {
-                let _ = worker.join();
+            if task.worker.as_ref().is_some_and(|worker| !worker.is_finished()) {
+                return Err("segment validation is still stopping; retry shutdown shortly".into());
             }
+        }
+        if let Some(mut task) = self.sam_validation.take()
+            && let Some(worker) = task.worker.take()
+        {
+            let _ = worker.join();
         }
         self.auto_import.stop()?;
         self.tasks.cancel(None)?;
@@ -500,12 +507,23 @@ impl Controller {
         }
         self.merge_previews.shutdown(&mut self.session, PREVIEW_SHUTDOWN_WAIT)?;
         cancel_preview_build(&self.session, PREVIEW_SHUTDOWN_WAIT)?;
-        self.renderer.cancel_all();
+        // Delay owner close until all retryable cancellation & persistence checks above succeed.
+        // Only process-exit teardown closes the process-wide GPU gate; host tests and library
+        // replacement keep it open for later sessions.
         self.session.persist().map_err(|error| {
             let message = error.to_string();
             self.last_error = Some(message.clone());
             message
         })?;
+        if process_exit {
+            lightcraft_engine::gpu::begin_shutdown();
+        }
+        if !self.renderer.shutdown(PREVIEW_SHUTDOWN_WAIT) {
+            return Err("preview renders are still stopping; retry shutdown shortly".into());
+        }
+        if process_exit && !lightcraft_engine::gpu::wait_idle(PREVIEW_SHUTDOWN_WAIT) {
+            return Err("GPU work is still stopping; retry shutdown shortly".into());
+        }
         self.session.close_library().map_err(|error| {
             let message = error.to_string();
             self.last_error = Some(message.clone());
@@ -765,14 +783,40 @@ mod tests {
         while !started.load(Ordering::Acquire) {
             std::thread::yield_now();
         }
-        assert!(controller.shutdown().is_err());
+        assert!(controller.shutdown(false).is_err());
         assert!(controller.snapshot().is_ok());
         release.store(true, Ordering::Release);
         while controller.tasks.running() {
             controller.poll();
             std::thread::yield_now();
         }
-        assert!(controller.shutdown().is_ok());
+        assert!(controller.shutdown(false).is_ok());
+    }
+
+    #[test]
+    fn routine_host_shutdown_keeps_gpu_gate_open_for_next_host() {
+        let controller_result = Controller::new(HostOptions { demo: true, ..HostOptions::default() }, PreviewStore::default());
+        assert!(controller_result.is_ok());
+        let Ok(mut controller) = controller_result else { return };
+        assert!(controller.shutdown(false).is_ok());
+        assert!(!lightcraft_engine::gpu::shutting_down(), "host shutdown is not process exit");
+    }
+
+    #[test]
+    fn disconnected_owner_does_not_close_process_gpu_gate() {
+        let controller_result = Controller::new(HostOptions { demo: true, ..HostOptions::default() }, PreviewStore::default());
+        assert!(controller_result.is_ok());
+        let Ok(mut controller) = controller_result else { return };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        drop(sender);
+        controller.serve(receiver);
+        assert!(!lightcraft_engine::gpu::shutting_down(), "owner disconnect is not process exit");
+
+        let later = Controller::new(HostOptions { demo: true, ..HostOptions::default() }, PreviewStore::default());
+        assert!(later.is_ok(), "later host should remain constructible");
+        let Ok(mut later) = later else { return };
+        assert!(later.snapshot().is_ok(), "later host should remain usable");
+        assert!(later.shutdown(false).is_ok());
     }
 
     #[test]
@@ -796,7 +840,7 @@ mod tests {
         let automatic = controller.preferences(Some(json!({"ui": {"memoryMb": 0}})));
         assert!(automatic.is_ok());
         assert_eq!(controller.session.memory_report().budget, lightcraft_engine::memory::default_budget());
-        assert!(controller.shutdown().is_ok());
+        assert!(controller.shutdown(false).is_ok());
     }
 
     #[test]
@@ -828,7 +872,7 @@ mod tests {
         }
         assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&current));
         assert_eq!(controller.preferences.get("sam3Dir").and_then(Value::as_str), Some(current.to_string_lossy().as_ref()));
-        assert!(controller.shutdown().is_ok());
+        assert!(controller.shutdown(false).is_ok());
     }
 
     #[test]
@@ -857,7 +901,7 @@ mod tests {
         assert!(status.get("error").and_then(Value::as_str).is_some_and(|error| error.contains("cancelled")));
         assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&current));
         assert_eq!(controller.preferences.get("sam3Dir").and_then(Value::as_str), Some(current.to_string_lossy().as_ref()));
-        assert!(controller.shutdown().is_ok());
+        assert!(controller.shutdown(false).is_ok());
     }
 
     #[test]
@@ -884,7 +928,7 @@ mod tests {
         controller.poll_sam_validation();
         assert_eq!(controller.session.segmenter.dir.as_ref(), Some(&selected));
         assert_eq!(controller.preferences.get("sam3Dir").and_then(Value::as_str), Some(selected.to_string_lossy().as_ref()));
-        assert!(controller.shutdown().is_ok());
+        assert!(controller.shutdown(false).is_ok());
     }
 
     #[test]
@@ -899,7 +943,7 @@ mod tests {
         assert!(Controller::memory_budget_bytes(&json!(1_048_577)).is_err());
         assert!(Controller::memory_budget_bytes(&json!(-1)).is_err());
         assert!(Controller::memory_budget_bytes(&json!("128")).is_err());
-        assert!(controller.shutdown().is_ok());
+        assert!(controller.shutdown(false).is_ok());
     }
 
     #[test]
@@ -914,7 +958,7 @@ mod tests {
         assert!(controller.preferences(Some(json!({"ui": {"memoryMb": 128}}))).is_ok());
         assert!(controller.run("library.open", &json!({"path": next})).is_ok());
         assert_eq!(controller.session.memory_report().budget, 128 * (1 << 20));
-        assert!(controller.shutdown().is_ok());
+        assert!(controller.shutdown(false).is_ok());
         let _ = fs::remove_dir_all(old);
         let _ = fs::remove_dir_all(next);
     }
@@ -936,7 +980,7 @@ mod tests {
         let mut second = Session::new().with_system_clock();
         assert!(second.open_library(&old, false).is_err(), "failed open must retain old lock");
         drop(blocker);
-        assert!(controller.shutdown().is_ok());
+        assert!(controller.shutdown(false).is_ok());
         let _ = fs::remove_dir_all(old);
         let _ = fs::remove_dir_all(held);
     }
@@ -957,7 +1001,7 @@ mod tests {
             controller.poll();
             std::thread::yield_now();
         }
-        assert!(controller.shutdown().is_ok());
+        assert!(controller.shutdown(false).is_ok());
     }
 
     #[test]
@@ -1036,7 +1080,7 @@ mod tests {
         assert_eq!(preview.photo_id, photo_id);
         assert_eq!(preview.encoding, "png");
         assert!(controller.renderer.store().get(&preview.handle).is_some(), "PNG preview bytes should be published");
-        assert!(controller.shutdown().is_ok());
+        assert!(controller.shutdown(false).is_ok());
         let _ = fs::remove_dir_all(library);
         let _ = fs::remove_file(source);
     }
@@ -1101,7 +1145,7 @@ mod tests {
             after_slice.get("photos").and_then(Value::as_array).and_then(|photos| photos.first()).and_then(|photo| photo.get("id")).cloned();
         assert_eq!(after_id, before_id, "equal-revision catalogs should retain same photo ids");
 
-        assert!(controller.shutdown().is_ok());
+        assert!(controller.shutdown(false).is_ok());
         let _ = fs::remove_dir_all(old);
         let _ = fs::remove_dir_all(next);
         let _ = fs::remove_dir_all(selected_dir);

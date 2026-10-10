@@ -35,6 +35,9 @@ struct AppState {
     startup_warnings: Vec<String>,
     /// One-shot close override set only by an explicit user-facing quit action.
     closing: Arc<AtomicBool>,
+    /// Set after the owner completed shutdown during `CloseRequested`; `Destroyed` then only
+    /// handles windows closed before a request reached the owner.
+    shutdown_complete: Arc<AtomicBool>,
 }
 
 async fn blocking<T, F>(work: F) -> Result<T, String>
@@ -1098,6 +1101,7 @@ pub fn run() {
                         startup_error: None,
                         startup_warnings: startup_warnings.clone(),
                         closing: Arc::new(AtomicBool::new(false)),
+                        shutdown_complete: Arc::new(AtomicBool::new(false)),
                     });
                     None
                 }
@@ -1110,6 +1114,7 @@ pub fn run() {
                         startup_error: Some(error.clone()),
                         startup_warnings: startup_warnings.clone(),
                         closing: Arc::new(AtomicBool::new(false)),
+                        shutdown_complete: Arc::new(AtomicBool::new(false)),
                     });
                     Some(error)
                 }
@@ -1149,6 +1154,13 @@ pub fn run() {
                     } else if !force && snapshot.pointer("/status/unsaved").and_then(Value::as_bool).unwrap_or(false) {
                         api.prevent_close();
                         let _ = window.emit("lc://close-requested", json!({"unsaved": true}));
+                    } else if let Err(error) = host.shutdown_process() {
+                        // Keep window alive when bounded cleanup needs a retry. Waiting until
+                        // `Destroyed` would let the process exit with GPU work still in flight.
+                        api.prevent_close();
+                        let _ = window.emit("lc://error", json!({"message": error}));
+                    } else {
+                        state.shutdown_complete.store(true, Ordering::Release);
                     }
                 }
                 tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
@@ -1157,8 +1169,9 @@ pub fn run() {
                 tauri::WindowEvent::Destroyed => {
                     if window.label() == "main"
                         && let Some(state) = window.app_handle().try_state::<AppState>()
+                        && !state.shutdown_complete.load(Ordering::Acquire)
                         && let Some(host) = state.host.clone()
-                        && let Err(error) = host.shutdown()
+                        && let Err(error) = host.shutdown_process()
                     {
                         log::error!("desktop host shutdown failed: {error}");
                     }

@@ -15,6 +15,8 @@
 //! and [`last_fallback`] say why (`ui.inspect` → `perf.gpuReason` / `perf.gpuFallback`).
 //! The browser build has no GPU path yet (WebGPU device creation is asynchronous): everything here
 //! compiles to the CPU fallback on wasm32.
+//!
+//! Before process teardown, call [`begin_shutdown`] then [`wait_idle`].
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -29,6 +31,8 @@ use lightcraft_raster::Rgb32f;
 pub mod backend;
 #[cfg(not(target_arch = "wasm32"))]
 mod ctx;
+#[cfg(not(target_arch = "wasm32"))]
+mod exit;
 #[cfg(not(target_arch = "wasm32"))]
 mod params;
 #[cfg(not(target_arch = "wasm32"))]
@@ -74,6 +78,9 @@ pub fn unavailable_reason() -> Option<String> {
     }
     if !ENABLED.load(Ordering::Relaxed) {
         return Some("disabled by the GPU rendering preference (app.gpu)".into());
+    }
+    if shutting_down() {
+        return Some("LightCraft is closing".into());
     }
     if BROKEN.load(Ordering::Relaxed) {
         let r = BROKEN_REASON.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(|| "device error".into());
@@ -145,6 +152,38 @@ pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed) && !BROKEN.load(Ordering::Relaxed) && !env_disabled()
 }
 
+/// Close GPU entry for process teardown. This is irreversible for current process and must only
+/// be called when host is ending, never while switching libraries.
+pub fn begin_shutdown() {
+    #[cfg(not(target_arch = "wasm32"))]
+    exit::begin_shutdown();
+}
+
+/// Whether process teardown has closed GPU entry.
+pub fn shutting_down() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        exit::shutting_down()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+}
+
+/// Wait up to `timeout` for GPU work already inside driver to leave.
+pub fn wait_idle(timeout: std::time::Duration) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        exit::wait_idle(timeout)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = timeout;
+        true
+    }
+}
+
 /// `LIGHTCRAFT_GPU=0` (or `LIGHTCRAFT_GPU_BACKEND=off`): no GPU for the whole process.
 fn env_disabled() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -165,6 +204,11 @@ pub(crate) fn device() -> Option<&'static ctx::Gpu> {
     if env_disabled() || !ENABLED.load(Ordering::Relaxed) {
         return existing_device();
     }
+    if let Some(gpu) = GPU.get() {
+        return gpu.as_ref().ok();
+    }
+    // Device creation enters the driver and must not begin after process shutdown.
+    let _work = exit::enter()?;
     GPU.get_or_init(|| {
         let Some(backends) = backend::compute_backends() else { return Err("disabled by LIGHTCRAFT_GPU_BACKEND=off".into()) };
         backend::with_init_marker(backends, || {
@@ -269,7 +313,9 @@ pub fn set_pool_limit(bytes: u64) {
 /// Free recycled buffers until at most `keep` bytes stay pooled (e.g. when the app goes idle).
 pub fn trim_pool(keep: u64) {
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(g) = existing_device() {
+    if let Some(g) = existing_device()
+        && let Some(_work) = exit::enter()
+    {
         if keep == 0 {
             render::release_shared_source();
         }
@@ -328,6 +374,8 @@ pub fn render(src: &Arc<Rgb32f>, info: &SourceInfo, s: &DevelopSettings, req: &R
         if !enabled() || req.depth != lightcraft_pipeline::OutputDepth::U8 || req.proof.is_some() {
             return None;
         }
+        // Keep guard alive for whole render, including device access and readback.
+        let _work = exit::enter()?;
         let gpu = device()?;
         let ext = stages.map(|c| c.extension::<GpuStages>());
         let fault = take_fault();

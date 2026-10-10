@@ -44,7 +44,7 @@ enum Request {
     MergePreviewCancel { request: MergePreviewCancelRequest, reply: SyncSender<Result<bool, String>> },
     Preferences { patch: Option<Value>, reply: SyncSender<Result<Value, String>> },
     Persist { reply: SyncSender<Result<(), String>> },
-    Shutdown { reply: SyncSender<Result<(), String>> },
+    Shutdown { process_exit: bool, reply: SyncSender<Result<(), String>> },
 }
 
 #[derive(Clone)]
@@ -68,7 +68,7 @@ impl DesktopHandle {
                         let _ = ready_tx.send(Ok(()));
                         if let Err(error) = lightcraft_engine::guard::catch("desktop host owner", || controller.serve(rx)) {
                             log::error!("desktop host owner stopped unexpectedly: {error}");
-                            let _ = controller.shutdown();
+                            let _ = controller.shutdown(false);
                         }
                     }
                     Ok(Err(error)) | Err(error) => {
@@ -115,7 +115,15 @@ impl DesktopHandle {
         self.call(|reply| Request::Persist { reply })
     }
     pub fn shutdown(&self) -> Result<(), String> {
-        self.call(|reply| Request::Shutdown { reply })
+        self.shutdown_with_mode(false)
+    }
+    pub fn shutdown_process(&self) -> Result<(), String> {
+        self.shutdown_with_mode(true)
+    }
+    fn shutdown_with_mode(&self, process_exit: bool) -> Result<(), String> {
+        let (reply_tx, reply_rx) = sync_channel(1);
+        self.tx.send(Request::Shutdown { process_exit, reply: reply_tx }).map_err(|_| "session owner is closed".to_string())?;
+        reply_rx.recv_timeout(std::time::Duration::from_secs(30)).map_err(|error| format!("session owner shutdown timed out: {error}"))?
     }
     pub fn preview_store(&self) -> PreviewStore {
         self.previews.clone()
@@ -216,6 +224,16 @@ mod tests {
         assert_eq!(snapshot.get("active").and_then(Value::as_u64), Some(photo_id));
         assert!(snapshot.get("undo").and_then(Value::as_u64).is_some_and(|count| count > 0));
         assert!(host.shutdown().is_ok());
+    }
+
+    #[test]
+    fn ordinary_owner_shutdown_leaves_later_host_usable() {
+        let Some(first) = demo_host() else { return };
+        assert!(first.shutdown().is_ok());
+        let Some(second) = demo_host() else { return };
+        assert!(second.snapshot().is_ok(), "later host should remain usable");
+        assert!(second.shutdown().is_ok());
+        assert!(!lightcraft_engine::gpu::shutting_down(), "ordinary host drop must not close process GPU gate");
     }
 
     #[test]

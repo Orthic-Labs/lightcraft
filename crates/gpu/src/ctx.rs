@@ -106,6 +106,13 @@ impl Drop for Buf {
             return;
         };
         if !in_render && let Some(g) = crate::existing_device() {
+            // Pool trimming can call `device.poll`, so buffer cleanup is driver access too. During
+            // teardown the gate refuses entry; leak this device-owned handle rather than entering
+            // wgpu after `wait_idle` has declared the driver quiescent.
+            let Some(_work) = crate::exit::enter() else {
+                std::mem::forget(b);
+                return;
+            };
             g.pool([b]);
             return;
         }

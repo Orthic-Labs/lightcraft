@@ -72,6 +72,7 @@ struct SlotId(u64);
 
 struct Pending {
     ticket: u64,
+    submission: u64,
     request: PreviewRequest,
     key: u64,
     priority: u32,
@@ -203,7 +204,9 @@ impl Renderer {
         }
         let stages = self.stages.entry(slot).or_default().clone();
         let interactive_loupe = interactive && self.is_loupe_slot(&request.slot);
-        self.submit(slot, request, key, job.with_stages(stages), interactive, reply);
+        if !self.submit(slot, request, key, job.with_stages(stages), interactive, reply) {
+            return Ok(());
+        }
         if interactive_loupe {
             self.drop_background_queued();
         }
@@ -246,7 +249,7 @@ impl Renderer {
             let _ = previous.reply.send(Err("preview superseded".to_string()));
             self.drop_queued();
         }
-        self.submit_quick(slot, request, key, job, session.interaction.is_some(), reply);
+        let _ = self.submit_quick(slot, request, key, job, session.interaction.is_some(), reply);
         self.apply_pressure();
         Ok(())
     }
@@ -255,6 +258,14 @@ impl Renderer {
     /// allowed through presentation gate; a draft completing after interaction closes is rerun full.
     pub fn poll(&mut self, session: &mut Session) -> usize {
         let mut completed = 0;
+        while let Some(failure) = self.pool.try_failure() {
+            completed += 1;
+            let matches =
+                self.pending.get(&failure.slot).is_some_and(|pending| pending.key == failure.key && pending.submission == failure.submission);
+            if matches && let Some(pending) = self.pending.remove(&failure.slot) {
+                let _ = pending.reply.send(Err(format!("preview worker failed: {}", failure.error)));
+            }
+        }
         while let Some(done) = self.pool.try_recv() {
             completed += 1;
             let slot = done.slot;
@@ -346,7 +357,7 @@ impl Renderer {
         }
         let key = job.key;
         let stages = self.stages.entry(slot).or_default().clone();
-        self.submit(slot, request, key, job.with_stages(stages), false, reply);
+        let _ = self.submit(slot, request, key, job.with_stages(stages), false, reply);
     }
 
     pub fn cancel(&mut self, slot: &str) -> bool {
@@ -364,8 +375,8 @@ impl Renderer {
         cancelled
     }
 
-    /// Finish every outstanding IPC request before the owner thread exits. Running worker jobs
-    /// may still complete, but their results are accepted and discarded by the normal poll path.
+    /// Finish every outstanding IPC request before owner teardown. Running jobs are bounded by
+    /// [`JobPool::shutdown`]; GPU teardown separately waits for driver work.
     pub fn cancel_all(&mut self) -> usize {
         let pending = std::mem::take(&mut self.pending);
         let count = pending.len();
@@ -376,9 +387,10 @@ impl Renderer {
         count
     }
 
-    /// Shutdown alias for host owner teardown.
-    pub fn shutdown(&mut self) {
+    /// Stop preview workers, waiting up to `timeout` for jobs already running.
+    pub fn shutdown(&mut self, timeout: std::time::Duration) -> bool {
         let _ = self.cancel_all();
+        self.pool.shutdown(timeout)
     }
 
     pub fn retry(&mut self, slot: &str) {
@@ -398,12 +410,12 @@ impl Renderer {
         job: RenderJob,
         interactive: bool,
         reply: std::sync::mpsc::Sender<Result<PreviewDescriptor, String>>,
-    ) {
+    ) -> bool {
         let priority = priority_for(&request.slot, interactive);
         let ticket = self.ticket();
         let view_generation = request.view_generation;
         let sequence = request.sequence;
-        self.pool.submit(
+        let submission = match self.pool.submit(
             slot,
             key,
             priority,
@@ -412,9 +424,16 @@ impl Renderer {
                 let payload = encode_result(&result);
                 JobOutput { ticket, view_generation, sequence, result, payload }
             }),
-        );
+        ) {
+            Ok(submission) => submission,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return false;
+            }
+        };
         let forced_draft = forced_draft(request.quality, interactive);
-        self.pending.insert(slot, Pending { ticket, request, key, priority, forced_draft, quick: false, reply });
+        self.pending.insert(slot, Pending { ticket, submission, request, key, priority, forced_draft, quick: false, reply });
+        true
     }
 
     fn submit_quick(
@@ -425,12 +444,12 @@ impl Renderer {
         job: QuickJob,
         interactive: bool,
         reply: std::sync::mpsc::Sender<Result<PreviewDescriptor, String>>,
-    ) {
+    ) -> bool {
         let priority = priority_for(&request.slot, interactive).saturating_add(1);
         let ticket = self.ticket();
         let view_generation = request.view_generation;
         let sequence = request.sequence;
-        self.pool.submit(
+        let submission = match self.pool.submit(
             slot,
             key,
             priority,
@@ -439,8 +458,15 @@ impl Renderer {
                 let payload = encode_result(&result);
                 JobOutput { ticket, view_generation, sequence, result, payload }
             }),
-        );
-        self.pending.insert(slot, Pending { ticket, request, key, priority, forced_draft: false, quick: true, reply });
+        ) {
+            Ok(submission) => submission,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return false;
+            }
+        };
+        self.pending.insert(slot, Pending { ticket, submission, request, key, priority, forced_draft: false, quick: true, reply });
+        true
     }
 
     fn ticket(&mut self) -> u64 {
@@ -792,7 +818,7 @@ mod tests {
         let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let gate_worker = gate.clone();
         let (started_sender, started_receiver) = std::sync::mpsc::channel();
-        renderer.pool.submit(
+        let _ = renderer.pool.submit(
             SlotId(99),
             0,
             1000,
@@ -827,6 +853,7 @@ mod tests {
             SlotId(99),
             Pending {
                 ticket: 0,
+                submission: 0,
                 request: PreviewRequest {
                     photo_id: 0,
                     slot: "gate".into(),
@@ -954,6 +981,7 @@ mod tests {
         let (reply, _) = std::sync::mpsc::channel();
         let pending = Pending {
             ticket: 8,
+            submission: 8,
             request: PreviewRequest {
                 photo_id: 42,
                 slot: "main".into(),

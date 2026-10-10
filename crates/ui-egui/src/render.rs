@@ -178,6 +178,8 @@ pub struct Renderer {
     seq: u64,
     /// Slot → (key, priority) of the request in flight (queued or running).
     pending: HashMap<Slot, (u64, u32)>,
+    /// Pool submission identity for native jobs; prevents stale failures clearing reused slots.
+    pending_submission: HashMap<Slot, u64>,
     pub textures: HashMap<Slot, Tex>,
     pub last_main_ms: f64,
     /// Jobs finished since start (for inspect/perf).
@@ -248,6 +250,7 @@ impl Renderer {
             queue: Vec::new(),
             seq: 0,
             pending: HashMap::new(),
+            pending_submission: HashMap::new(),
             textures: HashMap::new(),
             last_main_ms: 0.0,
             completed: 0,
@@ -338,12 +341,12 @@ impl Renderer {
         if !self.request_needed(slot, job.key, priority) {
             return;
         }
-        self.pending.insert(slot, (job.key, priority));
         job.request_id = lightcraft_preview::next_tick();
         self.request_ids.insert(slot, job.request_id);
         // (an offload keeps its own per-view stage caches; the flag tells it to)
         let job = if slot.is_view() { job.with_stages(self.stages.entry(slot).or_default().clone()) } else { job };
         if self.offload.is_some() {
+            self.pending.insert(slot, (job.key, priority));
             self.seq += 1;
             self.queue.retain(|q| q.slot != slot);
             self.queue.push(Queued { slot, priority, seq: self.seq, job });
@@ -352,12 +355,21 @@ impl Renderer {
         }
         let key = job.key;
         let background = matches!(slot, Slot::Thumb(_) | Slot::ThumbQuick(_) | Slot::Prefetch(_));
-        self.pool.submit(
+        let submission = match self.pool.submit(
             slot,
             key,
             priority,
             Box::new(move || if background { lightcraft_engine::memory::in_background(|| job.run()) } else { job.run() }),
-        );
+        ) {
+            Ok(submission) => submission,
+            Err(error) => {
+                self.failed.insert(slot, (key, error, self.catalog_rev));
+                self.request_ids.remove(&slot);
+                return;
+            }
+        };
+        self.pending.insert(slot, (key, priority));
+        self.pending_submission.insert(slot, submission);
     }
 
     /// Request a stand-in for `slot` (once per job key).
@@ -366,11 +378,19 @@ impl Renderer {
             return;
         }
         self.quick_tried.insert(slot, job.key);
-        self.pending.insert(slot, (job.key, priority));
         job.request_id = lightcraft_preview::next_tick();
         self.request_ids.insert(slot, job.request_id);
         let key = job.key;
-        self.pool.submit(slot, key, priority, Box::new(move || job.run()));
+        let submission = match self.pool.submit(slot, key, priority, Box::new(move || job.run())) {
+            Ok(submission) => submission,
+            Err(error) => {
+                self.failed.insert(slot, (key, error, self.catalog_rev));
+                self.request_ids.remove(&slot);
+                return;
+            }
+        };
+        self.pending.insert(slot, (key, priority));
+        self.pending_submission.insert(slot, submission);
     }
 
     /// Prepare a photo in the background (a [`Slot::Prefetch`] job runs once per key; a newer one
@@ -380,11 +400,19 @@ impl Renderer {
             return;
         }
         self.prefetched.insert(slot, job.key);
-        self.pending.insert(slot, (job.key, priority));
         job.request_id = lightcraft_preview::next_tick();
         self.request_ids.insert(slot, job.request_id);
         let key = job.key;
-        self.pool.submit(slot, key, priority, Box::new(move || lightcraft_engine::memory::in_background(|| job.run())));
+        let submission = match self.pool.submit(slot, key, priority, Box::new(move || lightcraft_engine::memory::in_background(|| job.run()))) {
+            Ok(submission) => submission,
+            Err(error) => {
+                self.failed.insert(slot, (key, error, self.catalog_rev));
+                self.request_ids.remove(&slot);
+                return;
+            }
+        };
+        self.pending.insert(slot, (key, priority));
+        self.pending_submission.insert(slot, submission);
     }
 
     /// Is a request for `slot` queued or running?
@@ -402,6 +430,7 @@ impl Renderer {
         self.failed.clear();
         self.prefetched.clear();
         self.pending.clear();
+        self.pending_submission.clear();
         self.queue.clear();
     }
 
@@ -433,6 +462,16 @@ impl Renderer {
     /// Requests queued or running.
     pub fn in_flight(&self) -> usize {
         self.pending.len()
+    }
+
+    /// Stop native/inline preview work before process teardown. Pending UI requests have no
+    /// external reply channel, so dropping them is terminal and leaves no stale presentation state.
+    pub fn shutdown(&mut self, timeout: std::time::Duration) -> bool {
+        self.pending.clear();
+        self.pending_submission.clear();
+        self.request_ids.clear();
+        self.queue.clear();
+        self.pool.shutdown(timeout)
     }
 
     /// Why the last render for `slot` failed (until a render with another key succeeds).
@@ -477,13 +516,16 @@ impl Renderer {
         });
         for s in dropped {
             self.pending.remove(&s);
+            self.pending_submission.remove(&s);
             self.request_ids.remove(&s);
         }
         let request_ids = &mut self.request_ids;
         let pending = &mut self.pending;
+        let pending_submission = &mut self.pending_submission;
         self.queue.retain(|q| match q.slot {
             Slot::Variant(k) if stale(used.get(&k)) => {
                 pending.remove(&q.slot);
+                pending_submission.remove(&q.slot);
                 request_ids.remove(&q.slot);
                 false
             }
@@ -534,6 +576,14 @@ impl Renderer {
         #[cfg(not(target_arch = "wasm32"))]
         let inline_ms = 0.0;
         let mut finished = Vec::new();
+        while let Some(failure) = self.pool.try_failure() {
+            if self.pending_submission.get(&failure.slot) == Some(&failure.submission) {
+                self.pending_submission.remove(&failure.slot);
+                self.pending.remove(&failure.slot);
+                self.request_ids.remove(&failure.slot);
+                self.failed.insert(failure.slot, (failure.key, format!("preview worker failed: {}", failure.error), self.catalog_rev));
+            }
+        }
         while let Some(done) = self.pool.try_recv() {
             finished.push((done.slot, done.result, if done.ms > 0.0 { done.ms } else { inline_ms }));
         }
@@ -567,6 +617,7 @@ impl Renderer {
             }
             if self.pending.get(&slot).is_some_and(|p| p.0 == r.key) {
                 self.pending.remove(&slot);
+                self.pending_submission.remove(&slot);
             }
             let rendered = match r.rendered {
                 Ok(x) => {
@@ -707,6 +758,7 @@ impl Renderer {
         self.pool.reprioritize(|s, p| if matches!(s, Slot::Import(_)) { None } else { Some(p) });
         self.queue.retain(|q| !matches!(q.slot, Slot::Import(_)));
         self.pending.retain(|s, _| !matches!(s, Slot::Import(_)));
+        self.pending_submission.retain(|s, _| !matches!(s, Slot::Import(_)));
         self.request_ids.retain(|s, _| !matches!(s, Slot::Import(_)));
         self.textures.retain(|s, _| !matches!(s, Slot::Import(_)));
         self.quick_tried.retain(|s, _| !matches!(s, Slot::Import(_)));
@@ -722,14 +774,17 @@ impl Renderer {
         });
         for s in dropped {
             self.pending.remove(&s);
+            self.pending_submission.remove(&s);
             self.request_ids.remove(&s);
             self.quick_tried.remove(&s);
         }
         let request_ids = &mut self.request_ids;
         let pending = &mut self.pending;
+        let pending_submission = &mut self.pending_submission;
         self.queue.retain(|q| match q.slot {
             Slot::Thumb(id) if !keep.contains(&id) && q.priority <= 10 => {
                 pending.remove(&q.slot);
+                pending_submission.remove(&q.slot);
                 request_ids.remove(&q.slot);
                 false
             }

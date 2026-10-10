@@ -78,6 +78,13 @@ impl eframe::App for App {
         if !self.startup_frame_pending {
             lightcraft_engine::gpu::backend::startup_succeeded();
         }
+        lightcraft_engine::gpu::begin_shutdown();
+        if !self.app.renderer.shutdown(std::time::Duration::from_secs(2)) {
+            log::error!("preview workers are still stopping during application exit");
+        }
+        if !lightcraft_engine::gpu::wait_idle(std::time::Duration::from_secs(2)) {
+            log::error!("GPU work is still stopping during application exit");
+        }
         if let Err(e) = self.prefs.save(&self.app) {
             log::error!("{e}");
         }
