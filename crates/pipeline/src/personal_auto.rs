@@ -15,6 +15,11 @@ use serde::{Deserialize, Serialize};
 
 /// Serialized model schema. Bump when payload shape or semantics change.
 pub const MODEL_SCHEMA: &str = "lightcraft.personal-auto.v1";
+/// Receipt schema for an extracted deterministic baseline. The receipt binds decoded proxy pixels
+/// to source facts/settings; it is an integrity identity, not proof of source ownership.
+pub const BASELINE_RECEIPT_SCHEMA: &str = "lightcraft.personal-auto.baseline-receipt.v1";
+/// Bump when deterministic Auto or baseline preparation semantics change.
+pub const BASELINE_AUTO_REVISION: &str = "lightcraft.deterministic-auto.v1";
 /// Serialized model version.
 pub const MODEL_VERSION: u32 = 2;
 /// Serialized split-manifest schema.

@@ -8,15 +8,16 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
 
-use lightcraft_develop::{DevelopSettings, controls};
+use lightcraft_develop::{DevelopSettings, SCHEMA_VERSION, controls};
+use lightcraft_engine::{camera_profiles, media::RENDER_CACHE_VERSION};
 use lightcraft_pipeline::personal_auto::{
-    FEATURE_COUNT, FEATURE_NAMES, FeatureVector, FieldLabel, LabelSource, MODEL_SCHEMA as CORE_MODEL_SCHEMA, PersonalAutoModel, ShootAssignment,
-    Split, SplitManifest, StyleControl, StyleLabels,
+    BASELINE_AUTO_REVISION, BASELINE_RECEIPT_SCHEMA, FEATURE_COUNT, FEATURE_NAMES, FEATURE_SCHEMA, FeatureVector, FieldLabel, LabelSource,
+    MODEL_SCHEMA as CORE_MODEL_SCHEMA, PersonalAutoModel, ShootAssignment, Split, SplitManifest, StyleControl, StyleLabels,
 };
 use serde_json::{Map, Value, json};
 
 const VERSION: u64 = 1;
-const MODEL_SCHEMA: &str = "lightcraft.personal-auto-eval.model.v2";
+const MODEL_SCHEMA: &str = "lightcraft.personal-auto-eval.model.v3";
 const REPORT_SCHEMA: &str = "lightcraft.personal-auto.report.v1";
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SHOOTS: usize = 100_000;
@@ -32,6 +33,13 @@ struct Manifest {
     controls: Vec<String>,
     bounds: BTreeMap<String, (f64, f64)>,
     shoots: Vec<Shoot>,
+    baseline_receipts: ReceiptMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReceiptMode {
+    ManualNumeric,
+    DecodedProxy,
 }
 
 #[derive(Clone, Debug)]
@@ -49,6 +57,19 @@ struct Photo {
     baseline: BTreeMap<String, f64>,
     weak: Option<Target>,
     ember: Option<Target>,
+    baseline_receipt: Option<BaselineReceipt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BaselineReceipt {
+    settings_version: u64,
+    source_pixels_digest: String,
+    settings_digest: String,
+    features_digest: String,
+    baseline_digest: String,
+    source_digest: String,
+    render_cache_version: u64,
+    camera_profile_cache_key: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -201,8 +222,30 @@ fn write_new_json(path: &Path, value: &Value, kind: &str) -> Result<(), String> 
 
 fn parse_manifest(value: &Value) -> Result<Manifest, String> {
     let object = value.as_object().ok_or("personal manifest root must be an object")?;
+    reject_unknown_fields(
+        object,
+        &[
+            "version",
+            "feature_schema",
+            "featureNames",
+            "feature_names",
+            "controls",
+            "eligible_controls",
+            "control_bounds",
+            "shoots",
+            "baselineReceiptSchema",
+            "provenance",
+        ],
+        "personal manifest",
+    )?;
     if object.get("version").and_then(Value::as_u64) != Some(1) {
         return Err("personal manifest requires version 1".into());
+    }
+    let receipt_schema_declared = object.get("baselineReceiptSchema").is_some();
+    if let Some(schema) = object.get("baselineReceiptSchema")
+        && schema.as_str() != Some(BASELINE_RECEIPT_SCHEMA)
+    {
+        return Err("personal manifest baseline receipt schema is unsupported".into());
     }
     let features = string_array(object, &["feature_schema", "featureNames", "feature_names"])?;
     let canonical_features = FEATURE_NAMES.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
@@ -228,8 +271,14 @@ fn parse_manifest(value: &Value) -> Result<Manifest, String> {
     let mut shoot_ids = BTreeSet::new();
     let mut photo_ids = BTreeSet::new();
     let mut photo_count = 0usize;
+    let mut receipt_count = 0usize;
     for raw in raw_shoots {
         let shoot_object = raw.as_object().ok_or("personal shoot must be an object")?;
+        reject_unknown_fields(
+            shoot_object,
+            &["shoot_id", "shootId", "id", "split", "partition", "camera", "camera_model", "photos", "frames"],
+            "personal shoot",
+        )?;
         let id = text_alias(shoot_object, &["shoot_id", "shootId", "id"], "shoot_id")?.ok_or("personal shoot is missing shoot_id")?;
         valid_id(&id, "shoot_id")?;
         if !shoot_ids.insert(id.clone()) {
@@ -252,6 +301,26 @@ fn parse_manifest(value: &Value) -> Result<Manifest, String> {
                 return Err("personal manifest photo count exceeds cap".into());
             }
             let photo_object = raw_photo.as_object().ok_or("personal photo must be an object")?;
+            reject_unknown_fields(
+                photo_object,
+                &[
+                    "photo_id",
+                    "photoId",
+                    "id",
+                    "features",
+                    "baseline",
+                    "deterministicbaseline",
+                    "deterministicBaseline",
+                    "weakLabelColdStart",
+                    "weaklabelcoldstart",
+                    "weak_label_cold_start",
+                    "emberGroundTruth",
+                    "embergroundtruth",
+                    "ember_ground_truth",
+                    "baselineReceipt",
+                ],
+                "personal photo",
+            )?;
             let photo_id = text_alias(photo_object, &["photo_id", "photoId", "id"], "photo_id")?.ok_or("personal photo is missing photo_id")?;
             valid_id(&photo_id, "photo_id")?;
             if !photo_ids.insert(photo_id.clone()) {
@@ -274,11 +343,82 @@ fn parse_manifest(value: &Value) -> Result<Manifest, String> {
                 true,
             )
             .map_err(|error| format!("{photo_id}: emberGroundTruth {error}"))?;
-            photos.push(Photo { id: photo_id, features: photo_features, baseline, weak, ember });
+            let baseline_receipt = parse_baseline_receipt(photo_object.get("baselineReceipt")).map_err(|error| format!("{photo_id}: {error}"))?;
+            if let Some(receipt) = baseline_receipt.as_ref() {
+                let features_digest = serde_json::to_vec(&photo_features)
+                    .map(|bytes| lightcraft_photo_ai::digest(&bytes))
+                    .map_err(|_| format!("{photo_id}: baselineReceipt featuresDigest cannot encode features"))?;
+                if receipt.features_digest != features_digest {
+                    return Err(format!("{photo_id}: baselineReceipt featuresDigest does not match features"));
+                }
+                let baseline_digest = serde_json::to_vec(&baseline)
+                    .map(|bytes| lightcraft_photo_ai::digest(&bytes))
+                    .map_err(|_| format!("{photo_id}: baselineReceipt baselineDigest cannot encode baseline"))?;
+                if receipt.baseline_digest != baseline_digest {
+                    return Err(format!("{photo_id}: baselineReceipt baselineDigest does not match baseline"));
+                }
+            }
+            receipt_count = receipt_count.saturating_add(usize::from(baseline_receipt.is_some()));
+            photos.push(Photo { id: photo_id, features: photo_features, baseline, weak, ember, baseline_receipt });
         }
         shoots.push(Shoot { id, split, camera, photos });
     }
-    Ok(Manifest { features, controls, bounds, shoots })
+    let photo_total = shoots.iter().map(|shoot| shoot.photos.len()).sum::<usize>();
+    let baseline_receipts = match receipt_count {
+        0 if !receipt_schema_declared => ReceiptMode::ManualNumeric,
+        0 => return Err("personal manifest declares baseline receipts but contains none".into()),
+        count if count == photo_total => ReceiptMode::DecodedProxy,
+        _ => return Err("personal manifest must provide baselineReceipt for every photo or none".into()),
+    };
+    Ok(Manifest { features, controls, bounds, shoots, baseline_receipts })
+}
+
+fn reject_unknown_fields(object: &Map<String, Value>, allowed: &[&str], scope: &str) -> Result<(), String> {
+    if let Some(field) = object.keys().find(|field| !allowed.contains(&field.as_str())) {
+        return Err(format!("{scope} has unknown field {field}"));
+    }
+    Ok(())
+}
+
+fn parse_baseline_receipt(value: Option<&Value>) -> Result<Option<BaselineReceipt>, String> {
+    let Some(value) = value else { return Ok(None) };
+    let object = value.as_object().ok_or("baselineReceipt must be an object")?;
+    if object.get("schema").and_then(Value::as_str) != Some(BASELINE_RECEIPT_SCHEMA)
+        || object.get("autoRevision").and_then(Value::as_str) != Some(BASELINE_AUTO_REVISION)
+        || object.get("featureSchema").and_then(Value::as_str) != Some(FEATURE_SCHEMA)
+        || object.get("sourceLevel").and_then(Value::as_str) != Some("thumb")
+    {
+        return Err("baselineReceipt renderer identity is unsupported; re-extract manifest".into());
+    }
+    let digest = |name: &str| -> Result<String, String> {
+        let value = object.get(name).and_then(Value::as_str).ok_or_else(|| format!("baselineReceipt {name} is missing"))?;
+        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(format!("baselineReceipt {name} is invalid"));
+        }
+        Ok(value.to_owned())
+    };
+    let source_pixels_digest = digest("sourcePixelsDigest")?;
+    let settings_digest = digest("settingsDigest")?;
+    let features_digest = digest("featuresDigest")?;
+    let baseline_digest = digest("baselineDigest")?;
+    let source_digest = digest("sourceDigest")?;
+    let settings_version = object.get("settingsVersion").and_then(Value::as_u64).ok_or("baselineReceipt settingsVersion is missing")?;
+    if settings_version != u64::from(SCHEMA_VERSION) {
+        return Err("baselineReceipt settingsVersion is stale; re-extract manifest".into());
+    }
+    let render_cache_version = object.get("renderCacheVersion").and_then(Value::as_u64).ok_or("baselineReceipt renderCacheVersion is missing")?;
+    let camera_profile_cache_key =
+        object.get("cameraProfileCacheKey").and_then(Value::as_u64).ok_or("baselineReceipt cameraProfileCacheKey is missing")?;
+    Ok(Some(BaselineReceipt {
+        settings_version,
+        source_pixels_digest,
+        settings_digest,
+        features_digest,
+        baseline_digest,
+        source_digest,
+        render_cache_version,
+        camera_profile_cache_key,
+    }))
 }
 
 fn string_array(object: &Map<String, Value>, keys: &[&str]) -> Result<Vec<String>, String> {
@@ -684,6 +824,7 @@ fn train_variant(manifest: &Manifest, variant: Variant, manifest_digest: &str) -
 }
 
 fn train_model(manifest: &Manifest, manifest_digest: &str) -> Result<Value, String> {
+    validate_baseline_receipts(manifest)?;
     let train_photos: Vec<&Photo> = manifest.shoots.iter().filter(|shoot| shoot.split == "train").flat_map(|shoot| shoot.photos.iter()).collect();
     let mut errors = Map::new();
     let (weak, weak_eligibility) = match train_variant(manifest, Variant::Weak, manifest_digest) {
@@ -738,12 +879,56 @@ fn train_model(manifest: &Manifest, manifest_digest: &str) -> Result<Value, Stri
         "trainingErrors": errors,
         "trainingEligibility": eligibility,
         "trainingLabelReceipts": receipts,
+        "baselineContract": baseline_contract(manifest),
         "harnessOnlyReason": if weak.is_none() && ember.is_none() { json!("no variant had eligible train labels") } else { Value::Null },
         "qualificationStatus": "unqualified_no_promotion",
         "training": {"shootCount": manifest.shoots.iter().filter(|shoot| shoot.split == "train").count(), "inputPhotoCount": train_photos.len(), "labelledPhotoCount": labelled, "controlEligible": control_eligible, "excludedPhotoCount": excluded, "manifestSha256": manifest_digest},
         "provenance": {"baseline": "deterministicbaseline supplied in explicit manifest", "weakLabelColdStart": "per-photo provenance supplied in manifest", "emberGroundTruth": "accepted-human-edit provenance supplied in manifest", "provenanceCompleteness": "numericHarnessOnly"},
         "policy": {"automaticPromotion": false, "automaticApply": false, "catalogRead": false, "network": false, "render": false, "featuresMetadataFree": true, "excluded": ["masks", "sceneControls", "geometry", "cameraProfile", "calibration", "lensCorrection"]}
     }))
+}
+
+fn baseline_contract(manifest: &Manifest) -> Value {
+    json!({
+        "receiptSchema": BASELINE_RECEIPT_SCHEMA,
+        "autoRevision": BASELINE_AUTO_REVISION,
+        "featureSchema": FEATURE_SCHEMA,
+        "settingsSchemaVersion": SCHEMA_VERSION,
+        "renderCacheVersion": RENDER_CACHE_VERSION,
+        "cameraProfileCacheKey": camera_profiles::cache_key(),
+        "mode": match manifest.baseline_receipts {
+            ReceiptMode::DecodedProxy => "decodedProxy",
+            ReceiptMode::ManualNumeric => "manualNumeric",
+        },
+    })
+}
+
+fn validate_baseline_receipts(manifest: &Manifest) -> Result<(), String> {
+    if manifest.baseline_receipts == ReceiptMode::ManualNumeric {
+        return Ok(());
+    }
+    let current_cache_key = camera_profiles::cache_key();
+    for shoot in &manifest.shoots {
+        for photo in &shoot.photos {
+            let receipt = photo.baseline_receipt.as_ref().ok_or("decoded-proxy manifest is missing baseline receipt")?;
+            if receipt.settings_version != u64::from(SCHEMA_VERSION)
+                || receipt.source_pixels_digest.is_empty()
+                || receipt.settings_digest.is_empty()
+                || receipt.features_digest.is_empty()
+                || receipt.baseline_digest.is_empty()
+                || receipt.source_digest.is_empty()
+            {
+                return Err("baseline receipt settings or source digest is stale; re-extract manifest".into());
+            }
+            if receipt.render_cache_version != RENDER_CACHE_VERSION {
+                return Err("baseline receipt render cache version is stale; re-extract manifest".into());
+            }
+            if receipt.camera_profile_cache_key != current_cache_key {
+                return Err("baseline receipt camera profile cache key is stale; re-extract manifest".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn training_receipts(manifest: &Manifest, variant: Variant) -> Result<Vec<Value>, String> {
@@ -808,6 +993,10 @@ fn validate_model(model: &Value, manifest: &Manifest, manifest_digest: &str) -> 
         != Some(manifest_digest)
     {
         return Err("personal model split manifest does not match evaluation manifest".into());
+    }
+    validate_baseline_receipts(manifest)?;
+    if object.get("baselineContract") != Some(&baseline_contract(manifest)) {
+        return Err("personal model baseline renderer contract does not match manifest; retrain model".into());
     }
     let variants = object.get("variants").and_then(Value::as_object).ok_or("personal model is missing variants")?;
     let receipts = object.get("trainingLabelReceipts").and_then(Value::as_object).ok_or("personal model is missing training label receipts")?;
@@ -1018,6 +1207,38 @@ mod tests {
         ]})
     }
 
+    fn decoded_manifest() -> Value {
+        let mut value = manifest();
+        value["baselineReceiptSchema"] = json!(BASELINE_RECEIPT_SCHEMA);
+        let digest = "11".repeat(32);
+        for shoot in value["shoots"].as_array_mut().unwrap() {
+            for photo in shoot["photos"].as_array_mut().unwrap() {
+                let features_digest = lightcraft_photo_ai::digest(&serde_json::to_vec(&photo["features"]).unwrap());
+                let baseline = BTreeMap::from([
+                    ("light.contrast".to_owned(), photo["baseline"]["light.contrast"].as_f64().unwrap()),
+                    ("color.vibrance".to_owned(), photo["baseline"]["color.vibrance"].as_f64().unwrap()),
+                    ("color.saturation".to_owned(), photo["baseline"]["color.saturation"].as_f64().unwrap()),
+                ]);
+                let baseline_digest = lightcraft_photo_ai::digest(&serde_json::to_vec(&baseline).unwrap());
+                photo["baselineReceipt"] = json!({
+                    "schema": BASELINE_RECEIPT_SCHEMA,
+                    "autoRevision": BASELINE_AUTO_REVISION,
+                    "featureSchema": FEATURE_SCHEMA,
+                    "sourceLevel": "thumb",
+                    "settingsVersion": SCHEMA_VERSION,
+                    "sourcePixelsDigest": digest.clone(),
+                    "settingsDigest": digest.clone(),
+                    "featuresDigest": features_digest,
+                    "baselineDigest": baseline_digest,
+                    "sourceDigest": digest.clone(),
+                    "renderCacheVersion": RENDER_CACHE_VERSION,
+                    "cameraProfileCacheKey": camera_profiles::cache_key()
+                });
+            }
+        }
+        value
+    }
+
     #[test]
     fn trains_only_train_shoots_and_evaluates_holdouts() {
         let parsed = parse_manifest(&manifest()).unwrap();
@@ -1142,6 +1363,62 @@ mod tests {
         model["trainingLabelReceipts"]["emberGroundTruth"][0]["provenanceSha256"] = json!("00");
         let error = evaluate_model(&parsed, &model, "fixture", Some(Variant::Ember)).expect_err("receipt must bind model to manifest");
         assert!(error.contains("training label receipts"));
+    }
+
+    #[test]
+    fn baseline_renderer_contract_requires_retraining() {
+        let parsed = parse_manifest(&manifest()).unwrap();
+        let mut model = train_model(&parsed, "fixture").unwrap();
+        model["baselineContract"]["autoRevision"] = json!("lightcraft.deterministic-auto.old");
+        let error = evaluate_model(&parsed, &model, "fixture", Some(Variant::Ember)).expect_err("renderer drift must reject model");
+        assert!(error.contains("baseline renderer contract"));
+    }
+
+    #[test]
+    fn partial_baseline_receipts_are_rejected() {
+        let mut value = manifest();
+        value["shoots"][0]["photos"][0]["baselineReceipt"] = json!({"schema": BASELINE_RECEIPT_SCHEMA});
+        let error = parse_manifest(&value).expect_err("partial baseline receipt must fail");
+        assert!(error.contains("renderer identity") || error.contains("sourceDigest"));
+    }
+
+    #[test]
+    fn decoded_receipts_bind_features_baseline_and_settings_schema() {
+        let value = decoded_manifest();
+        parse_manifest(&value).expect("fixture receipt digests should match numeric payload");
+
+        let mut value = decoded_manifest();
+        value["shoots"][0]["photos"][0]["features"][0] = json!(99.0);
+        let error = parse_manifest(&value).expect_err("feature mutation must invalidate receipt");
+        assert!(error.contains("featuresDigest"));
+
+        let mut value = decoded_manifest();
+        value["shoots"][0]["photos"][0]["baseline"]["light.contrast"] = json!(99.0);
+        let error = parse_manifest(&value).expect_err("baseline mutation must invalidate receipt");
+        assert!(error.contains("baselineDigest"));
+
+        let mut value = decoded_manifest();
+        value["shoots"][0]["photos"][0]["baselineReceipt"]["settingsVersion"] = json!(0);
+        let error = parse_manifest(&value).expect_err("stale settings schema must invalidate receipt");
+        assert!(error.contains("settingsVersion"));
+    }
+
+    #[test]
+    fn numeric_manifests_reject_path_bearing_root_shoot_and_photo_fields() {
+        let mut value = manifest();
+        value["path"] = json!("/private/catalog");
+        let error = parse_manifest(&value).expect_err("root path must not enter numeric manifest");
+        assert!(error.contains("path"));
+
+        let mut value = manifest();
+        value["shoots"][0]["path"] = json!("/private/shoot");
+        let error = parse_manifest(&value).expect_err("shoot path must not enter numeric manifest");
+        assert!(error.contains("path"));
+
+        let mut value = manifest();
+        value["shoots"][0]["photos"][0]["path"] = json!("/private/photo");
+        let error = parse_manifest(&value).expect_err("photo path must not enter numeric manifest");
+        assert!(error.contains("path"));
     }
 
     #[test]

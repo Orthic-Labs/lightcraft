@@ -5,15 +5,15 @@
 //! deterministic Auto and pipeline features, then writes a path-free numeric manifest. It never
 //! scans a directory or writes a catalog, original, or sidecar.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use lightcraft_develop::{DevelopSettings, controls};
-use lightcraft_engine::{Session, SourceLevel, catalog::PhotoId};
+use lightcraft_engine::{Session, SourceLevel, camera_profiles, catalog::PhotoId, media::RENDER_CACHE_VERSION};
 use lightcraft_pipeline::auto::auto_tone;
-use lightcraft_pipeline::personal_auto::{FEATURE_NAMES, FeatureVector};
+use lightcraft_pipeline::personal_auto::{BASELINE_AUTO_REVISION, BASELINE_RECEIPT_SCHEMA, FEATURE_NAMES, FEATURE_SCHEMA, FeatureVector};
 use serde_json::{Map, Value, json};
 
 const VERSION: u64 = 1;
@@ -23,6 +23,58 @@ const MAX_PHOTOS: usize = 100_000;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
 const CONTROLS: [&str; 3] = ["light.contrast", "color.vibrance", "color.saturation"];
+
+fn baseline_receipt(
+    source: &lightcraft_raster::Rgb32f,
+    info: &lightcraft_pipeline::SourceInfo,
+    settings: &DevelopSettings,
+    features: &FeatureVector,
+    baseline: &BTreeMap<String, f64>,
+) -> Result<Value, String> {
+    // Digest decoded proxy pixels plus every source fact/settings value used by baseline features.
+    // This lets evaluation reject renderer/profile drift after private paths are removed.
+    let metadata = json!({
+        "sourceLevel": "thumb",
+        "width": source.width,
+        "height": source.height,
+        "sourceInfo": {
+            "lens": info.lens,
+            "raw": info.raw,
+            "asShotTemp": info.as_shot_temp,
+            "asShotTint": info.as_shot_tint,
+            "relativeWb": info.relative_wb,
+            "cameraTone": info.camera_tone,
+        },
+        "baseline": settings,
+    });
+    let settings_bytes = serde_json::to_vec(settings).map_err(|_| "could not encode baseline receipt settings")?;
+    let mut pixel_bytes = Vec::with_capacity(source.data.len().saturating_mul(12));
+    for pixel in &source.data {
+        for channel in pixel {
+            pixel_bytes.extend_from_slice(&channel.to_bits().to_le_bytes());
+        }
+    }
+    let pixel_digest = lightcraft_photo_ai::digest(&pixel_bytes);
+    let settings_digest = lightcraft_photo_ai::digest(&settings_bytes);
+    let features_bytes = serde_json::to_vec(&features.0).map_err(|_| "could not encode baseline receipt features")?;
+    let baseline_bytes = serde_json::to_vec(baseline).map_err(|_| "could not encode baseline receipt values")?;
+    let mut bytes = serde_json::to_vec(&metadata).map_err(|_| "could not encode baseline receipt metadata")?;
+    bytes.extend_from_slice(&pixel_bytes);
+    Ok(json!({
+        "schema": BASELINE_RECEIPT_SCHEMA,
+        "autoRevision": BASELINE_AUTO_REVISION,
+        "featureSchema": FEATURE_SCHEMA,
+        "sourceLevel": "thumb",
+        "settingsVersion": settings.version,
+        "sourcePixelsDigest": pixel_digest,
+        "settingsDigest": settings_digest,
+        "featuresDigest": lightcraft_photo_ai::digest(&features_bytes),
+        "baselineDigest": lightcraft_photo_ai::digest(&baseline_bytes),
+        "sourceDigest": lightcraft_photo_ai::digest(&bytes),
+        "renderCacheVersion": RENDER_CACHE_VERSION,
+        "cameraProfileCacheKey": camera_profiles::cache_key(),
+    }))
+}
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let (mode, offset) = if args.first().map(String::as_str) == Some("personal") {
@@ -255,14 +307,17 @@ fn extract(plan: InputPlan) -> Result<Value, String> {
             }
             let features =
                 FeatureVector::from_pipeline(&source, &info, &settings).map_err(|_| "extract could not compute canonical pipeline features")?;
-            let mut baseline = Map::new();
-            baseline.insert(CONTROLS[0].to_owned(), json!(auto.contrast));
-            baseline.insert(CONTROLS[1].to_owned(), json!(auto.vibrance));
-            baseline.insert(CONTROLS[2].to_owned(), json!(auto.saturation));
+            let baseline = BTreeMap::from([
+                (CONTROLS[0].to_owned(), auto.contrast),
+                (CONTROLS[1].to_owned(), auto.vibrance),
+                (CONTROLS[2].to_owned(), auto.saturation),
+            ]);
+            let receipt = baseline_receipt(&source, &info, &settings, &features, &baseline)?;
             let mut output = Map::new();
             output.insert("photo_id".into(), Value::String(photo.id));
             output.insert("features".into(), serde_json::to_value(features.0).map_err(|_| "extract could not encode features")?);
-            output.insert("baseline".into(), Value::Object(baseline));
+            output.insert("baseline".into(), serde_json::to_value(baseline).map_err(|_| "extract could not encode baseline")?);
+            output.insert("baselineReceipt".into(), receipt);
             if let Some(label) = photo.weak {
                 output.insert("weakLabelColdStart".into(), label);
             }
@@ -281,6 +336,7 @@ fn extract(plan: InputPlan) -> Result<Value, String> {
         "version": VERSION,
         "feature_schema": FEATURE_NAMES,
         "controls": CONTROLS,
+        "baselineReceiptSchema": BASELINE_RECEIPT_SCHEMA,
         "shoots": output_shoots,
         "provenance": {"mode": "explicit-files", "numericOnly": true, "pathsOmitted": true, "exifOmitted": true, "libraryMutated": false}
     }))

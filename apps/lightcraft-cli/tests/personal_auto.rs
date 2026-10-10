@@ -43,6 +43,14 @@ fn explicit_extract_train_evaluate_preserves_sources_and_binds_receipts() {
     assert_eq!(extracted_value["shoots"].as_array().map(Vec::len), Some(2));
     assert_eq!(extracted_value["shoots"][0]["photos"].as_array().map(Vec::len), Some(1));
     assert_eq!(extracted_value["shoots"][1]["photos"].as_array().map(Vec::len), Some(1));
+    let baseline_receipt = &extracted_value["shoots"][0]["photos"][0]["baselineReceipt"];
+    assert_eq!(baseline_receipt["schema"], "lightcraft.personal-auto.baseline-receipt.v1");
+    assert_eq!(baseline_receipt["sourceLevel"], "thumb");
+    assert_eq!(baseline_receipt["sourcePixelsDigest"].as_str().map(str::len), Some(64));
+    assert_eq!(baseline_receipt["settingsDigest"].as_str().map(str::len), Some(64));
+    assert_eq!(baseline_receipt["featuresDigest"].as_str().map(str::len), Some(64));
+    assert_eq!(baseline_receipt["baselineDigest"].as_str().map(str::len), Some(64));
+    assert_eq!(baseline_receipt["sourceDigest"].as_str().map(str::len), Some(64));
     let extracted_text = std::fs::read_to_string(&features).unwrap();
     assert!(!extracted_text.contains("private/original.xmp"));
     assert!(!extracted_text.contains("private-editor"));
@@ -57,6 +65,8 @@ fn explicit_extract_train_evaluate_preserves_sources_and_binds_receipts() {
     assert_eq!(receipt["photoId"], "train-photo");
     assert_eq!(receipt["shootId"], "train-shoot");
     assert!(receipt["provenanceSha256"].as_str().is_some());
+    assert_eq!(model_value["baselineContract"]["mode"], "decodedProxy");
+    assert_eq!(model_value["baselineContract"]["receiptSchema"], "lightcraft.personal-auto.baseline-receipt.v1");
     let receipt_text = std::fs::read_to_string(&model).unwrap();
     assert!(!receipt_text.contains("private/original.xmp"));
     assert!(!receipt_text.contains("private-editor"));
