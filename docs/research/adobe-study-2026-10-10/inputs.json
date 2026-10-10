@@ -1,0 +1,99 @@
+{
+  "schema": 1,
+  "source": "original procedural work",
+  "generator_sha256": "c470843ceb02e21ffe315c3365493f2a21b5fee2257a16242279cb1bd0e95298",
+  "inputs": [
+    {
+      "name": "flat-032.tif",
+      "sha256": "eb8471eeaf99cbbc27c58d0c0616617192a39bf42f31bfd6902de440ad898865",
+      "bytes": 786572,
+      "kind": "lossless-rgb-tiff",
+      "parameters": {
+        "rgb": 32
+      }
+    },
+    {
+      "name": "flat-128.tif",
+      "sha256": "4936f657868f6cd0960e377856231319a0675d18a4d3e905f034d606034f3741",
+      "bytes": 786572,
+      "kind": "lossless-rgb-tiff",
+      "parameters": {
+        "rgb": 128
+      }
+    },
+    {
+      "name": "flat-224.tif",
+      "sha256": "8274da01f083b03a9be78f72cc25220e3bf5116cce312b770f57fefd1bfb719d",
+      "bytes": 786572,
+      "kind": "lossless-rgb-tiff",
+      "parameters": {
+        "rgb": 224
+      }
+    },
+    {
+      "name": "ramp-spatial.tif",
+      "sha256": "f46f9c251e4e1d57571938b641d4f7e428e95266610685c137e3e08a5c6cad4e",
+      "bytes": 786572,
+      "kind": "lossless-rgb-tiff",
+      "parameters": {
+        "histogram": "each RGB gray 0..255 occurs 1024 times"
+      }
+    },
+    {
+      "name": "ramp-shuffled.tif",
+      "sha256": "80d50f57633981f4322ce8746e5f7bcb2c8038394080dc8b3c17596d973d4ab5",
+      "bytes": 786572,
+      "kind": "lossless-rgb-tiff",
+      "parameters": {
+        "histogram": "identical to ramp-spatial",
+        "seed": 20261010
+      }
+    },
+    {
+      "name": "color-patches.tif",
+      "sha256": "cf07dadff289fd9bbf1863f4d9ced4a42c723ce391e00b13b6406c200b728c79",
+      "bytes": 786572,
+      "kind": "lossless-rgb-tiff",
+      "parameters": {
+        "purpose": "saturation & chroma response"
+      }
+    },
+    {
+      "name": "bayer-clean.dng",
+      "sha256": "b8ab90084e3f7593aef1770773f99464081a065e6666a609b18a93a4b5f0e2c0",
+      "bytes": 2097802,
+      "kind": "original-synthetic-bayer-dng",
+      "parameters": {
+        "width": 1024,
+        "height": 1024,
+        "black": 512,
+        "white": 16383,
+        "cfa": "RGGB",
+        "color_matrix": "identity XYZ (original synthetic sensor)",
+        "noisy": false,
+        "seed": 20261010
+      }
+    },
+    {
+      "name": "bayer-noisy.dng",
+      "sha256": "7f1879608332260f42b27ace219d3c56b8fcdbf5f0a37dc67682be6f92a854a1",
+      "bytes": 2097802,
+      "kind": "original-synthetic-bayer-dng",
+      "parameters": {
+        "width": 1024,
+        "height": 1024,
+        "black": 512,
+        "white": 16383,
+        "cfa": "RGGB",
+        "color_matrix": "identity XYZ (original synthetic sensor)",
+        "noisy": true,
+        "seed": 20261010
+      }
+    }
+  ],
+  "generation_environment": {
+    "python": "3.14.6",
+    "pillow": "12.3.0"
+  },
+  "study_use": "Original samples imported into disposable Lightroom Classic 15.6 catalog; no personal photographs"
+}

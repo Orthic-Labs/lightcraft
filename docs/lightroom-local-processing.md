@@ -4,6 +4,10 @@ Read-only check, 10 October 2026: installed Lightroom Classic reports **15.6**, 
 Camera Raw **18.7**, Metal GPU acceleration & automatic GPU preference. System Info was inspected;
 no photo was imported, edited, rated or deleted. Lightroom was quit after inspection.
 
+A subsequent [controlled behavior study](adobe-behavior-study-2026-10-10.md) imported eight original
+procedural inputs into a separate disposable catalog, captured Auto's numeric outputs & observed
+Classic 15.6's non-destructive Enhance notice. Personal catalog contents remained untouched.
+
 ## Processing evidence
 
 - **Auto Tone:** Adobe describes neural-network analysis trained on professionally edited photos.
@@ -19,7 +23,7 @@ no photo was imported, edited, rated or deleted. Lightroom was quit after inspec
 
 Installed-version observation plus documentation establishes a local-processing reference. It does
 not measure latency, memory, quality, network traffic or Ember parity. Future runtime comparison
-requires isolated connectivity & explicitly supplied, consented photos.
+requires isolated connectivity; photographic quality comparison requires consented held-out photos.
 
 ## Primary sources
 

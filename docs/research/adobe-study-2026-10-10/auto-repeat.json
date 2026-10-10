@@ -1,0 +1,143 @@
+{
+  "schema": 1,
+  "stage": "auto-repeat",
+  "read_only_disposable_catalog": true,
+  "photos": [
+    {
+      "input": "bayer-clean.dng",
+      "process_version": "15.4",
+      "settings": {
+        "Exposure2012": "0.45",
+        "Contrast2012": "4",
+        "Highlights2012": "-92",
+        "Shadows2012": "16",
+        "Whites2012": "-9",
+        "Blacks2012": "-37",
+        "Vibrance": "20",
+        "Saturation": "2",
+        "ProcessVersion": "15.4",
+        "Temperature": "6500",
+        "Tint": "10",
+        "ColorNoiseReduction": "25",
+        "Sharpness": "40",
+        "LuminanceNoiseReductionContrast": "0"
+      }
+    },
+    {
+      "input": "bayer-noisy.dng",
+      "process_version": "15.4",
+      "settings": {
+        "Exposure2012": "0.21",
+        "Contrast2012": "7",
+        "Highlights2012": "-46",
+        "Shadows2012": "57",
+        "Whites2012": "-8",
+        "Blacks2012": "-22",
+        "Vibrance": "20",
+        "Saturation": "1",
+        "ProcessVersion": "15.4",
+        "Temperature": "6500",
+        "Tint": "10",
+        "ColorNoiseReduction": "25",
+        "Sharpness": "40",
+        "LuminanceNoiseReductionContrast": "0"
+      }
+    },
+    {
+      "input": "color-patches.tif",
+      "process_version": "15.4",
+      "settings": {
+        "Exposure2012": "-0.56",
+        "Contrast2012": "5",
+        "Highlights2012": "-13",
+        "Shadows2012": "19",
+        "Whites2012": "-10",
+        "Blacks2012": "-1",
+        "Vibrance": "8",
+        "Saturation": "2",
+        "ProcessVersion": "15.4",
+        "LuminanceNoiseReductionContrast": "0"
+      }
+    },
+    {
+      "input": "flat-032.tif",
+      "process_version": "15.4",
+      "settings": {
+        "Exposure2012": "1.25",
+        "Contrast2012": "7",
+        "Highlights2012": "-100",
+        "Shadows2012": "88",
+        "Whites2012": "50",
+        "Blacks2012": "-60",
+        "Vibrance": "12",
+        "Saturation": "2",
+        "ProcessVersion": "15.4",
+        "LuminanceNoiseReductionContrast": "0"
+      }
+    },
+    {
+      "input": "flat-128.tif",
+      "process_version": "15.4",
+      "settings": {
+        "Exposure2012": "-1",
+        "Contrast2012": "7",
+        "Highlights2012": "-99",
+        "Shadows2012": "77",
+        "Whites2012": "50",
+        "Blacks2012": "-60",
+        "Vibrance": "20",
+        "Saturation": "4",
+        "ProcessVersion": "15.4",
+        "LuminanceNoiseReductionContrast": "0"
+      }
+    },
+    {
+      "input": "flat-224.tif",
+      "process_version": "15.4",
+      "settings": {
+        "Exposure2012": "0.9",
+        "Contrast2012": "7",
+        "Highlights2012": "-98",
+        "Shadows2012": "66",
+        "Whites2012": "46",
+        "Blacks2012": "-27",
+        "Vibrance": "20",
+        "Saturation": "-3",
+        "ProcessVersion": "15.4",
+        "LuminanceNoiseReductionContrast": "0"
+      }
+    },
+    {
+      "input": "ramp-shuffled.tif",
+      "process_version": "15.4",
+      "settings": {
+        "Exposure2012": "0.4",
+        "Contrast2012": "7",
+        "Highlights2012": "-56",
+        "Shadows2012": "3",
+        "Whites2012": "50",
+        "Blacks2012": "-20",
+        "Vibrance": "20",
+        "Saturation": "4",
+        "ProcessVersion": "15.4",
+        "LuminanceNoiseReductionContrast": "0"
+      }
+    },
+    {
+      "input": "ramp-spatial.tif",
+      "process_version": "15.4",
+      "settings": {
+        "Exposure2012": "0.38",
+        "Contrast2012": "6",
+        "Highlights2012": "-76",
+        "Shadows2012": "53",
+        "Whites2012": "5",
+        "Blacks2012": "-12",
+        "Vibrance": "20",
+        "Saturation": "3",
+        "ProcessVersion": "15.4",
+        "LuminanceNoiseReductionContrast": "0"
+      }
+    }
+  ]
+}
