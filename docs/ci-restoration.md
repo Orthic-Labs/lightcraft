@@ -80,6 +80,32 @@ test compilation fixes. Four iterator-access lints & one test-module ordering
 lint stopped later gates. Follow-up source resolves all five without suppressions;
 tests & exact-artifact qualification await generated runs.
 
+## Retained-layout native pass, 2026-10-10
+
+[Candidate run 38060467035](https://github.com/Orthic-Labs/lightcraft/actions/runs/38060467035)
+built `e51ce9fcfc53102e8a9e0f8a29860420c027eced` on both targets. Extracted
+evidence matches summary SHA-256 entries: 64 Mac files & 65 Windows files.
+Both targets passed 12/15 journey bodies; culling Apply, Inspector identity
+predicate & scalability failed. Windows foreground guards passed; Mac guards
+still lacked reliable PID/name evidence. Neither target qualified.
+
+Mac collapsed layout now measures `990px 0px 44px`, retaining StageWorkspace
+& Inspector identity with painted preview & full filmstrip. Inspector predicate
+also demanded identity of a deliberately keyed preview image, which can change
+during proxy promotion; follow-up instead requires stable preview frame,
+decoded current pixels, retained controls/focus & correct geometry. Scalability
+reached its new focus/preview retention check, then failed because Display had
+no Escape dismissal, leaving the next toggle closed. Follow-up implements real
+Escape dismissal.
+
+Culling now reaches fresh measurement validation but rejects equivalent
+wire-level f64 numbers. Follow-up re-emits validated f32 rows before comparing
+fresh results, preserving exact binding, source, flags, revision & action checks;
+an adjacent-equivalent-f64 regression exercises completed Apply. Group presence
+now hashes separately, with a regression rejecting absent/zero-group tampering. These source
+repairs require generated tests & another exact-revision native run. RightKit
+foreground repair remains with its assigned owner.
+
 ## Suspension history
 
 Checked 2026-10-10 against `Orthic-Labs/lightcraft` at main revision

@@ -550,6 +550,14 @@ function Header({ snapshot, mode, setMode, thumbSize }: { snapshot: DesktopSnaps
   const [displayOpen, setDisplayOpen] = useState(false);
   const randomSort = sortIsRandom(snapshot.sort);
   const sort = (key: string) => { setSortOpen(false); void run('library.sort', { key }); };
+  useEffect(() => {
+    if (!displayOpen) return;
+    const dismissDisplay = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') setDisplayOpen(false);
+    };
+    document.addEventListener('keydown', dismissDisplay);
+    return () => document.removeEventListener('keydown', dismissDisplay);
+  }, [displayOpen]);
   return <header className="lc-library-header">
     <div className="lc-library-title"><h1>{sourceLabel}</h1><span>{snapshot.selection.length > 1 ? `${snapshot.selection.length} selected · ` : ''}{snapshot.total} photos</span></div>
     <div className="lc-library-actions">
