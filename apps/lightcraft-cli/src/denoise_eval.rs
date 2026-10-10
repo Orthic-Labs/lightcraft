@@ -411,7 +411,7 @@ fn make_clean(size: usize, name: &str) -> Rgb32f {
 fn make_noisy(clean: &Rgb32f, seed: u32, row_pattern: bool) -> Rgb32f {
     let mut out = clean.clone();
     for y in 0..clean.height {
-        let row = if row_pattern { (hash_unit(seed ^ y as u32 * 0x9e37) - 0.5) * 0.005 } else { 0.0 };
+        let row = if row_pattern { (hash_unit(seed ^ (y as u32 * 0x9e37)) - 0.5) * 0.005 } else { 0.0 };
         for x in 0..clean.width {
             let i = y * clean.width + x;
             for c in 0..3 {
