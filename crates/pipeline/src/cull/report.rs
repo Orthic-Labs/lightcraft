@@ -111,10 +111,10 @@ pub fn validate_policy(policy: &CullPolicy) -> Result<(), ReportError> {
     if !policy.similarity_threshold.is_finite() || !(0.0..=1.0).contains(&policy.similarity_threshold) {
         return Err(ReportError::InvalidPolicy { field: "similarityThreshold", reason: "must be finite and within 0..1" });
     }
-    if let Some(value) = policy.reject_below {
-        if !value.is_finite() || !(0.0..=100.0).contains(&value) {
-            return Err(ReportError::InvalidPolicy { field: "rejectBelow", reason: "must be finite and within 0..100" });
-        }
+    if let Some(value) = policy.reject_below
+        && (!value.is_finite() || !(0.0..=100.0).contains(&value))
+    {
+        return Err(ReportError::InvalidPolicy { field: "rejectBelow", reason: "must be finite and within 0..100" });
     }
     Ok(())
 }
