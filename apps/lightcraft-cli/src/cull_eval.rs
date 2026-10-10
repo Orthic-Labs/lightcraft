@@ -341,10 +341,10 @@ fn parse_dataset(value: &Value, kind: InputKind) -> Result<Dataset, String> {
 
 fn validate_label_manifest_header(value: &Value) -> Result<(), String> {
     let Some(object) = value.as_object() else { return Ok(()) };
-    if let Some(version) = object.get("version") {
-        if version.as_u64() != Some(1) {
-            return Err("labels version is unsupported".into());
-        }
+    if let Some(version) = object.get("version")
+        && version.as_u64() != Some(1)
+    {
+        return Err("labels version is unsupported".into());
     }
     if let Some(fixture_kind) = object.get("fixture_kind").and_then(Value::as_str)
         && !matches!(fixture_kind, "SYNTHETIC" | "CONSENTED")
@@ -488,22 +488,22 @@ fn parse_shoot(value: &Value, kind: InputKind, index: usize) -> Result<Shoot, St
     let frame_annotations: Vec<(String, Option<Label>, Option<Decision>)> =
         shoot.frames.values().map(|frame| (frame.id.clone(), frame.label, frame.decision)).collect();
     for (frame_id, label, decision) in frame_annotations {
-        if let Some(label) = label {
-            if kind == InputKind::Labels {
-                match label {
-                    Label::Keep => {
-                        shoot.acceptable.insert(frame_id.clone());
-                    }
-                    Label::Reject => {
-                        shoot.reject.insert(frame_id.clone());
-                    }
+        if let Some(label) = label
+            && kind == InputKind::Labels
+        {
+            match label {
+                Label::Keep => {
+                    shoot.acceptable.insert(frame_id.clone());
+                }
+                Label::Reject => {
+                    shoot.reject.insert(frame_id.clone());
                 }
             }
         }
-        if let Some(decision) = decision {
-            if kind == InputKind::Predictions {
-                set_decision(&mut shoot, &frame_id, decision)?;
-            }
+        if let Some(decision) = decision
+            && kind == InputKind::Predictions
+        {
+            set_decision(&mut shoot, &frame_id, decision)?;
         }
     }
     parse_shoot_bursts(object, &mut shoot)?;
@@ -811,10 +811,10 @@ fn validate_bursts(root: &Value, dataset: &Dataset) -> Result<(), String> {
         for frame in shoot.frames.values() {
             if let Some(burst) = &frame.burst {
                 valid_id(burst, "burst ID")?;
-                if let Some(previous) = burst_frames.insert(burst.clone(), shoot.id.clone()) {
-                    if previous != shoot.id {
-                        return Err("burst membership crosses shoots".into());
-                    }
+                if let Some(previous) = burst_frames.insert(burst.clone(), shoot.id.clone())
+                    && previous != shoot.id
+                {
+                    return Err("burst membership crosses shoots".into());
                 }
             }
         }
@@ -845,14 +845,14 @@ fn validate_splits(root: &Value, dataset: &Dataset) -> Result<(), String> {
     }
     let mut frame_splits: BTreeMap<String, String> = BTreeMap::new();
     for shoot in dataset.shoots.values() {
-        if let Some(split) = &shoot.split {
-            if !split.is_empty() {
-                for id in shoot.frames.keys() {
-                    if let Some(previous) = frame_splits.insert(id.clone(), split.clone()) {
-                        if previous != *split {
-                            return Err("frame appears in multiple split shoots".into());
-                        }
-                    }
+        if let Some(split) = &shoot.split
+            && !split.is_empty()
+        {
+            for id in shoot.frames.keys() {
+                if let Some(previous) = frame_splits.insert(id.clone(), split.clone())
+                    && previous != *split
+                {
+                    return Err("frame appears in multiple split shoots".into());
                 }
             }
         }
