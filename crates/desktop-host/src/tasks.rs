@@ -1609,7 +1609,11 @@ mod tests {
             .and_then(|photos| {
                 photos.iter().find_map(|photo| {
                     let flag = photo.get("proposedFlag").and_then(Value::as_str)?;
-                    (flag == "pick" || flag == "reject").then(|| json!({"id": photo.get("id")?, "flag": flag}))
+                    if flag != "pick" && flag != "reject" {
+                        return None;
+                    }
+                    let id = photo.get("id")?;
+                    Some(json!({"id": id, "flag": flag}))
                 })
             })
             .expect("proposal should include an explicit flag");
