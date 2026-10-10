@@ -1,6 +1,6 @@
 # Offline denoise qualification
 
-Status, 2026-10-10: source-only diagnostic protocol. Production Ember has classical RGB luminance/chroma noise reduction; no learned denoiser is qualified. Adobe's disclosed joint raw demosaic/denoise & current non-destructive workflow are studied separately in [Adobe Denoise research](adobe-denoise-research.md).
+Status, 2026-10-10: procedural CPU baseline measured through generated CI. Production Ember has classical RGB luminance/chroma noise reduction; no learned denoiser is qualified. Adobe's disclosed joint raw demosaic/denoise & current non-destructive workflow are studied separately in [Adobe Denoise research](adobe-denoise-research.md).
 
 ## Procedural baseline
 
@@ -30,5 +30,22 @@ An initial RGB candidate is post-demosaic. It cannot establish raw-mosaic recons
 
 ## Next evidence
 
-Fork Actions are restored. Generated native candidate builds are configured to retain bounded procedural CPU baseline receipts before native QA, bound to exact revision, target, CLI hash & host OS metadata while remaining alwaysUNQUALIFIED. First execution of this integration is pending.
-Next compare a rights-cleared RGB candidate against identical procedural & consented photographic conditions. Keep source files & catalog authoritative; experimental intermediates belong in disposable cache state.
+Fork Actions are restored & now produce baseline receipts on candidate builds. Keep source files & catalog authoritative; experimental intermediates belong in disposable cache state.
+
+### CI evidence, run 38055623316
+
+[Mac & Windows candidate receipts](https://github.com/Orthic-Labs/lightcraft/actions/runs/38055623316) completed from source revision `93678dd1b9977d6ee509679be164fe2ec3b44113`. Both used 128×128 procedural input, one first call plus three warm calls, CPU-only processing, zero repeatability errors & zero out-of-range channels. Receipts remain alwaysUNQUALIFIED.
+
+| Case | Identity MSE / gradient / PSNR | Amount 100 MSE / gradient / PSNR | Best sampled amount by MSE |
+| --- | --- | --- | --- |
+| Flat shadows | 1.734e-5 / 5.717e-3 / 47.61 dB | 1.718e-6 / 1.558e-3 / 57.65 dB | 100 |
+| Color patches/gradient | 1.225e-4 / 1.564e-2 / 39.12 dB | 6.916e-3 / 3.154e-2 / 21.60 dB | 0 |
+| Hard step edge | 1.618e-4 / 1.796e-2 / 37.91 dB | 2.615e-4 / 8.072e-3 / 35.83 dB | 50 |
+| Fine texture | 1.530e-4 / 1.744e-2 / 38.15 dB | 1.108e-3 / 4.708e-2 / 29.56 dB | 25 |
+| Intentional soft edge | 1.492e-4 / 1.723e-2 / 38.26 dB | 7.502e-5 / 4.395e-3 / 41.25 dB | 75 |
+
+Mac host metadata was Apple M1 (Virtual), 3 CPUs & 7,516,196,864 bytes memory; nonzero-NR warm p50 ranged 0.391–0.482 ms & p95 0.392–0.784 ms. Windows metadata was AMD EPYC 7763 64-Core Processor, 4 CPUs & 17,174,360,064 bytes; warm p50 ranged 1.842–2.319 ms & p95 1.955–2.436 ms. Mac & Windows CLI hashes were fbce434888b0892eb8c8cbb5b90a0625d5246d350bf9dc8c404fcaeb7170e2c3 & 30b3e43909d95f0320c92f671e23da40bc114e3180ec05f841c3c2533ea54915.
+
+Cross-platform pixel SHA-256 values are not bit-identical, including noisy/output buffers & one soft-edge clean buffer, so receipts bind each platform independently. Results describe synthetic RGB guided-NR behavior only; they provide no photographic, learned-model, Adobe-parity or Metal evidence.
+
+Next compare a rights-cleared RGB candidate against identical procedural & consented photographic conditions.
