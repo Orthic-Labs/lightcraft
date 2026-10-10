@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn rejects_hallucinated_or_missing_ids() {
-        let Ok(proxy) = proxy(false) else { return };
+        let proxy = proxy(false).expect("valid proxy fixture must construct");
         let mut result = valid_result();
         if let Some(item) = result.items.iter_mut().nth(1) {
             item.id = "ghost".into();
@@ -497,7 +497,7 @@ mod tests {
 
     #[test]
     fn rejects_uncertain_or_invalid_winners() {
-        let Ok(proxy) = proxy(false) else { return };
+        let proxy = proxy(false).expect("valid proxy fixture must construct");
         let inputs = [ProxyInput { id: "p0", proxy: &proxy }, ProxyInput { id: "p1", proxy: &proxy }];
         let mut result = valid_result();
         if let Some(item) = result.items.iter_mut().next() {
@@ -513,7 +513,7 @@ mod tests {
 
     #[test]
     fn accepts_explicit_tied_winners() {
-        let Ok(proxy) = proxy(false) else { return };
+        let proxy = proxy(false).expect("valid proxy fixture must construct");
         let inputs = [ProxyInput { id: "p0", proxy: &proxy }, ProxyInput { id: "p1", proxy: &proxy }];
         let mut result = valid_result();
         result.acceptable_winner_ids.push("p1".into());
@@ -529,26 +529,23 @@ mod tests {
     fn rejects_size_duplicate_and_metadata_ids() {
         assert!(validate_opaque_id("path/id").is_err());
         assert!(validate_opaque_id(" ").is_err());
-        let Ok(proxy) = proxy(false) else { return };
-        let duplicate = [ProxyInput { id: "p0", proxy: &proxy }, ProxyInput { id: "p0", proxy: &proxy }];
+        let valid_proxy = proxy(false).expect("valid proxy fixture must construct");
+        let duplicate = [ProxyInput { id: "p0", proxy: &valid_proxy }, ProxyInput { id: "p0", proxy: &valid_proxy }];
         assert!(validate_inputs(&duplicate).is_err());
-        let too_few = [ProxyInput { id: "p0", proxy: &proxy }];
+        let too_few = [ProxyInput { id: "p0", proxy: &valid_proxy }];
         assert!(validate_inputs(&too_few).is_err());
         assert!(proxy(true).is_err());
     }
 
     #[test]
     fn reserves_budget_before_upload_and_bounds_multiimage_tokens() {
-        let reserve = match admission_reserve_usd("deepseek/deepseek-v4.1-flash") {
-            Ok(value) => value,
-            Err(_) => return,
-        };
+        let reserve = admission_reserve_usd("deepseek/deepseek-v4.1-flash").expect("cost fixture must resolve");
         assert!(reserve.is_finite() && reserve > 0.0);
-        let Ok(proxy) = proxy(false) else { return };
+        let proxy = proxy(false).expect("valid proxy fixture must construct");
         let inputs = [ProxyInput { id: "p0", proxy: &proxy }, ProxyInput { id: "p1", proxy: &proxy }];
         let too_small = RequestOptions { budget_usd: reserve / 2.0, ..RequestOptions::default() };
         assert!(request_body("deepseek/deepseek-v4.1-flash", &inputs, too_small).is_err());
-        let Ok(large_proxy) = proxy_with_data(false, 50_000) else { return };
+        let large_proxy = proxy_with_data(false, 50_000).expect("large valid proxy fixture must construct");
         let large_inputs = [ProxyInput { id: "p0", proxy: &large_proxy }, ProxyInput { id: "p1", proxy: &large_proxy }];
         assert!(request_body("deepseek/deepseek-v4.1-flash", &large_inputs, RequestOptions::default()).is_err());
     }
