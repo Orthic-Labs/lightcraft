@@ -15,6 +15,15 @@ function run(args, cwd = repoRoot, env = process.env) {
   const result = spawnSync('pnpm', args, { cwd, env, stdio: 'inherit', windowsHide: true, shell: process.platform === 'win32' });
   if (result.error || result.status !== 0) fail(`pnpm ${args[0]} failed: ${result.error?.message || result.status}`);
 }
+function printCompilerErrors(stdout) {
+  for (const line of (stdout || '').split('\n')) {
+    let entry;
+    try { entry = JSON.parse(line); } catch { continue; }
+    if (entry.reason === 'compiler-message' && entry.message?.level === 'error') {
+      process.stderr.write(entry.message.rendered || entry.message.message + '\n');
+    }
+  }
+}
 // Existing engine embeds licensed craft-fonts; every candidate supplies pinned input.
 const fonts = path.join(process.env.RUNNER_TEMP, 'lightcraft-build-fonts');
 const clone = spawnSync('git', ['clone', '--quiet', 'https://github.com/storytold/craft-fonts.git', fonts], { stdio: 'inherit', windowsHide: true });
@@ -27,20 +36,17 @@ run(['run', 'build'], repoRoot, env);
 const cliCompiler = runCargoSync(['build', '--locked', '-p', 'lightcraft-cli', '--target', target, '--profile', 'release-iterate', '--message-format=json'], { cwd: repoRoot, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true });
 writeFileSync(path.join(root, 'cli-cargo-artifacts.jsonl'), cliCompiler.stdout || '');
 if (cliCompiler.stderr) process.stderr.write(cliCompiler.stderr);
-if (cliCompiler.error || cliCompiler.status !== 0) fail(`RightKit headless CLI Cargo failed: ${cliCompiler.error?.message || cliCompiler.status}`);
+if (cliCompiler.error || cliCompiler.status !== 0) {
+  printCompilerErrors(cliCompiler.stdout);
+  fail(`RightKit headless CLI Cargo failed: ${cliCompiler.error?.message || cliCompiler.status}`);
+}
 const compiler = runCargoSync(['build', '--locked', '--manifest-path', 'apps/lightcraft-desktop/Cargo.toml', '--features', 'qa-native,custom-protocol', '--target', target, '--profile', 'release-iterate', '--message-format=json'], { cwd: repoRoot, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true });
 // Retain compiler records on failures too. A large asynchronous stdout write
 // followed by process failure can drop diagnostics near the end of JSON output.
 writeFileSync(path.join(root, 'cargo-artifacts.jsonl'), `${cliCompiler.stdout || ''}\n${compiler.stdout || ''}`);
 if (compiler.stderr) process.stderr.write(compiler.stderr);
 if (compiler.error || compiler.status !== 0) {
-  for (const line of (compiler.stdout || '').split('\n')) {
-    let entry;
-    try { entry = JSON.parse(line); } catch { continue; }
-    if (entry.reason === 'compiler-message' && entry.message?.level === 'error') {
-      process.stderr.write(entry.message.rendered || entry.message.message + '\n');
-    }
-  }
+  printCompilerErrors(compiler.stdout);
   fail(`RightKit candidate Cargo failed: ${compiler.error?.message || compiler.status}`);
 }
 const nativeRoot = path.join(repoRoot, 'apps/lightcraft-desktop');
