@@ -52,6 +52,34 @@ changes & viewport bounce did not restore geometry. Ember follow-up preserves
 stateful workspaces while testing isolated DOM replacement; SDK foreground
 repair remains with its assigned owner.
 
+## Follow-up evidence, 2026-10-10
+
+[Candidate run 38058116433](https://github.com/Orthic-Labs/lightcraft/actions/runs/38058116433)
+built source `d89a0ff1fff11bd0166bb2327dec088e35e0983c` on both targets.
+Extracted evidence matches summary SHA-256 entries: 63 Mac files & 60 Windows
+files. Windows again passed 14/15 journey bodies; Mac passed 12/15 with the
+same unavailable foreground evidence. Neither target qualified.
+
+The culling dialog now exposes its exact error: `cull proposal must be an object`.
+Source fix `237a58bf` corrects Apply parsing that selected the numeric `version`
+field instead of its proposal object; a real JSON round-trip regression covers
+direct & nested proposal shapes. Native Apply/undo must still verify that fix.
+
+Mac grid spacer replacement restored computed height, but its window retained
+computed `top: 0` despite inline `top: 78618.4px`. Replacing that window alone
+restored computed top. A zero-size child invalidation probe did not restore
+stage columns. Follow-up source refreshes geometry shells while retaining
+photo, StageWorkspace & Inspector content through a stable portal host; native
+regressions require preserved focus, preview identity, decoded pixels & correct
+layout. SDK foreground repair remains with **Rightkit Mac new**.
+
+Full workspace run
+[38059311663](https://github.com/Orthic-Labs/lightcraft/actions/runs/38059311663)
+at `ea470b4f7f68235e0e59ba3bbfa4670b5ce57803` reached clippy after earlier
+test compilation fixes. Four iterator-access lints & one test-module ordering
+lint stopped later gates. Follow-up source resolves all five without suppressions;
+tests & exact-artifact qualification await generated runs.
+
 ## Suspension history
 
 Checked 2026-10-10 against `Orthic-Labs/lightcraft` at main revision

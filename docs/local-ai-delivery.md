@@ -1,17 +1,17 @@
 # Local AI delivery
 
-Status, 2026-10-10: source implementation & static review only. No current-revision compilation, test pass, native QA, learned-model accuracy or 2,000-RAW timing is claimed. No new external dependencies or model weights were added; offline similarity qualification reuses existing color/raster/pipeline workspace crates as native dev-dependencies.
+Status, 2026-10-10: generated CI built source revision 93678dd1b9977d6ee509679be164fe2ec3b44113 on macOS/arm64 & Windows/x86_64; hidden native QA failed, while CPU synthetic denoise receipts were retained as always `UNQUALIFIED`. Follow-up source awaits full generated gates & exact-artifact qualification. No learned-model accuracy, photographic quality, native qualification or 2,000-RAW timing is claimed. No new external dependencies or model weights were added; offline similarity qualification reuses existing color/raster/pipeline workspace crates as native dev-dependencies.
 
 ## Work order
 
 | Work | Current evidence | Next gate |
 | --- | --- | --- |
-| CI restoration | Fork usage suspension confirmed; API toggles/dispatch attempts recorded | Maintainer re-enable at [fork Actions](https://github.com/Orthic-Labs/lightcraft/actions), then generated CI & exact-artifact hidden Mac/Windows QA |
+| CI restoration | Generated candidate run 38055623316 built source revision 93678dd1b9977d6ee509679be164fe2ec3b44113 on Mac/Windows; receipts were retained; hidden native QA failed | Resolve native QA failures, then rerun exact-artifact hidden Mac/Windows QA; no publication until pass |
 | Culling decisions & evaluation | Detached cancellable desktop jobs, paged React review, explicit acceptance/undo, CLI baseline/scorer & synthetic regression source | Generated gates & exact-artifact hidden RightKit review/apply/undo journey; lock human-labelled shoot-level test corpus |
 | Face/eye & similarity weights | Exact YuNet, DINOv2 & MediaPipe v1 bytes/SHA pinned; graph/container inventories recorded; offline DINOv2 Candle core, verified loader, RGB8 input & classical comparison; experimental YuNet & MediaPipe raw graphs plus still-image decode/crops/landmark/blendshape composition; no model qualified | Prove graph/preprocessing/geometry reference agreement, calibrate held-out eye evidence, measure larger-crop accuracy/abstention & named-platform latency |
 | Cloud BYOK comparison | Strict bounded multi-image OpenRouter contract/transport in source, unknown blur/blink & reviewable outputs | Shared transport qualification, real provider credentials & controlled ambiguous-burst evaluation |
 | Personal Auto | Deterministic style-residual learner with 28 scalar/spatial fields; explicit-file extract/train/evaluate CLI; private provenance digests, coverage & fallback receipts in source; migration & preservation regression source | Shoot-disjoint rendered/preference comparison against deterministic Auto; numeric distance alone cannot promote a model |
-| Denoise | Original procedural RGB identity/classical NR benchmark source with numeric-only digests, metrics & repeat timing; learned RGB candidate research | Generated native baseline receipts, checkpoint-rights evidence, independent numerical reference & held-out photographic comparison |
+| Denoise | Original procedural RGB identity/classical NR benchmark source plus generated 128×128 CPU receipts on Mac/Windows with numeric digests, metrics & repeat timing; all reports stay `UNQUALIFIED` | Checkpoint-rights evidence, independent numerical reference & held-out photographic comparison |
 | ChatGPT-plan OAuth | Researched spec retained | Login convenience after useful photo workflows qualify |
 
 ## Current offline DINOv2 source
@@ -55,7 +55,7 @@ Engine timing source separates per-photo origin decode/thumbnail preparation, cl
 Missing learned crop/inference stages are explicitly `notApplicable`. Timing metadata is excluded from proposal
 binding. CLI baseline validates timing receipts & emits per-photo p50/p95 plus planning totals; status remains
 `stage-only`, with hardware/build/timestamps/cache metadata absent. Scorer rejects multiple winners inside one labeled burst, malformed labels & split disagreement; acceptable
-winner sets never supply missing keep labels. Regression source remains unrun while fork Actions is suspended.
+winner sets never supply missing keep labels. Regression source remains source-only; generated CI is restored, but follow-up source awaits a full generated test pass.
 
 Evidence protocols:
 
@@ -81,7 +81,7 @@ Fixture contains synthetic numeric labels only. Explicit-file extraction require
 
 ## Procedural denoise source harness
 
-`apps/lightcraft-cli/src/denoise_eval.rs` exposes `ai denoise baseline`: five original procedural linear Rec.2020 patterns compare injected-noise identity against exact production guided NR at 0/25/50/75/100. Numeric-only create-new receipts bind clean/noisy/output digests, pixel/gradient error, supplied unverified hardware/revision, first call & 2..10 warm repeats. Finite production output is measured without extra clipping; nonfinite output fails. No photo, catalog, model or provider is read. Source analytic/hostile-argument/overwrite regressions remain unrun; all reports stay `UNQUALIFIED`. See [protocol](denoise-qualification.md).
+`apps/lightcraft-cli/src/denoise_eval.rs` exposes `ai denoise baseline`: five original procedural linear Rec.2020 patterns compare injected-noise identity against exact production guided NR at 0/25/50/75/100. Numeric-only create-new receipts bind clean/noisy/output digests, pixel/gradient error, supplied unverified hardware/revision, first call & 2..10 warm repeats. Finite production output is measured without extra clipping; nonfinite output fails. No photo, catalog, model or provider is read. Generated CI measured 128×128 CPU receipts on Mac/Windows; source analytic/hostile-argument/overwrite regressions remain unrun, so all reports stay `UNQUALIFIED`. See [protocol](denoise-qualification.md).
 
 ## Detector qualification source
 
