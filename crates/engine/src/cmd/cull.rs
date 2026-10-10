@@ -648,9 +648,11 @@ impl Session {
 fn parse_cull_apply(s: &mut Session, p: &Value) -> Result<CullApplyJob> {
     const C: &str = "photo.cullApply";
     let proposal_arg = p.get("proposal").ok_or_else(|| super::bad(C, "missing `proposal`"))?;
-    let proposal = proposal_arg
-        .get("version")
-        .map_or_else(|| proposal_arg.get("proposal").ok_or_else(|| super::bad(C, "`proposal` must be a cull proposal or cullSuggest result")), Ok)?;
+    let proposal = if proposal_arg.get("version").is_some() {
+        proposal_arg
+    } else {
+        proposal_arg.get("proposal").ok_or_else(|| super::bad(C, "`proposal` must be a cull proposal or cullSuggest result"))?
+    };
     let proposal = exact_object(proposal, &["version", "catalogRevision", "policy", "photos", "binding"], "cull proposal")?;
     let proposal = Value::Object(proposal.clone());
     let version = proposal["version"].as_u64().ok_or_else(|| super::bad(C, "proposal version is missing or invalid"))?;
@@ -1293,6 +1295,9 @@ mod tests {
         let prepared = session.plan_cull_apply(&transport).expect("unchanged native-shaped proposal should plan");
         assert_eq!(prepared.job.catalog_revision, 1_u64 << 32);
         assert_eq!(prepared.job.photos[0].source, source_identity_before);
+        let nested = json!({"proposal": {"proposal": transport["proposal"].clone(), "photos": []}, "accept": [{"id": id.0, "flag": "reject"}]});
+        let nested_prepared = session.plan_cull_apply(&nested).expect("cullSuggest-shaped proposal should plan");
+        assert_eq!(nested_prepared.job.catalog_revision, 1_u64 << 32);
         std::fs::remove_file(path).unwrap();
     }
 }
