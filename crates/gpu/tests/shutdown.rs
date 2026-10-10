@@ -22,7 +22,6 @@ fn no_gpu_render_starts_after_process_shutdown() {
     let refused = Arc::new(AtomicBool::new(false));
     let worker = {
         let source = source.clone();
-        let info = info.clone();
         let settings = settings.clone();
         let rendered = rendered.clone();
         let refused = refused.clone();
