@@ -267,8 +267,8 @@ fn cmd_ci() -> Result<(), String> {
             "test",
             Box::new(|| {
                 let mut c = cargo();
-                c.args(["test", "--workspace"]);
-                run(c, "cargo test --workspace")
+                c.args(["test", "--workspace", "--no-fail-fast"]);
+                run(c, "cargo test --workspace --no-fail-fast")
             }),
         ),
         ("parity", Box::new(|| parity::run(&root(), false))),
