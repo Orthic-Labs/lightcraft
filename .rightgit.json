@@ -7,8 +7,7 @@
   ],
   "matrix": {
     "os": [
-      "macos-15",
-      "windows-2025"
+      "macos-15"
     ],
     "node": [
       "26.8.1"
@@ -29,7 +28,7 @@
     "requiredForGate": true
   },
   "gate": {
-    "path": "scripts/desktop/gate.sh"
+    "path": "scripts/desktop/upstream-pr-gate.sh"
   },
   "candidate": {
     "buildScript": "release:candidate:build",

@@ -24,7 +24,7 @@ jobs:
       matrix:
         # Full validation stays on one declared runner; prefer configured
         # Windows when available, otherwise preserve first configured OS.
-        os: ["windows-2025"]
+        os: ["macos-15"]
         node: ["26.8.1"]
     runs-on: ${{ matrix.os }}
     steps:
@@ -45,7 +45,7 @@ jobs:
               changed=false
               while IFS= read -r changed_path; do
                 case "$changed_path" in
-                  *.rs|Cargo.toml|*/Cargo.toml|Cargo.lock|*/Cargo.lock|rust-toolchain|*/rust-toolchain|rust-toolchain.toml|*/rust-toolchain.toml|.cargo/*|*/.cargo/*|.rightgit.json|.github/workflows/*.yml|.github/workflows/*.yaml|scripts/desktop/gate.sh)
+                  *.rs|Cargo.toml|*/Cargo.toml|Cargo.lock|*/Cargo.lock|rust-toolchain|*/rust-toolchain|rust-toolchain.toml|*/rust-toolchain.toml|.cargo/*|*/.cargo/*|.rightgit.json|.github/workflows/*.yml|.github/workflows/*.yaml|scripts/desktop/upstream-pr-gate.sh)
                     changed=true
                     break
                     ;;
@@ -89,7 +89,7 @@ jobs:
         if: steps.rust-changes.outputs.required == 'true'
         with:
           version: "v0.16.0"
-      - run: bash ./scripts/desktop/gate.sh
+      - run: bash ./scripts/desktop/upstream-pr-gate.sh
         env:
           RIGHT_GIT_RUST_CHANGED: ${{ steps.rust-changes.outputs.changed }}
           RIGHT_GIT_RUST_REQUIRED: ${{ steps.rust-changes.outputs.required }}
