@@ -519,7 +519,7 @@ fn parse_positive_usize(token: &[u8], label: &str) -> Result<usize, String> {
 
 fn detect_repeated(model: &YuNet, ppm: &Ppm, cli: &Cli) -> Result<(Vec<Detection>, TimingReport), Box<dyn std::error::Error>> {
     let mut timings = Vec::with_capacity(cli.repeats);
-    let mut reference = None;
+    let mut reference: Option<Vec<Detection>> = None;
     for _ in 0..cli.repeats {
         let start = Instant::now();
         let detections = model.detect_rgb(&ppm.rgb, ppm.width, ppm.height, cli.score_threshold, cli.nms_threshold)?;

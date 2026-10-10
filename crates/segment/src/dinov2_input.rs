@@ -245,7 +245,7 @@ mod tests {
         let tensor = preprocess_rgb8(&rgb, 1, 1, DinoInputSize::Small224, &Device::Cpu)?;
         assert_eq!(tensor.dtype(), DType::F32);
         assert_eq!(tensor.dims(), [1, 3, 224, 224]);
-        let channels = tensor.to_vec4::<f32>()?;
+        let channels = tensor.squeeze(0)?.to_vec3::<f32>()?;
         let expected = [
             (0.0 - IMAGE_MEAN[0] as f32) / IMAGE_STD[0] as f32,
             (128.0 / 255.0 - IMAGE_MEAN[1] as f32) / IMAGE_STD[1] as f32,
@@ -253,8 +253,7 @@ mod tests {
         ];
         for channel in 0..3 {
             let value = channels
-                .first()
-                .and_then(|batch| batch.get(channel))
+                .get(channel)
                 .and_then(|plane| plane.first())
                 .and_then(|row| row.first())
                 .copied()
@@ -270,7 +269,7 @@ mod tests {
         let tensor = preprocess_rgb8(&rgb, 1, 1, DinoInputSize::Large518, &Device::Cpu)?;
         assert_eq!(tensor.dtype(), DType::F32);
         assert_eq!(tensor.dims(), [1, 3, 518, 518]);
-        let values = tensor.to_vec4::<f32>()?;
+        let values = tensor.squeeze(0)?.to_vec3::<f32>()?;
         let expected = [
             (1.0 - IMAGE_MEAN[0] as f32) / IMAGE_STD[0] as f32,
             (1.0 - IMAGE_MEAN[1] as f32) / IMAGE_STD[1] as f32,
@@ -278,8 +277,7 @@ mod tests {
         ];
         for (channel, expected) in expected.into_iter().enumerate() {
             let value = values
-                .first()
-                .and_then(|batch| batch.get(channel))
+                .get(channel)
                 .and_then(|plane| plane.first())
                 .and_then(|row| row.first())
                 .copied()
@@ -348,8 +346,8 @@ mod tests {
             }
         }
         let tensor = preprocess_rgb8(&rgb, 8, 4, DinoInputSize::Small224, &Device::Cpu)?;
-        let values = tensor.to_vec4::<f32>()?;
-        let red = values.first().and_then(|batch| batch.first()).ok_or_else(|| Error::Model("missing red plane".into()))?;
+        let values = tensor.squeeze(0)?.to_vec3::<f32>()?;
+        let red = values.first().ok_or_else(|| Error::Model("missing red plane".into()))?;
         let left = red.get(112).and_then(|row| row.first()).copied().ok_or_else(|| Error::Model("missing left crop sample".into()))?;
         let center = red.get(112).and_then(|row| row.get(112)).copied().ok_or_else(|| Error::Model("missing center crop sample".into()))?;
         let right = red.get(112).and_then(|row| row.get(223)).copied().ok_or_else(|| Error::Model("missing right crop sample".into()))?;
@@ -373,10 +371,9 @@ mod tests {
             }
         }
         let tensor = preprocess_rgb8(&rgb, side, side, DinoInputSize::Small224, &Device::Cpu)?;
-        let values = tensor.to_vec4::<f32>()?;
+        let values = tensor.squeeze(0)?.to_vec3::<f32>()?;
         let red = values
             .first()
-            .and_then(|batch| batch.first())
             .and_then(|plane| plane.get(112))
             .and_then(|row| row.get(112))
             .copied()

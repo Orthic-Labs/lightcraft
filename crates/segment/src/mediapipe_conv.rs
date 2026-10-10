@@ -320,7 +320,7 @@ mod tests {
             &[Value::Float(input)],
         )?;
         let Value::Float(output) = value else { return Err(crate::Error::Model("pool test returned integer".into())) };
-        assert_eq!(output.to_vec4::<f32>()?, vec![vec![vec![vec![-1.0]]]]);
+        assert_eq!(output.squeeze(0)?.to_vec3::<f32>()?, vec![vec![vec![-1.0]]]);
         Ok(())
     }
 
@@ -342,7 +342,7 @@ mod tests {
             &[Value::Float(input), Value::Float(filter), Value::Float(bias)],
         )?;
         let Value::Float(output) = value else { return Err(crate::Error::Model("depthwise test returned integer".into())) };
-        assert_eq!(output.to_vec4::<f32>()?, vec![vec![vec![vec![4.0, 6.0], vec![8.0, 12.0]]]]);
+        assert_eq!(output.squeeze(0)?.to_vec3::<f32>()?, vec![vec![vec![4.0, 6.0], vec![8.0, 12.0]]]);
         Ok(())
     }
 
@@ -356,7 +356,7 @@ mod tests {
             &[Value::Float(input), Value::Float(filter), Value::Float(bias)],
         )?;
         let Value::Float(output) = value else { return Err(crate::Error::Model("activation test returned integer".into())) };
-        assert_eq!(output.to_vec4::<f32>()?, vec![vec![vec![vec![0.0], vec![2.0]], vec![vec![6.0], vec![1.0]]]]);
+        assert_eq!(output.squeeze(0)?.to_vec3::<f32>()?, vec![vec![vec![0.0], vec![2.0]], vec![vec![6.0], vec![1.0]]]);
         Ok(())
     }
 }

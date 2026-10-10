@@ -365,7 +365,8 @@ mod tests {
         let points = [[0.0; 2]; NUM_KEYPOINTS];
         let first = Candidate { index: 4, detection: Detection { score: 0.5, bounds: [0.0, 0.0, 0.1, 0.1], keypoints: points } };
         let second = Candidate { index: 2, detection: Detection { score: 0.5, bounds: [1.0, 1.0, 0.1, 0.1], keypoints: points } };
+        let expected_bounds = second.detection.bounds;
         let output = weighted_nms(vec![first, second], 1.0, 1);
-        assert_eq!(output[0].bounds, second.detection.bounds);
+        assert_eq!(output[0].bounds, expected_bounds);
     }
 }
