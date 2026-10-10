@@ -1,6 +1,6 @@
 # Face & eye models for learned culling
 
-Status: qualification research only. Exact YuNet & MediaPipe bytes were fetched only into outside-repo scratch for
+Status: research & experimental raw-graph source only. Exact YuNet & MediaPipe bytes were fetched only into outside-repo scratch for
 static inspection; no weights were added, converted, benchmarked or executed. No model is qualified for Ember shipping.
 `candle-core`/`candle-nn` are pinned to `0.9.2`; runtime must stay pure Rust, with no C++ or ONNX Runtime dependency.
 
@@ -18,6 +18,18 @@ graph input is detector `[1,128,128,3]` FLOAT32, FaceMesh `[1,256,256,3]` FLOAT3
 FLOAT32; current guide table lists 192x192 for its current model row, so guide dimensions must not replace exact
 artifact facts. FLOAT16 occurs in constant tensors followed by TFLite `DEQUANTIZE` ops. `num_faces` is positive
 integer; temporal smoothing applies only when `num_faces = 1`.
+
+`mediapipe_artifact` now verifies one owned exact bundle & all four child ranges/hashes before
+loading constants; static metadata contains 1,222 tensors & 817 nodes across three graphs.
+Schema-driven inventory corrected earlier mislabeled Blendshape opcodes: `SUM`, `SQRT`,
+`RSQRT` & `SQUARED_DIFFERENCE` are present; `SHAPE` & `UNIQUE` are absent. Float16 constants
+become F32 once, Int32 controls stay on CPU, & exact aliases reuse loaded tensor handles.
+`mediapipe` exposes raw detector, landmark & blendshape forward methods through Candle 0.9.2.
+Graph/operator source checks shapes, topology, finite values, explicit scratch reservations,
+NHWC/filter layouts, SAME padding & negative max-pool padding. Per-node finite readbacks
+make this a diagnostic prototype; throughput is unmeasured. Preprocessing, detector anchors,
+face crops, 478-to-146 landmark selection & eye-state calibration are unfinished.
+See [inventory](models/mediapipe-v1-artifact-inventory.md) & [raw-graph qualification](models/mediapipe-qualification.md).
 
 **YuNet 2023mar** is best small detector fallback: five facial keypoints & MIT model-directory license. This deliberately pins older fixed-shape artifact; OpenCV later added
 `2026may` dynamic re-export in [commit `47534e2`](https://github.com/opencv/opencv_zoo/commit/47534e27c9851bb1128ccc0102f1145e27f23f98), which is not selected. It cannot classify eye-open state; pair it with separately qualified landmarker or use geometric eye-state only after validation. YuNet's WIDER Face training-data rights are not stated in model README, so data provenance remains a release gate.
@@ -50,10 +62,10 @@ source/assets are included in this review.
 2. For YuNet fallback, use the static [graph inventory](models/yunet-2023mar-graph.json) to map exact input/output
    shapes & operator attributes; freeze external float32 preprocessing, three stride-head decode, score fusion & NMS
    before any Candle implementation. Do not place model tensor values in repository.
-3. Build an offline MediaPipe converter that extracts each TFLite tensor to safetensors, records source tensor name/shape/dtype,
-   then verifies every expected tensor count, shape & output against a reference fixture. Port exact v1 detector 128x128,
-   mesh 256x256 & blendshape 1x146x2 graphs to Candle 0.9.2; implement FLOAT16 `DEQUANTIZE`, keep preprocessing,
-   crop margins & coordinate transforms explicit.
+3. Qualify verified immutable-byte loading & raw graph execution against independent reference outputs for
+   exact v1 detector 128x128, mesh 256x256 & blendshape 1x146x2. Existing loader uses static offsets in original
+   pinned bytes instead of introducing a converted weight format. Keep source tensor names/shapes/dtypes,
+   FLOAT16-to-F32 behavior, preprocessing, crop margins & coordinate transforms explicit.
 4. Add deterministic postprocessing: multi-face NMS, face-presence threshold, landmark finite/range checks, eye
    blendshape extraction & `unknown` on no face, partial/occluded face, invalid crop or low quality. No calibrated
    probability claim; thresholds are qualification parameters.

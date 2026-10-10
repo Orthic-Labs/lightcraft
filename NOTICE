@@ -44,6 +44,18 @@ tensor names, shapes & byte ranges from static checkpoint inspection; dinov2_art
 loads only exact size- and SHA-256-verified bytes. These additions are source-only,
 with no production culling integration or qualified model accuracy.
 DINOv2 weights are not distributed.
+
+MediaPipe Face Landmarker v1 raw graph support is independently implemented in
+crates/segment/src/mediapipe*.rs. Generated metadata records factual tensor names,
+shapes, operators, options & byte ranges from the exact SHA-pinned task artifact;
+no floating-point tensor values, model weights or training data are distributed.
+The artifact's BlazeFace, FaceMesh-V2 & Blendshape model cards state Apache-2.0;
+model-card URLs, artifact identity & qualification boundaries are retained in
+docs/models/mediapipe-face-landmarker-v1-qualification.json.
+The metadata inspector uses the public TensorFlow Lite schema at revision
+e3388c0b93738d8d1a59211ffe2d0643da907291 (Apache-2.0):
+https://github.com/tensorflow/tflite-micro/blob/e3388c0b93738d8d1a59211ffe2d0643da907291/tensorflow/lite/schema/schema.fbs
+No Adobe implementation, model or asset is used.
 The positional interpolation also follows PyTorch v2.4.0's native bicubic implementation
 (https://github.com/pytorch/pytorch/blob/v2.4.0/aten/src/ATen/native/cuda/UpSample.cuh); its
 BSD-style license notice is retained in docs/licenses/pytorch-bicubic-LICENSE.txt.

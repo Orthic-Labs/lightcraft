@@ -44,6 +44,18 @@ mod dinov2_positions;
 pub mod fetch;
 pub mod mask;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod mediapipe;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mediapipe_artifact;
+#[cfg(not(target_arch = "wasm32"))]
+mod mediapipe_conv;
+#[cfg(not(target_arch = "wasm32"))]
+mod mediapipe_graph;
+#[cfg(not(target_arch = "wasm32"))]
+mod mediapipe_inventory;
+#[cfg(not(target_arch = "wasm32"))]
+mod mediapipe_ops;
+#[cfg(not(target_arch = "wasm32"))]
 mod neck;
 #[cfg(not(target_arch = "wasm32"))]
 mod nn;
