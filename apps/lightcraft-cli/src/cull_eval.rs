@@ -1322,11 +1322,11 @@ mod tests {
     #[test]
     fn malformed_present_winner_predictions_are_rejected() {
         for malformed in [Value::Null, json!({}), json!("winner"), json!(true)] {
-            let predictions = json!({"predictions":[],"winner_predictions":malformed});
+            let predictions = json!({"split":"test","predictions":[],"winner_predictions":malformed});
             assert!(parse_flat_predictions(&predictions).is_err());
         }
-        assert!(parse_flat_predictions(&json!({"predictions":[],"winner_predictions":[]})).is_ok());
-        assert!(parse_flat_predictions(&json!({"predictions":[]})).is_ok());
+        assert!(parse_flat_predictions(&json!({"split":"test","predictions":[],"winner_predictions":[]})).is_ok());
+        assert!(parse_flat_predictions(&json!({"split":"test","predictions":[]})).is_ok());
     }
 
     #[test]
@@ -1449,11 +1449,16 @@ mod tests {
             score(&parse_flat_predictions(&test_prediction).unwrap(), &parse_dataset(&labels, InputKind::Labels).unwrap(), Some("test")).unwrap();
         assert_eq!(report["coverage"]["frames"]["predictedRows"], json!(1));
 
-        let mixed_prediction = json!({"predictions":[
-            {"photo_id":"a","decision":"keep"},{"photo_id":"b","decision":"keep"}
+        let mixed_prediction = json!({"shoots":[
+            {"shoot_id":"train","split":"train","frames":[{"id":"a","decision":"keep"}]},
+            {"shoot_id":"test","split":"test","frames":[{"id":"b","decision":"keep"}]}
         ]});
-        let report =
-            score(&parse_flat_predictions(&mixed_prediction).unwrap(), &parse_dataset(&labels, InputKind::Labels).unwrap(), Some("test")).unwrap();
+        let report = score(
+            &parse_dataset(&mixed_prediction, InputKind::Predictions).unwrap(),
+            &parse_dataset(&labels, InputKind::Labels).unwrap(),
+            Some("test"),
+        )
+        .unwrap();
         assert_eq!(report["coverage"]["frames"]["predictedRows"], json!(1));
     }
 

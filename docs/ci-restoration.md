@@ -26,8 +26,8 @@ sent separately. Pulse reported `sent`
 without recipient verdict; acknowledgment is pending. Do not resend or poll
 its inbox. No SDK files, versions or packages were changed by Ember chat.
 
-SDK owner will handle repair, native feature-matrix qualification & managed
-publication. Ember will consume qualified published versions, then rerun
+SDK owner will handle repair, native feature-matrix qualification, managed
+publication & dependency integration. Ember retains existing pins & reruns
 exact-revision hidden native QA with existing hard foreground guard intact.
 
 ## Restored native evidence, 2026-10-10
@@ -80,7 +80,7 @@ test compilation fixes. Four iterator-access lints & one test-module ordering
 lint stopped later gates. Follow-up source resolves all five without suppressions;
 tests & exact-artifact qualification await generated runs.
 
-## Retained-layout native pass, 2026-10-10
+## Retained-layout native evidence, 2026-10-10
 
 [Candidate run 38060467035](https://github.com/Orthic-Labs/lightcraft/actions/runs/38060467035)
 built `e51ce9fcfc53102e8a9e0f8a29860420c027eced` on both targets. Extracted
@@ -102,9 +102,24 @@ Culling now reaches fresh measurement validation but rejects equivalent
 wire-level f64 numbers. Follow-up re-emits validated f32 rows before comparing
 fresh results, preserving exact binding, source, flags, revision & action checks;
 an adjacent-equivalent-f64 regression exercises completed Apply. Group presence
-now hashes separately, with a regression rejecting absent/zero-group tampering. These source
-repairs require generated tests & another exact-revision native run. RightKit
+now hashes separately, with a regression rejecting absent/zero-group tampering.
+These source repairs require generated tests & another exact-revision native run. RightKit
 foreground repair remains with its assigned owner.
+
+## Workspace tests reached, 2026-10-10
+
+[CI run 38062024596](https://github.com/Orthic-Labs/lightcraft/actions/runs/38062024596)
+at `143ecbd6be6ddde253affb2e5f341bed7fed3e1b` passed frontend checks/build,
+Rust formatting & workspace/all-target clippy. Two CLI scorer tests failed
+because their fixtures omitted mandatory explicit split metadata. Follow-up
+corrects those fixtures while preserving split validation & malformed-winner
+rejection. CI now uses `cargo test --workspace --no-fail-fast` to collect
+failures across test binaries; any failed binary still fails the gate.
+
+[Native run 38062743357](https://github.com/Orthic-Labs/lightcraft/actions/runs/38062743357)
+uses explicit source `0877ab27d275980269889963534f5af614be1043`, with signing
+& publication disabled. Candidate branch keeps that source available without
+cancelling the earlier main CI run. Native results remain pending.
 
 ## Suspension history
 
