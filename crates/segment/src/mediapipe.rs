@@ -1,8 +1,8 @@
 //! Experimental raw graph execution for exact MediaPipe Face Landmarker v1 bytes.
 //!
-//! Callers supply preprocessed graph tensors. Detector anchor decoding, face crops,
-//! the 478-to-146 landmark mapping & eye-state calibration are separate, unfinished
-//! qualification steps. No output from this module authorizes a culling decision.
+//! Callers supply preprocessed graph tensors. [`crate::mediapipe_photo`] composes
+//! experimental RGB preprocessing, detector decoding, crops & landmark mapping.
+//! Eye-state calibration remains separate. No output authorizes a culling decision.
 //! Source implementation only: reference parity, accuracy & latency are unqualified.
 
 #![cfg(not(target_arch = "wasm32"))]

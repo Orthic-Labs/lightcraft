@@ -56,7 +56,20 @@ The metadata inspector uses the public TensorFlow Lite schema at revision
 e3388c0b93738d8d1a59211ffe2d0643da907291 (Apache-2.0):
 https://github.com/tensorflow/tflite-micro/blob/e3388c0b93738d8d1a59211ffe2d0643da907291/tensorflow/lite/schema/schema.fbs
 No Adobe implementation, model or asset is used.
-The positional interpolation also follows PyTorch v2.4.0's native bicubic implementation
+
+MediaPipe image preprocessing, detector decoding, weighted NMS, face-crop projection,
+landmark subset & blendshape labels in crates/segment/src/mediapipe_detector.rs,
+mediapipe_input.rs, mediapipe_blendshapes.rs & mediapipe_photo.rs adapt Google MediaPipe
+source at commit 458200ffced12a9db596ddf1cce3380ea05f71fb (Apache License 2.0):
+https://github.com/google-ai-edge/mediapipe/tree/458200ffced12a9db596ddf1cce3380ea05f71fb
+Copyright The MediaPipe Authors (2019–2025, as stated in source headers).
+Modified by Ember contributors (2026): translated to bounded pure Rust/Candle,
+restricted to still RGB8 images & exact v1 graph dimensions, with explicit validation,
+stable score ties, floating-point bilinear sampling & read-only observation output.
+Full license: docs/licenses/mediapipe-LICENSE.txt. Pinned source & artifact metadata:
+docs/models/mediapipe-image-contract.md. No model weights or training data are distributed.
+
+DINOv2 positional interpolation also follows PyTorch v2.4.0's native bicubic implementation
 (https://github.com/pytorch/pytorch/blob/v2.4.0/aten/src/ATen/native/cuda/UpSample.cuh); its
 BSD-style license notice is retained in docs/licenses/pytorch-bicubic-LICENSE.txt.
 

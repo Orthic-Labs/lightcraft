@@ -1,6 +1,6 @@
 # Face & eye models for learned culling
 
-Status: research & experimental raw-graph source only. Exact YuNet & MediaPipe bytes were fetched only into outside-repo scratch for
+Status: research & experimental raw-graph/still-image source only. Exact YuNet & MediaPipe bytes were fetched only into outside-repo scratch for
 static inspection; no weights were added, converted, benchmarked or executed. No model is qualified for Ember shipping.
 `candle-core`/`candle-nn` are pinned to `0.9.2`; runtime must stay pure Rust, with no C++ or ONNX Runtime dependency.
 
@@ -27,9 +27,13 @@ become F32 once, Int32 controls stay on CPU, & exact aliases reuse loaded tensor
 `mediapipe` exposes raw detector, landmark & blendshape forward methods through Candle 0.9.2.
 Graph/operator source checks shapes, topology, finite values, explicit scratch reservations,
 NHWC/filter layouts, SAME padding & negative max-pool padding. Per-node finite readbacks
-make this a diagnostic prototype; throughput is unmeasured. Preprocessing, detector anchors,
-face crops, 478-to-146 landmark selection & eye-state calibration are unfinished.
-See [inventory](models/mediapipe-v1-artifact-inventory.md) & [raw-graph qualification](models/mediapipe-qualification.md).
+make this a diagnostic prototype; throughput is unmeasured. Experimental still-image source now
+adds separate metadata-defined detector/landmark normalization, anchors, weighted NMS, rotated
+face crops, full-image projection & exact 478-to-146 landmark selection. Raw eye coefficients
+remain uncalibrated; graph/preprocessing reference agreement, held-out accuracy & native timing
+remain unfinished. See [inventory](models/mediapipe-v1-artifact-inventory.md),
+[image contract](models/mediapipe-image-contract.md), [raw-graph qualification](models/mediapipe-qualification.md)
+& [photo qualification](models/mediapipe-photo-qualification.md).
 
 **YuNet 2023mar** is best small detector fallback: five facial keypoints & MIT model-directory license. This deliberately pins older fixed-shape artifact; OpenCV later added
 `2026may` dynamic re-export in [commit `47534e2`](https://github.com/opencv/opencv_zoo/commit/47534e27c9851bb1128ccc0102f1145e27f23f98), which is not selected. It cannot classify eye-open state; pair it with separately qualified landmarker or use geometric eye-state only after validation. YuNet's WIDER Face training-data rights are not stated in model README, so data provenance remains a release gate.

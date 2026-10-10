@@ -1,0 +1,254 @@
+{
+  "artifact": {
+    "bytes": 3758596,
+    "entries": [
+      {
+        "bytes": 229746,
+        "crc32": "6763ac6d",
+        "name": "face_detector.tflite",
+        "sha256": "b4578f35940bf5a1a655214a1cce5cab13eba73c1297cd78e1a04c2380b0152f"
+      },
+      {
+        "bytes": 2553590,
+        "crc32": "8079302f",
+        "name": "face_landmarks_detector.tflite",
+        "sha256": "c7d54204ce0448474c7f3fa9af494787c0965cbdd6f20fc72867e43046bd43d5"
+      },
+      {
+        "bytes": 19376,
+        "crc32": "f38ea9a5",
+        "name": "geometry_pipeline_metadata_landmarks.binarypb",
+        "sha256": "bdbcda96dfcb7da883da124aaa2c55dee49770d934f0fcc71747f8c21bdc75b4"
+      },
+      {
+        "bytes": 955312,
+        "crc32": "00d43c64",
+        "name": "face_blendshapes.tflite",
+        "sha256": "4f36dded049db18d76048567439b2a7f58f1daabc00d78bfe8f3ad396a2d2082"
+      }
+    ],
+    "sha256": "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff",
+    "url": "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+  },
+  "contract": "MediaPipe Face Landmarker v1 image metadata",
+  "inspection": "static metadata only; no inference or float weight reads",
+  "models": [
+    {
+      "filename": "face_detector.tflite",
+      "input_tensors": [
+        {
+          "dtype": "FLOAT32",
+          "index": 0,
+          "name": "input",
+          "shape": [
+            1,
+            128,
+            128,
+            3
+          ]
+        }
+      ],
+      "metadata": {
+        "inputs": [
+          {
+            "content_properties": "ImageProperties",
+            "dtype": "FLOAT32",
+            "metadata_name": "image",
+            "model_tensor_name": "input",
+            "normalization": {
+              "formula": "(x - mean) / std",
+              "mean": [
+                127.5
+              ],
+              "std": [
+                127.5
+              ]
+            },
+            "order": 0,
+            "rgb_content": "RGB",
+            "shape": [
+              1,
+              128,
+              128,
+              3
+            ]
+          }
+        ],
+        "model_name": "Short Range Face Detection",
+        "outputs": [
+          {
+            "dtype": "FLOAT32",
+            "metadata_name": "raw boxes/keypoints",
+            "model_tensor_name": "regressors",
+            "order": 0,
+            "shape": [
+              1,
+              896,
+              16
+            ]
+          },
+          {
+            "dtype": "FLOAT32",
+            "metadata_name": "scores",
+            "model_tensor_name": "classificators",
+            "order": 1,
+            "shape": [
+              1,
+              896,
+              1
+            ]
+          }
+        ]
+      },
+      "output_tensors": [
+        {
+          "dtype": "FLOAT32",
+          "index": 175,
+          "name": "regressors",
+          "shape": [
+            1,
+            896,
+            16
+          ]
+        },
+        {
+          "dtype": "FLOAT32",
+          "index": 174,
+          "name": "classificators",
+          "shape": [
+            1,
+            896,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "filename": "face_landmarks_detector.tflite",
+      "input_tensors": [
+        {
+          "dtype": "FLOAT32",
+          "index": 0,
+          "name": "input_12",
+          "shape": [
+            1,
+            256,
+            256,
+            3
+          ]
+        }
+      ],
+      "metadata": {
+        "inputs": [
+          {
+            "content_properties": "ImageProperties",
+            "dtype": "FLOAT32",
+            "metadata_name": "image",
+            "model_tensor_name": "input_12",
+            "normalization": {
+              "formula": "(x - mean) / std",
+              "mean": [
+                0.0
+              ],
+              "std": [
+                255.0
+              ]
+            },
+            "order": 0,
+            "rgb_content": "RGB",
+            "shape": [
+              1,
+              256,
+              256,
+              3
+            ]
+          }
+        ],
+        "model_name": "Face mesh detection model v2",
+        "outputs": [
+          {
+            "dtype": "FLOAT32",
+            "metadata_name": "face_landmarks",
+            "model_tensor_name": "Identity",
+            "order": 0,
+            "shape": [
+              1,
+              1,
+              1,
+              1434
+            ]
+          },
+          {
+            "dtype": "FLOAT32",
+            "metadata_name": "presence",
+            "model_tensor_name": "Identity_1",
+            "order": 1,
+            "shape": [
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          {
+            "dtype": "FLOAT32",
+            "metadata_name": "tongue_out",
+            "model_tensor_name": "Identity_2",
+            "order": 2,
+            "shape": [
+              1,
+              1
+            ]
+          }
+        ]
+      },
+      "output_tensors": [
+        {
+          "dtype": "FLOAT32",
+          "index": 473,
+          "name": "Identity",
+          "shape": [
+            1,
+            1,
+            1,
+            1434
+          ]
+        },
+        {
+          "dtype": "FLOAT32",
+          "index": 472,
+          "name": "Identity_1",
+          "shape": [
+            1,
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "dtype": "FLOAT32",
+          "index": 475,
+          "name": "Identity_2",
+          "shape": [
+            1,
+            1
+          ]
+        }
+      ]
+    }
+  ],
+  "schemas": {
+    "metadata": {
+      "bytes": 28030,
+      "revision": "458200ffced12a9db596ddf1cce3380ea05f71fb",
+      "sha256": "54f0cc99a87d56045bc32ad177bf5d02a29836416493cab3e98a06057b60797b",
+      "url": "https://raw.githubusercontent.com/google-ai-edge/mediapipe/458200ffced12a9db596ddf1cce3380ea05f71fb/mediapipe/tasks/metadata/metadata_schema.fbs"
+    },
+    "tflite": {
+      "bytes": 47962,
+      "revision": "e3388c0b93738d8d1a59211ffe2d0643da907291",
+      "sha256": "e4739320658d85923286a2dedf1dd0c77387170c470ad7da2f3c22082edd9c4f",
+      "url": "https://github.com/tensorflow/tflite-micro/blob/e3388c0b93738d8d1a59211ffe2d0643da907291/tensorflow/lite/schema/schema.fbs"
+    }
+  }
+}

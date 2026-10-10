@@ -48,13 +48,21 @@ pub mod mediapipe;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mediapipe_artifact;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod mediapipe_blendshapes;
+#[cfg(not(target_arch = "wasm32"))]
 mod mediapipe_conv;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod mediapipe_detector;
+#[cfg(not(target_arch = "wasm32"))]
 mod mediapipe_graph;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mediapipe_input;
 #[cfg(not(target_arch = "wasm32"))]
 mod mediapipe_inventory;
 #[cfg(not(target_arch = "wasm32"))]
 mod mediapipe_ops;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mediapipe_photo;
 #[cfg(not(target_arch = "wasm32"))]
 mod neck;
 #[cfg(not(target_arch = "wasm32"))]

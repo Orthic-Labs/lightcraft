@@ -2,6 +2,8 @@
 
 `crates/segment/examples/mediapipe_qualify.rs` measures pinned MediaPipe Face Landmarker v1 graph execution from an explicit finite tensor fixture. It always emits `qualification: "UNQUALIFIED"`. It does not read catalog state, load photos, convert images, choose face crops, decode detector anchors, remap 478 landmarks to 146 points, calibrate eye state, write culling decisions, or claim accuracy, quality, or throughput.
 
+Separate experimental [still-image composition & photo harness](mediapipe-photo-qualification.md) now covers preprocessing, detector decode, crops & landmark mapping. Raw harness below deliberately accepts graph tensors unchanged.
+
 ## Run
 
 Use generated RightKit Actions with an exact pinned bundle and host description:
@@ -64,4 +66,4 @@ Example `values` is abbreviated for readability; real reference files must conta
 
 ## Timing & qualification boundary
 
-First-run & warm-repeat timings include graph execution & output readback. Warm repeats are compared to first outputs; any repeat maximum absolute error above `1e-3` aborts. Per-node finite checks in graph execution & output readbacks are diagnostic safety checks that synchronize GPU work, so throughput is unqualified. This harness does not provide detector anchors, face crop selection, 478-to-146 mapping, eye calibration, or culling policy. Any later qualification needs independent reference review, graph preprocessing protocol, output decoding, held-out inputs, & explicit acceptance criteria.
+First-run & warm-repeat timings include graph execution & output readback. Warm repeats are compared to first outputs; any repeat maximum absolute error above `1e-3` aborts. Per-node finite checks in graph execution & output readbacks are diagnostic safety checks that synchronize GPU work, so throughput is unqualified. This raw harness does not provide detector anchors, face crop selection, 478-to-146 mapping, eye calibration or culling policy. Separate photo harness provides experimental preprocessing/geometry source; qualification still needs independent reference review, held-out inputs & explicit acceptance criteria.
