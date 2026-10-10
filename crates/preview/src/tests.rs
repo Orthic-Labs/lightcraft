@@ -148,7 +148,7 @@ fn pool_priorities_dedupe_and_drop() {
     // One worker, held busy by a gate job while the others queue up.
     let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let g = gate.clone();
-    p.submit(
+    let _ = p.submit(
         999,
         0,
         1000,
@@ -165,11 +165,11 @@ fn pool_priorities_dedupe_and_drop() {
     while p.queued() > 0 {
         std::thread::yield_now();
     }
-    p.submit(1, 1, 5, Box::new(|| 1)); // off-screen thumb
-    p.submit(2, 1, 10, Box::new(|| 2)); // visible thumb
-    p.submit(3, 1, 100, Box::new(|| 3)); // loupe
-    p.submit(2, 2, 10, Box::new(|| 22)); // newer request for slot 2 replaces the queued one
-    p.submit(4, 1, 5, Box::new(|| 4));
+    let _ = p.submit(1, 1, 5, Box::new(|| 1)); // off-screen thumb
+    let _ = p.submit(2, 1, 10, Box::new(|| 2)); // visible thumb
+    let _ = p.submit(3, 1, 100, Box::new(|| 3)); // loupe
+    let _ = p.submit(2, 2, 10, Box::new(|| 22)); // newer request for slot 2 replaces the queued one
+    let _ = p.submit(4, 1, 5, Box::new(|| 4));
     assert_eq!(p.queued(), 4);
     let dropped = p.reprioritize(|s, pr| if *s == 4 { None } else { Some(pr) });
     assert_eq!(dropped, vec![4]);
@@ -193,12 +193,136 @@ fn pool_priorities_dedupe_and_drop() {
 fn pool_runs_inline() {
     // No workers: run_inline drains the queue on the caller's thread (the wasm path).
     let mut p: JobPool<u8, u8> = JobPool::new(0);
-    p.submit(1, 0, 1, Box::new(|| 1));
-    p.submit(2, 0, 9, Box::new(|| 2));
+    let _ = p.submit(1, 0, 1, Box::new(|| 1));
+    let _ = p.submit(2, 0, 9, Box::new(|| 2));
     assert_eq!(p.run_inline(1), 1);
     assert_eq!(p.try_recv().map(|d| d.result), Some(2));
     assert_eq!(p.run_inline(10), 1);
     assert_eq!(p.try_recv().map(|d| d.result), Some(1));
+}
+
+fn pool_with_a_running_job() -> (JobPool<u8, ()>, std::sync::mpsc::Sender<()>) {
+    let mut pool: JobPool<u8, ()> = JobPool::new(1);
+    let (started, has_started) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let _ = pool.submit(
+        1,
+        0,
+        1,
+        Box::new(move || {
+            let _ = started.send(());
+            let _ = released.recv_timeout(std::time::Duration::from_secs(60));
+        }),
+    );
+    has_started.recv().unwrap();
+    (pool, release)
+}
+
+#[test]
+fn pool_shutdown_waits_bounded_and_drops_queued_jobs() {
+    let (mut pool, release) = pool_with_a_running_job();
+    assert_eq!(pool.live_workers(), 1);
+    assert!(!pool.shutdown(std::time::Duration::from_millis(1)));
+    assert_eq!(pool.live_workers(), 1);
+    assert!(pool.submit(2, 0, 1, Box::new(|| panic!("queued job must not run"))).is_err());
+    assert_eq!(pool.queued(), 0);
+    drop(release);
+    assert!(pool.shutdown(std::time::Duration::from_secs(1)));
+    assert_eq!(pool.live_workers(), 0);
+}
+
+#[test]
+fn pool_worker_panic_is_terminal_failure_without_losing_worker() {
+    let mut pool: JobPool<u8, ()> = JobPool::new(1);
+    let _ = pool.submit(7, 42, 1, Box::new(|| panic!("synthetic worker failure")));
+    let failure = loop {
+        if let Some(failure) = pool.try_failure() {
+            break failure;
+        }
+        std::thread::yield_now();
+    };
+    assert_eq!((failure.slot, failure.key), (7, 42));
+    assert!(failure.error.contains("synthetic worker failure"));
+    assert_eq!(pool.live_workers(), 1);
+    assert!(pool.shutdown(std::time::Duration::from_secs(1)));
+}
+
+#[test]
+fn pool_failure_identity_distinguishes_reused_slot_and_key() {
+    let mut pool: JobPool<u8, u8> = JobPool::new(1);
+    let (started, ready) = std::sync::mpsc::channel();
+    let first = pool
+        .submit(
+            7,
+            42,
+            1,
+            Box::new(move || {
+                let _ = started.send(());
+                panic!("stale failure");
+            }),
+        )
+        .unwrap();
+    ready.recv().unwrap();
+    let second = pool.submit(7, 42, 1, Box::new(|| 9)).unwrap();
+    let failure = loop {
+        if let Some(failure) = pool.try_failure() {
+            break failure;
+        }
+        std::thread::yield_now();
+    };
+    assert_eq!(failure.submission, first);
+    assert_ne!(failure.submission, second);
+    assert!(pool.shutdown(std::time::Duration::from_secs(1)));
+}
+
+#[test]
+fn pool_drop_waits_for_running_job_without_joining_self() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let finished = Arc::new(AtomicBool::new(false));
+    let marker = finished.clone();
+    let mut pool: JobPool<u8, ()> = JobPool::new(1);
+    let (started, has_started) = std::sync::mpsc::channel();
+    let _ = pool.submit(
+        1,
+        0,
+        1,
+        Box::new(move || {
+            let _ = started.send(());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            marker.store(true, Ordering::SeqCst);
+        }),
+    );
+    has_started.recv().unwrap();
+    drop(pool);
+    assert!(finished.load(Ordering::SeqCst));
+}
+
+#[test]
+fn pool_drop_retries_after_timed_shutdown() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let finished = Arc::new(AtomicBool::new(false));
+    let marker = finished.clone();
+    let mut pool: JobPool<u8, ()> = JobPool::new(1);
+    let (started, has_started) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let _ = pool.submit(
+        1,
+        0,
+        1,
+        Box::new(move || {
+            let _ = started.send(());
+            let _ = released.recv();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            marker.store(true, Ordering::SeqCst);
+        }),
+    );
+    has_started.recv().unwrap();
+    assert!(!pool.shutdown(std::time::Duration::from_millis(1)));
+    drop(release);
+    drop(pool);
+    assert!(finished.load(Ordering::SeqCst));
 }
 
 #[test]

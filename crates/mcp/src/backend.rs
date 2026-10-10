@@ -17,7 +17,7 @@ pub trait Backend {
     fn describe(&self) -> String;
 }
 
-/// A running LightCraft app, reached through its loopback control port.
+/// A running Ember app, reached through its loopback control port.
 pub struct Remote {
     addr: String,
     conn: Option<(BufReader<TcpStream>, TcpStream)>,
@@ -90,7 +90,7 @@ impl Backend for Remote {
                 self.conn = None;
                 self.roundtrip(&line).map_err(|e| {
                     self.conn = None;
-                    format!("LightCraft app at {} is not reachable: {e} (start it with `lightcraft --control PORT`)", self.addr)
+                    format!("Ember app at {} is not reachable: {e} (start it with `lightcraft --control PORT`)", self.addr)
                 })?
             }
         };

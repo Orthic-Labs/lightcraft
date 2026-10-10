@@ -45,7 +45,7 @@ fn meta_of(m: &lightcraft_meta::Metadata) -> (Meta, Option<String>) {
 
 /// Lens corrections embedded in a raw's `OpcodeList3` (`WarpRectilinear`, `FixVignetteRadial`: a DNG's own, or the
 /// raw reader's equivalent of the camera's correction, e.g. Panasonic / Leica RW2 distortion), re-expressed for the
-/// default-cropped, EXIF-oriented image. These are the only "profile" corrections LightCraft applies.
+/// default-cropped, EXIF-oriented image. These are the only "profile" corrections Ember applies.
 pub fn embedded_lens(raw: &lightcraft_raw::RawInfo) -> Option<lightcraft_develop::EmbeddedLens> {
     use lightcraft_develop::{EmbeddedLens, EmbeddedVignette, EmbeddedWarp};
     use lightcraft_geom::Point;
@@ -97,9 +97,11 @@ fn ext_upper(name: &str) -> String {
 /// ([`lightcraft_codecs::read_header`], which refuses truncated files but can't see damage inside
 /// compressed data that is all there: such a file imports and shows as unreadable when rendered).
 pub fn probe_bytes(name: &str, bytes: &[u8]) -> Result<ProbeInfo, String> {
-    let content_hash = Some(lightcraft_preview::hash_bytes(bytes).to_string());
     let m = lightcraft_meta::extract(bytes);
     let (meta, captured) = meta_of(&m);
+    // Header metadata is the review path's cheap signal. Compute one whole-file hash only after
+    // it has been extracted; callers retain this value for deduplication and copy verification.
+    let content_hash = Some(lightcraft_preview::hash_bytes(bytes).to_string());
     if lightcraft_raw::probe(bytes).is_some() {
         let raw = match lightcraft_raw::probe_info(bytes).map_err(|e| preview_reason(bytes, e)) {
             Ok(r) => r,
@@ -142,6 +144,7 @@ pub fn probe_bytes(name: &str, bytes: &[u8]) -> Result<ProbeInfo, String> {
             format: ext_upper(name),
             kind: MediaKind::Raw,
             file_size: bytes.len() as u64,
+            source_stamp: None,
             captured,
             meta,
             as_shot_wb,
@@ -172,6 +175,7 @@ pub fn probe_bytes(name: &str, bytes: &[u8]) -> Result<ProbeInfo, String> {
         format,
         kind: MediaKind::Image,
         file_size: bytes.len() as u64,
+        source_stamp: None,
         captured,
         meta,
         as_shot_wb: None,
@@ -428,10 +432,21 @@ pub fn fs_hooks() -> (FileLoader, FileProbe) {
         r
     });
     let probe: FileProbe = Arc::new(|path: &str| {
-        let len = std::fs::metadata(path).map(|m| m.len() as usize).unwrap_or(0);
+        let before = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+        let len = before.len() as usize;
         let _permit = crate::memory::work_gate().acquire(len);
         let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-        probe_bytes(path, &bytes)
+        let after = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+        let before_stamp = before.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos());
+        let after_stamp = after.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos());
+        if before.len() != after.len() || before_stamp != after_stamp {
+            return Err(format!("{path}: file changed while it was being probed"));
+        }
+        let mut info = probe_bytes(path, &bytes)?;
+        // `Some(0)` marks a native probe whose filesystem cannot provide a timestamp: its cache
+        // entry will fail the later metadata check instead of being reused by size alone.
+        info.source_stamp = Some(after_stamp.unwrap_or(0));
+        Ok(info)
     });
     (loader, probe)
 }

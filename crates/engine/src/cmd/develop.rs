@@ -4,6 +4,7 @@ use lightcraft_catalog::{Op, PhotoId, Version};
 use lightcraft_develop::{DevelopSettings, Preset, Section, SettingsGroup, Treatment, Upright, WbMode, controls};
 use lightcraft_geom::{CropGeometry, CropHandle, Point, Rect, crop_fit_angle, drag_crop};
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 use super::{CommandSpec, always, bad, bool_or, cmd, f64_or, f64_req, has_active, has_clipboard, has_selection, ok, str_param};
 use crate::{Result, Session, media::SourceLevel};
@@ -138,6 +139,32 @@ pub fn specs() -> Vec<CommandSpec> {
                 };
                 if let Some(ids) = p.get("ids").and_then(Value::as_array) {
                     let ids: Vec<PhotoId> = ids.iter().filter_map(Value::as_u64).map(PhotoId).collect();
+                    // Explicit target IDs are used by native slider gestures. When the active
+                    // interaction includes its active photo, stage every target silently so
+                    // `endInteraction` records exactly one batch undo step. Calls that target
+                    // other photos while an interaction is open retain their existing batch
+                    // commit semantics.
+                    let interaction_targets = s.interaction.as_ref().is_some_and(|interaction| ids.contains(&interaction.photo));
+                    if interaction_targets {
+                        let updates: Vec<(PhotoId, DevelopSettings)> =
+                            ids.iter().filter_map(|id| s.develop_of(*id).map(|d| (*id, (*d).clone()))).collect();
+                        let existing = s.interaction.as_ref().map(|interaction| interaction.originals.clone()).unwrap_or_default();
+                        for (id, _) in &updates {
+                            if !existing.iter().any(|(target, _)| target == id)
+                                && let Some(original) = s.develop_of(*id)
+                                && let Some(interaction) = s.interaction.as_mut()
+                            {
+                                interaction.originals.push((*id, original));
+                            }
+                        }
+                        for (id, mut settings) in updates {
+                            let info = s.source_info(id);
+                            apply(&mut settings, &info);
+                            let now = (s.clock)();
+                            s.apply_silent(Op::SetDevelop { id, settings: Arc::new(settings), label: label.clone(), edited: Some(now) })?;
+                        }
+                        return ok();
+                    }
                     let ops = ids
                         .iter()
                         .filter_map(|id| s.develop_of(*id).map(|d| (*id, d)))
@@ -281,6 +308,61 @@ pub fn specs() -> Vec<CommandSpec> {
             })?;
             Ok(serde_json::to_value(a).unwrap_or_default())
         }),
+        cmd!("develop.autoNoise", "Auto Noise Reduction", ["Photo"], None, "{dryRun?: bool}", has_active, |s, p| {
+            // Reads the original at native resolution: a proxy has already averaged the noise away.
+            let c = "develop.autoNoise";
+            let id = active(s, c)?;
+            let (iso, raw) = s.catalog.photo(id).map(|p| (p.meta.iso, p.develops_raw())).unwrap_or((None, false));
+            let src = s.source_now(id, SourceLevel::Full).map_err(|e| bad(c, e))?;
+            let estimate = lightcraft_pipeline::noise::estimate(&src, 1.0);
+            let nr = lightcraft_pipeline::noise::auto_noise_reduction(estimate, iso, raw);
+            if !bool_or(p, "dryRun", false) {
+                edit(s, c, "Auto Noise Reduction", |d| {
+                    d.detail.nr_luminance = nr.luminance;
+                    d.detail.nr_color = nr.color;
+                    Ok(())
+                })?;
+            }
+            Ok(json!({"estimate": estimate, "luminance": nr.luminance, "color": nr.color, "iso": iso, "raw": raw}))
+        }),
+        cmd!(
+            "develop.applyLook",
+            "Apply Look Target",
+            [],
+            None,
+            "{look?: {schema, samples, luminance, clip, chroma}, path?: string, dryRun?: bool}",
+            has_active,
+            |s, p| {
+                // A look target (`lightcraft-cli look extract`) is the rendered statistics of
+                // sample photos; Auto refits the eight values so this photo lands on them.
+                let c = "develop.applyLook";
+                let look: lightcraft_pipeline::look::LookTarget = match (p.get("look"), str_param(p, "path")) {
+                    (Some(v), _) => serde_json::from_value(v.clone()).map_err(|e| bad(c, format!("look: {e}")))?,
+                    (None, Some(path)) => {
+                        let meta = std::fs::metadata(path).map_err(|e| bad(c, format!("{path}: {e}")))?;
+                        if !meta.is_file() || meta.len() > 1 << 20 {
+                            return Err(bad(c, format!("{path}: not a look target file (a regular file under 1 MiB)")));
+                        }
+                        let text = std::fs::read_to_string(path).map_err(|e| bad(c, format!("{path}: {e}")))?;
+                        serde_json::from_str(&text).map_err(|e| bad(c, format!("{path}: {e}")))?
+                    }
+                    (None, None) => return Err(bad(c, "missing `look` (a look target) or `path` (its JSON file)")),
+                };
+                look.validate().map_err(|e| bad(c, e))?;
+                let id = active(s, c)?;
+                let src = s.source_now(id, SourceLevel::Thumb).map_err(|e| bad(c, e))?;
+                let info = s.source_info(id);
+                let d = s.develop_of(id).unwrap_or_default();
+                let a = lightcraft_pipeline::look::apply(&src, &info, &d, &look).map_err(|e| bad(c, e))?;
+                if !bool_or(p, "dryRun", false) {
+                    edit(s, c, "Apply Look", |d| {
+                        *d = lightcraft_pipeline::look::settings_with(d, a);
+                        Ok(())
+                    })?;
+                }
+                Ok(json!({"values": a, "look": look}))
+            }
+        ),
         cmd!(
             "develop.wb",
             "White Balance",
@@ -339,7 +421,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 }
             }
             let patch = lightcraft_raster::Rgb32f::filled(4, 4, acc);
-            let (t, tint) = lightcraft_pipeline::auto::auto_wb(&patch, &info);
+            let (t, tint) = lightcraft_pipeline::auto::neutral_wb(&patch, &info);
             edit(s, "develop.wbPick", "White Balance", |d| {
                 d.wb.mode = WbMode::Custom;
                 d.wb.temp = t;

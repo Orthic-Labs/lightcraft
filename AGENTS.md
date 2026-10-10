@@ -1,6 +1,6 @@
-# LightCraft — instructions for agents
+# Ember — instructions for agents
 
-LightCraft is a clean-room, open-source, pure-Rust photo library + non-destructive raw developer targeting Adobe Lightroom parity (and beyond). Native on macOS, Windows, Linux; web via WASM. Sibling of `../pdfcraft` (Acrobat), `../photocraft` (Photoshop), `../vectorcraft` (Illustrator) and `../filmcraft` (Premiere), with the same conventions.
+Ember is a clean-room, open-source, pure-Rust photo library + non-destructive raw developer. Native on macOS, Windows, Linux; web via WASM. Orthic Labs fork of `storytold/lightcraft`; Rust engine conventions are inherited from upstream.
 
 ## Start every session here
 1. Read `plan/STATUS.md` (current milestone, next unchecked task, blockers).
@@ -23,7 +23,7 @@ branches can still break each other (e.g. a new struct field vs. a new construct
 and often so a crash loses minutes, not hours.
 
 ## Never crash (outranks feature work)
-People trust LightCraft with their photo libraries and edits; a crash loses their work. A malformed raw/JPEG/XMP, a bad
+People trust Ember with their photo libraries and edits; a crash loses their work. A malformed raw/JPEG/XMP, a bad
 command, control or MCP argument, a corrupt catalog or settings file, or a full disk must produce an error the user (or
 agent) can act on, never a panic. Don't ship a feature by adding a panic path, and fix a crash before building on top
 of it. Full standard: `../craftrules/standards/never-crash.md`
@@ -51,27 +51,27 @@ of it. Full standard: `../craftrules/standards/never-crash.md`
   integration tests, examples and benches. New crates start with the attribute.
 
 ## Non-negotiables
-- **Clean-room.** Never read/disassemble anything inside Adobe app bundles (names/listings only). Never copy Adobe icons, presets, profiles (DCP), lens profiles (LCP), camera matrices, fonts. Observation of the installed Lightroom is read-only (it syncs the user's personal library: never import/edit/rate/delete there). Never copy GPL/LGPL/AGPL code (darktable, RawTherapee, ART, LibRaw, rawspeed, rawloader, rawler, lensfun, dcraw-derived GPL code…).
-- **Pure Rust** in the product. No C/C++ dependencies.
+- **Clean-room.** Never read/disassemble anything inside Lightroom or Creative Cloud app bundles (names/listings only). Never copy their icons, presets, profiles (DCP), lens profiles (LCP), camera matrices or fonts. Observation of the installed Lightroom is read-only (it syncs the user's personal library: never import/edit/rate/delete there). Never copy GPL/LGPL/AGPL code (darktable, RawTherapee, ART, LibRaw, rawspeed, rawloader, rawler, lensfun, dcraw-derived GPL code…).
+- **Processing stays Rust.** React/TypeScript presentation & Tauri/RightKit system-webview hosting are permitted for macOS/Windows desktop migration. Existing clean-room Rust RAW, develop, catalog, preview & export engine remains authoritative. Linux/web/CLI hosts retain their current architecture.
 - **Layering** (`plan/architecture.md` §3, enforced by `cargo xtask layers`): nothing below L5 depends on egui/eframe/winit/rfd.
 - **Everything is a command** (`crates/engine`): id, label, menu path, shortcut, params, enabled(), run(). UI, CLI, control channel and MCP all dispatch by id. Every slider is a `develop` control spec.
 - **Resolution independence:** settings use normalized image coordinates and relative radii; previews and exports must match.
-- **Quality gates** before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests, layers, assets, wasm).
+- **Quality gates:** public Orthic builds/tests/packages run through generated RightKit GitHub Actions only (`.rightgit.json`). Source snapshots may be pushed for CI; only qualified green revisions may become desktop default. CI retains `cargo xtask ci` (fmt, clippy -D warnings, tests, parity, layers, assets, wasm), frontend typecheck/build & target-native qualification. Local work stays source/static-only.
 - **Commits:** one task id per commit (`M2.3: local Laplacian highlights/shadows`). Only green states. End messages with the attribution line required by the environment.
 
 ## Assets: icons, images, fonts (ABSOLUTE RULE — never violate)
-- **Never use any iconography, image, artwork, font, sound or other asset from Adobe products** (no Lightroom/Creative Cloud icons, no screenshots, no presets/profiles/LUTs, no UI bitmaps — not even as a temporary placeholder or "reference copy"). Observing Adobe's UI to imitate *layout and behaviour* is allowed; copying or tracing its assets is not.
-- **This includes Adobe's open-licensed assets**: no Source Sans/Serif/Code or Source Han fonts, no Adobe Fonts, no
-  Adobe-published icon sets, sample photos, colour profiles or LUTs — even when OFL/MIT. The UI font is Inter (OFL);
+- **Never use any iconography, image, artwork, font, sound or other asset from Lightroom or Creative Cloud products** (no product icons, screenshots, presets/profiles/LUTs or UI bitmaps — not even as a temporary placeholder or "reference copy"). Observing their UI to understand *layout and behaviour* is allowed; copying or tracing assets is not.
+- **This includes open-licensed assets from the same publisher**: no Source Sans/Serif/Code or Source Han fonts, no hosted fonts, no
+  publisher-supplied icon sets, sample photos, colour profiles or LUTs — even when OFL/MIT. The UI font is Inter (OFL);
   Japanese and Chinese fonts come from craft-fonts (below). **One exception (maintainer decision, 2026-10-07): Noto
-  Sans/Serif CJK** (Google-branded, OFL, co-developed with Adobe as Source Han) is allowed via craft-fonts for Chinese
+  Sans/Serif CJK** (Google-branded, OFL, related to Source Han) is allowed via craft-fonts for Chinese
   text, because nearly every OFL Chinese face derives from it. Use it unmodified under its OFL; this does not open the
-  door to Source Han under Adobe's name or to any other Adobe asset.
+  door to Source Han or to any other asset from the excluded publisher.
 - Every asset in the repository must be one of: **our own original work** (e.g. icons drawn in code as vectors, procedurally generated demo photos), **public domain / CC0**, **Creative Commons** (CC-BY / CC-BY-SA with attribution honoured), **OFL** (fonts), or **permissive open-source** (MIT/Apache-2.0/BSD/ISC) — or contributed by a person who created the asset and licenses it openly.
-- **Exception: `docs/brand/`.** The ArtCraft name, wordmark and logos there are ArtCraft Team trademarks, not open source and not covered by LightCraft's MIT OR Apache-2.0 licence (`LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE`); their terms are in `docs/brand/LICENSE-brand.txt`. Use them only unmodified and never redraw, recolour or derive from them.
+- **Fork branding:** Ember uses original Orthic Labs artwork. ArtCraft marks are removed; `docs/brand/LICENSE-brand.txt` is retained as upstream legal provenance. Preserve plain-text attribution, copyrights & licences; do not present Ember as an ArtCraft product.
 - **Every asset must have an entry in `assets/ATTRIBUTION.md`** (path, title, author/creator, source URL or "original work", licence, date added, modifications) and its licence text when required (e.g. `assets/fonts/OFL-*.txt`). Add the entry in the same commit as the asset. Assets without an attribution entry must not be committed.
 - **Fonts live in [storytold/craft-fonts](https://github.com/storytold/craft-fonts), never in this repo.** Don't commit
-  font files here (Inter, already in `assets/fonts/`, is the one exception); add new fonts to craft-fonts. LightCraft
+  font files here (Inter, already in `assets/fonts/`, is the one exception); add new fonts to craft-fonts. Ember
   uses it as the optional build input `CRAFT_FONTS_DIR`: `git clone https://github.com/storytold/craft-fonts ../craft-fonts`
   then `CRAFT_FONTS_DIR=../craft-fonts cargo run -p lightcraft` (or any cargo/xtask command). `crates/engine/build.rs`
   embeds the manifest's fonts as `lightcraft_engine::CRAFT_FONTS` (wasm32: BIZ UDPGothic Regular only); the UI
@@ -80,18 +80,18 @@ of it. Full standard: `../craftrules/standards/never-crash.md`
   with it (`release.yml`, `CRAFT_FONTS_REQUIRED=1`) and ship the fonts' OFL licences. Tests that need these fonts skip
   without it; the FreeBSD CI job runs them with it. Rules: craftrules
   [`standards/fonts.md`](https://github.com/storytold/craftrules/blob/main/standards/fonts.md).
-- Icons drawn in code (e.g. `crates/ui-egui/src/icons.rs`) are original work and are recorded in `assets/ATTRIBUTION.md` as such; do not trace them from Adobe icons.
-- Demo/test images: generated procedurally by `lightcraft-scenes`, or CC0 downloads kept in the gitignored `corpus/` with their source recorded. Screenshots of Adobe apps live only in the gitignored `plan/` and are never committed or published.
+- Icons drawn in code (e.g. `crates/ui-egui/src/icons.rs`) are original work and are recorded in `assets/ATTRIBUTION.md` as such; do not trace them from reference-product icons.
+- Demo/test images: generated procedurally by `lightcraft-scenes`, or CC0 downloads kept in the gitignored `corpus/` with their source recorded. Reference-product screenshots & comparative research stay outside this repository and are never committed or published.
 - **Enforced:** `cargo xtask assets` (in `ci`) fails when an image/icon/font/sound/video/raw/ICC/XMP file is not matched
   by a path pattern in the first column of `assets/ATTRIBUTION.md`, when a referenced licence file is missing, when a
-  file name suggests Adobe material, or when an Adobe profile/template format (`.dcp`, `.lcp`, `.lrtemplate`, …) appears.
+  file name suggests excluded publisher material, or when a proprietary profile/template format (`.dcp`, `.lcp`, `.lrtemplate`, …) appears.
   Never weaken this check to make a commit pass — fix the attribution or remove the asset.
 - When in doubt about an asset's licence: don't use it.
 
 ## Running and looking at the app
 - `cargo run --release -p lightcraft -- --control 7980` opens the desktop app with the JSON-lines control server (see `docs/control-protocol.md`).
 - **Never send OS-level synthetic input** (osascript/System Events keystrokes or clicks, `cliclick`, accessibility
-  automation): it goes to whatever window is frontmost — the user's terminal or other apps. Drive LightCraft only
+  automation): it goes to whatever window is frontmost — the user's terminal or other apps. Drive Ember only
   through its control channel (`ui.key`, `ui.pointer`, `ui.clickWidget`, `ui.menu.invoke`) or headless snapshots.
 - For UI work, **look at the result**: drive via the control channel and take `ui.screenshot`, compare with `plan/lightroom/screenshots/`.
 - **Unattended (display asleep/locked, CI, nightly runs): prefer headless snapshots** — no window needed:
@@ -103,7 +103,7 @@ of it. Full standard: `../craftrules/standards/never-crash.md`
 - Export goes through `lightcraft_engine::export` (one encoder for app, CLI, MCP and web); UI-only commands live in
   `crates/ui-egui/src/menus.rs`.
 - Shell gotcha: `mv`/`cp` are aliased interactive here — use `/bin/mv -f` / `/bin/cp -f`.
-- Parallel agents: separate git worktrees and `CARGO_TARGET_DIR=target/agent-<name>`; each agent uses its **own control port** (pick one in 18000–19999, never the default 7980) and its own scratch subfolder (`<scratch>/<agent-name>/`) — never `rm -rf` shared paths; delete your target dir when done (disk is shared); keep every `Cargo.toml` valid at all times (the `crates/*` glob means one broken manifest breaks everyone).
+- Parallel agents: use explicit file ownership or separate worktrees; public builds use generated RightKit Actions caches, never local `CARGO_TARGET_DIR` overrides; each agent uses its **own control port** (pick one in 18000–19999, never the default 7980) and its own scratch subfolder (`<scratch>/<agent-name>/`) — never `rm -rf` shared paths; delete your target dir when done (disk is shared); keep every `Cargo.toml` valid at all times (the `crates/*` glob means one broken manifest breaks everyone).
 - Test corpora: `cargo xtask corpus --download` into `corpus/` (gitignored, CC0 only). Never commit media.
 - Shared real-file test corpora (Photoshop-authored PSDs, etc.) live in [`storytold/photocraft-corpus`](https://github.com/storytold/photocraft-corpus), explained in [craftrules `standards/test-corpora.md`](https://github.com/storytold/craftrules/blob/main/standards/test-corpora.md). Never commit large binary fixtures to this repo; fetch them pinned by commit and sha256-verified, as PhotoCraft does with `cargo xtask corpus`.
 

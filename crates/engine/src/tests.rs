@@ -86,6 +86,31 @@ fn develop_set_and_interaction_coalesces() {
 }
 
 #[test]
+fn explicit_ids_during_interaction_coalesce_as_one_batch_undo() {
+    use lightcraft_catalog::PhotoId;
+
+    let mut s = demo();
+    let ids: Vec<PhotoId> = s.catalog.photos().take(2).map(|photo| photo.id).collect();
+    s.execute("library.select", &json!({"ids": [ids[0].0, ids[1].0], "active": ids[0].0})).unwrap();
+    let before = ids.iter().map(|id| s.develop_of(*id).unwrap().light.exposure).collect::<Vec<_>>();
+    let undo_before = s.undo.len();
+
+    s.execute("develop.beginInteraction", &json!({"label": "Exposure"})).unwrap();
+    s.execute("develop.set", &json!({"control": "light.exposure", "value": 0.75, "ids": [ids[0].0, ids[1].0]})).unwrap();
+    assert_eq!(s.undo.len(), undo_before, "explicit IDs remain a silent interaction preview");
+    s.execute("develop.endInteraction", &json!({})).unwrap();
+    assert_eq!(s.undo.len(), undo_before + 1, "selected targets share one undo step");
+    assert!(ids.iter().all(|id| (s.develop_of(*id).unwrap().light.exposure - 0.75).abs() < f64::EPSILON));
+
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.undo.len(), undo_before);
+    assert_eq!(ids.iter().map(|id| s.develop_of(*id).unwrap().light.exposure).collect::<Vec<_>>(), before);
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert_eq!(s.undo.len(), undo_before + 1);
+    assert!(ids.iter().all(|id| (s.develop_of(*id).unwrap().light.exposure - 0.75).abs() < f64::EPSILON));
+}
+
+#[test]
 fn copy_paste_sync_presets() {
     let mut s = demo();
     let vis = s.visible_cloned();
@@ -505,6 +530,49 @@ fn filter_presets_save_and_apply() {
 }
 
 #[test]
+fn auto_noise_reduction_measures_then_applies_in_one_undo_step() {
+    let mut s = demo();
+    let before = active_dev(&s);
+    let r = s.execute("develop.autoNoise", &json!({"dryRun": true})).unwrap();
+    let (lum, col) = (r["luminance"].as_f64().unwrap(), r["color"].as_f64().unwrap());
+    assert!((0.0..=80.0).contains(&lum) && (0.0..=100.0).contains(&col), "{r}");
+    assert_eq!(active_dev(&s).detail, before.detail, "a dry run edits nothing");
+    let again = s.execute("develop.autoNoise", &json!({"dryRun": true})).unwrap();
+    assert_eq!(r, again, "repeat stable");
+    s.execute("develop.autoNoise", &json!({})).unwrap();
+    let d = active_dev(&s);
+    assert_eq!((d.detail.nr_luminance, d.detail.nr_color), (lum, col));
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(active_dev(&s).detail, before.detail, "one undo step");
+}
+
+#[test]
+fn apply_look_refits_the_eight_values_toward_sample_statistics() {
+    use lightcraft_raster::Rgba8;
+    let mut s = demo();
+    // a bright, flat "look": a mid-grey sample with a little headroom
+    let sample = Rgba8::from_fn(64, 64, |x, _| [150 + (x as u8 / 2), 150 + (x as u8 / 2), 140 + (x as u8 / 2), 255]);
+    let look = lightcraft_pipeline::look::extract(&[sample]).unwrap();
+    let before = active_dev(&s);
+    let r = s.execute("develop.applyLook", &json!({"look": look, "dryRun": true})).unwrap();
+    assert!(r["values"]["exposure"].as_f64().unwrap().is_finite(), "{r}");
+    assert_eq!(active_dev(&s).light, before.light, "a dry run edits nothing");
+    let applied = s.execute("develop.applyLook", &json!({"look": look})).unwrap();
+    assert_eq!(applied["values"], r["values"], "repeat stable");
+    let d = active_dev(&s);
+    assert_eq!(d.light.exposure, r["values"]["exposure"].as_f64().unwrap());
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(active_dev(&s).light, before.light, "one undo step");
+    // hostile targets are refused before any edit
+    let mut bad = serde_json::to_value(&look).unwrap();
+    bad["luminance"] = json!([0.9, 0.5, 0.1, 0.0, 0.0]);
+    assert!(s.execute("develop.applyLook", &json!({"look": bad})).is_err());
+    assert!(s.execute("develop.applyLook", &json!({"path": "/nonexistent/look.json"})).is_err());
+    assert!(s.execute("develop.applyLook", &json!({})).is_err());
+    assert_eq!(active_dev(&s).light, before.light);
+}
+
+#[test]
 fn auto_bw_mix_separates_colours() {
     let mut s = demo();
     s.execute("develop.autoBwMix", &json!({})).unwrap();
@@ -600,6 +668,31 @@ fn build_previews_fills_the_cache() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert!(s.execute("library.buildPreviews", &json!({"size": "huge"})).is_err());
+}
+
+#[test]
+fn preview_build_marks_decodes_as_background_work() {
+    use lightcraft_catalog::{Op, Photo, PhotoId, Source};
+    use lightcraft_pipeline::SourceInfo;
+    use lightcraft_raster::Rgb32f;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let saw_background = std::sync::Arc::new(AtomicBool::new(false));
+    let marker = saw_background.clone();
+    let mut s = Session::new();
+    s.catalog
+        .apply(Op::AddPhoto {
+            photo: Box::new(Photo::new(PhotoId(1), Source::File { path: "background.png".into() }, "background.png", "PNG", 16, 16, "")),
+        })
+        .unwrap();
+    s.media.file_loader = Some(std::sync::Arc::new(move |_, _| {
+        marker.store(crate::memory::is_background(), Ordering::Relaxed);
+        Ok((Rgb32f::new(16, 16), SourceInfo::default()))
+    }));
+
+    let result = s.execute("library.buildPreviews", &json!({"ids": [1], "wait": true})).unwrap();
+    assert_eq!(result["done"], 1);
+    assert!(saw_background.load(Ordering::Relaxed), "preview decodes yield to interactive work");
 }
 
 /// Colour range: a click samples the colour under it, so the mask selects that colour (white

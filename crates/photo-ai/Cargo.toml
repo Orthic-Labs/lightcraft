@@ -1,0 +1,27 @@
+[package]
+name = "lightcraft-photo-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Typed, read-only cloud photo assessment experiments (L3)"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = "=0.22.1"
+sha2 = { version = "0.10", default-features = false, features = ["std"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+lightcraft-fetch = { workspace = true, optional = true }
+
+[features]
+default = []
+network = ["dep:lightcraft-fetch"]
+
+[dev-dependencies]
+lightcraft-codecs = { workspace = true }
+lightcraft-raster = { workspace = true }
+lightcraft-develop = { workspace = true }

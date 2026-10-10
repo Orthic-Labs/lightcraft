@@ -874,6 +874,13 @@ mod tests {
             img.data[0][0] = i as u8; // different bytes per file
             std::fs::write(p, lightcraft_engine::export::encode_image(&img, &o).unwrap()).unwrap();
         }
+        // Keep renderer loader absent so thumbnail failure remains covered, but give the import
+        // review realistic sizes. The demo session has no native file hooks, and zero-size
+        // fallback probes are correctly rejected as stale by ImportJob before local import.
+        h.app.session.media.file_probe = Some(std::sync::Arc::new(|path: &str| {
+            let file_size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+            Ok(lightcraft_engine::media::ProbeInfo { format: "PNG".into(), file_size, ..Default::default() })
+        }));
         let library_before = h.app.session.catalog.photos().filter(|p| !p.local).count();
         let r = h.request("engine.execute", json!({"command": "library.browse", "params": {"path": dir.to_string_lossy()}}), t);
         // the folder is read in the background: the view switches at once, the photos follow
@@ -1132,7 +1139,7 @@ mod tests {
         assert_eq!(h.app.ui.right, crate::state::RightPanel::Edit, "no-op outside tools");
     }
 
-    /// ⌘Q (File → Quit LightCraft) closes the window.
+    /// ⌘Q (File → Quit Ember) closes the window.
     #[test]
     fn cmd_q_quits() {
         let mut h = demo([900.0, 600.0]);
@@ -1218,12 +1225,13 @@ mod tests {
         let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (g, n) = (gate.clone(), started.clone());
-        h.app.session.media.file_probe = Some(std::sync::Arc::new(move |_: &str| {
+        h.app.session.media.file_probe = Some(std::sync::Arc::new(move |path: &str| {
             n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             while !g.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            Ok(lightcraft_engine::media::ProbeInfo { format: "PNG".into(), ..Default::default() })
+            let file_size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+            Ok(lightcraft_engine::media::ProbeInfo { format: "PNG".into(), file_size, ..Default::default() })
         }));
         let browse =
             |h: &mut Headless| h.request("engine.execute", json!({"command": "library.browse", "params": {"path": dir.to_string_lossy()}}), t);

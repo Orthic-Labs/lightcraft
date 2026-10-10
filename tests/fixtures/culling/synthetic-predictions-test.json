@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "fixture_kind": "SYNTHETIC",
+  "dataset_id": "synthetic-culling-v1",
+  "split": "test",
+  "predictions": [
+    {"photo_id": "photo-test-001-a", "decision": "reject"},
+    {"photo_id": "photo-test-001-b", "decision": "keep"},
+    {"photo_id": "photo-test-001-c", "decision": "reject"},
+    {"photo_id": "photo-test-002-a", "decision": "keep"},
+    {"photo_id": "photo-test-002-b", "decision": "reject"},
+    {"photo_id": "photo-test-002-c", "decision": "unknown"}
+  ],
+  "winner_predictions": [
+    {"burst_id": "burst-test-001", "selected_winner_id": "photo-test-001-b"}
+  ],
+  "expected": {
+    "rejectPrecision": 1.0,
+    "rejectRecall": 1.0,
+    "falseRejectCount": 0,
+    "unknownRejectCount": 1,
+    "winnerAgreement": 1.0,
+    "winnerCoverage": 1.0,
+    "decisionCoverage": 1.0
+  }
+}

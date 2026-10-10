@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use lightcraft_catalog::{PhotoId, Source};
+use lightcraft_catalog::{Op, PhotoId, Source};
 use lightcraft_develop::DevelopSettings;
 use lightcraft_merge::{Deghost, Frame, HdrOptions, PanoOptions, Projection};
 use lightcraft_pipeline::{Quality, RenderRequest, SourceInfo};
@@ -211,7 +211,7 @@ impl MergeJob {
                 self.sources.iter().map(|(_, p)| std::path::Path::new(p).file_name().and_then(|n| n.to_str()).unwrap_or(p)).collect();
             metadata.caption = Some(format!("Merged from {}", names.join(", ")));
         }
-        metadata.software = Some("LightCraft Photo Merge".into());
+        metadata.software = Some("Ember Photo Merge".into());
         let dng = lightcraft_merge::write_linear_dng(&image, &color, orientation, &metadata, baseline, samples).map_err(err)?;
         info["width"] = json!(image.width);
         info["height"] = json!(image.height);
@@ -368,7 +368,7 @@ impl Session {
         let output_hash = lightcraft_preview::hash_bytes(&out.dng).to_string();
         // Import deduplicates by content. Reuse an existing merge only while its live source has
         // matching bytes; stale, missing or deleted rows fail before another file is published.
-        let candidates: Vec<(PhotoId, String, bool)> = self
+        let candidates: Vec<(PhotoId, String, bool, bool)> = self
             .catalog
             .photos()
             .filter_map(|p| {
@@ -376,12 +376,12 @@ impl Session {
                     return None;
                 }
                 let Source::File { path } = &p.source else { return None };
-                Some((p.id, path.clone(), p.deleted))
+                Some((p.id, path.clone(), p.deleted, p.local))
             })
             .collect();
         let valid_existing = candidates
             .iter()
-            .find(|(_, path, deleted)| {
+            .find(|(_, path, deleted, _)| {
                 if *deleted {
                     return false;
                 }
@@ -392,9 +392,9 @@ impl Session {
                 bytes.is_some_and(|bytes| lightcraft_preview::hash_bytes(&bytes).to_string() == output_hash)
             })
             .cloned();
-        let (id, path, reused) = if let Some((id, path, _)) = valid_existing {
-            (id, path, true)
-        } else if let Some((id, path, deleted)) = candidates.first() {
+        let (id, path, reused, promote_local) = if let Some((id, path, _, local)) = valid_existing {
+            (id, path, true, local)
+        } else if let Some((id, path, deleted, _)) = candidates.first() {
             let state = if *deleted { "deleted" } else { "missing or changed" };
             return Err(EngineError::Other(format!(
                 "existing merge result {id:?} has a {state} source at {path}; relink or remove it before repeating the merge"
@@ -413,12 +413,15 @@ impl Session {
                 }
             };
             if let Some(id) = report.imported.first().copied().map(PhotoId) {
-                (id, path, false)
+                (id, path, false, false)
             } else {
                 let _ = std::fs::remove_file(&path);
                 return Err(EngineError::Other(format!("the merged file {path} could not be imported: {:?}", report.failed)));
             }
         };
+        if promote_local {
+            self.commit("Add to My Photos", Op::SetLocal { id, local: false })?;
+        }
         if !reused && job.finish.stack {
             let sources: Vec<PhotoId> = job.sources.iter().map(|(p, _)| *p).collect();
             if let Some(op) = self.catalog.stack_with_ops(id, &sources) {

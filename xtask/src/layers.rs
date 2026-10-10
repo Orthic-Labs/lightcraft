@@ -51,12 +51,15 @@ pub const TABLE: &[(&str, Class)] = &[
     ("export", Class::Layer(3)),
     ("merge", Class::Layer(3)),
     ("segment", Class::Layer(3)),
+    ("photo-ai", Class::Layer(3)),
     ("engine", Class::Layer(4)),
     ("ui-egui", Class::Layer(5)),
+    ("desktop-host", Class::Layer(5)),
     ("mcp", Class::Layer(5)),
     ("testkit", Class::Testkit),
     // L6 apps and tooling
     ("lightcraft", Class::Exempt),
+    ("desktop", Class::Exempt),
     ("cli", Class::Exempt),
     ("web", Class::Exempt),
     ("xtask", Class::Exempt),
@@ -85,7 +88,7 @@ fn intra_layer_allowed(from: &str, to: &str) -> bool {
 
 /// External crates that constitute a UI toolkit / windowing dependency.
 /// Entries ending in `*` are prefixes.
-pub const UI_CRATES: &[&str] = &["egui", "eframe", "winit", "egui_kittest", "rfd", "bevy*"];
+pub const UI_CRATES: &[&str] = &["egui", "eframe", "winit", "egui_kittest", "rfd", "tauri", "wry", "bevy*"];
 
 /// First layer allowed to use UI crates.
 pub const UI_MIN_LAYER: u8 = 5;

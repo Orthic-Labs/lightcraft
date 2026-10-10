@@ -1,4 +1,4 @@
-//! A small HTTP/1.1 GET client for model downloads, in pure Rust: `std::net` sockets and, for
+//! A small HTTP/1.1 client for model downloads & bounded JSON requests, in pure Rust: `std::net` sockets and, for
 //! `https://`, rustls with the RustCrypto provider (`rustls-rustcrypto`; no `ring` or
 //! `aws-lc-rs`, so nothing is compiled from C or assembly) and the Mozilla root certificates
 //! (`webpki-roots`).
@@ -152,6 +152,20 @@ pub struct Limits<'a> {
     pub connect: Duration,
     pub stall: Duration,
     pub cancel: &'a AtomicBool,
+    /// Optional whole-operation deadline, including reads that keep making progress.
+    pub deadline: Option<Instant>,
+}
+
+impl Limits<'_> {
+    fn check(&self) -> Result<(), HttpError> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(HttpError::Cancelled);
+        }
+        if self.deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(HttpError::Stalled);
+        }
+        Ok(())
+    }
 }
 
 /// How often a blocked read wakes up to check the cancel flag.
@@ -180,6 +194,7 @@ fn tls_config() -> Result<Arc<rustls::ClientConfig>, HttpError> {
 
 impl Stream {
     fn connect(url: &Url, limits: &Limits) -> Result<Stream, HttpError> {
+        limits.check()?;
         let addrs: Vec<_> = (url.host.as_str(), url.port).to_socket_addrs().map_err(|e| HttpError::Connect(format!("{}: {e}", url.host)))?.collect();
         if addrs.is_empty() {
             return Err(HttpError::Connect(format!("{}: no address", url.host)));
@@ -187,9 +202,7 @@ impl Stream {
         let mut last = String::new();
         let mut sock = None;
         for a in addrs {
-            if limits.cancel.load(Ordering::Relaxed) {
-                return Err(HttpError::Cancelled);
-            }
+            limits.check()?;
             match TcpStream::connect_timeout(&a, limits.connect) {
                 Ok(s) => {
                     sock = Some(s);
@@ -216,9 +229,7 @@ impl Stream {
     fn retry<T>(limits: &Limits, mut f: impl FnMut() -> std::io::Result<T>) -> Result<T, HttpError> {
         let start = Instant::now();
         loop {
-            if limits.cancel.load(Ordering::Relaxed) {
-                return Err(HttpError::Cancelled);
-            }
+            limits.check()?;
             match f() {
                 Ok(v) => return Ok(v),
                 Err(e) if is_timeout(&e) => {
@@ -241,6 +252,7 @@ impl Stream {
     }
 
     fn write_all(&mut self, data: &[u8], limits: &Limits) -> Result<(), HttpError> {
+        limits.check()?;
         match self {
             Stream::Plain(sock) => {
                 let mut rest = data;
@@ -254,10 +266,19 @@ impl Stream {
                 Ok(())
             }
             Stream::Tls(conn, sock) => {
-                // buffered by rustls, then sent as TLS records
-                conn.writer().write_all(data).map_err(|e| HttpError::Tls(e.to_string()))?;
-                while conn.wants_write() {
-                    Self::retry(limits, || conn.write_tls(sock))?;
+                // Drain each bounded chunk; a multi-MiB POST cannot fit rustls' send buffer.
+                let mut rest = data;
+                while !rest.is_empty() {
+                    limits.check()?;
+                    let chunk = rest.get(..rest.len().min(16 * 1024)).ok_or_else(|| HttpError::Protocol("invalid request chunk".into()))?;
+                    let n = conn.writer().write(chunk).map_err(|e| HttpError::Tls(e.to_string()))?;
+                    if n == 0 {
+                        return Err(HttpError::Io("TLS connection stopped accepting request bytes".into()));
+                    }
+                    while conn.wants_write() {
+                        Self::retry(limits, || conn.write_tls(sock))?;
+                    }
+                    rest = rest.get(n..).ok_or_else(|| HttpError::Protocol("invalid TLS write length".into()))?;
                 }
                 Ok(())
             }
@@ -271,9 +292,7 @@ impl Stream {
             Stream::Tls(conn, sock) => {
                 let start = Instant::now();
                 loop {
-                    if limits.cancel.load(Ordering::Relaxed) {
-                        return Err(HttpError::Cancelled);
-                    }
+                    limits.check()?;
                     match conn.reader().read(buf) {
                         Ok(n) => return Ok(n),
                         // closed without close_notify: the caller checks the length it got
@@ -396,6 +415,7 @@ impl Response {
 
     /// Read body bytes into `out` (0 at the end of the body).
     pub fn read(&mut self, out: &mut [u8], limits: &Limits) -> Result<usize, HttpError> {
+        limits.check()?;
         match &mut self.body {
             BodyMode::Done => Ok(0),
             BodyMode::Length(left) => {
@@ -457,12 +477,27 @@ impl Response {
 
 /// Send `GET url` with extra `headers` and read the status line and headers.
 pub fn get(url: &Url, headers: &[(&str, String)], limits: &Limits) -> Result<Response, HttpError> {
+    request(url, headers, limits, "GET", &[])
+}
+
+/// One POST, no redirects/retries. Caller caps response bytes & supplies a total deadline.
+pub fn post_json(url: &Url, headers: &[(&str, String)], body: &[u8], limits: &Limits) -> Result<Response, HttpError> {
+    if body.len() > 4 * 1024 * 1024 || limits.deadline.is_none() {
+        return Err(HttpError::Protocol("POST requires bounded body & deadline".into()));
+    }
+    request(url, headers, limits, "POST", body)
+}
+
+fn request(url: &Url, headers: &[(&str, String)], limits: &Limits, method: &str, body: &[u8]) -> Result<Response, HttpError> {
     let mut req = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: LightCraft/{}\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
+        "{method} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Ember/{}\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n",
         url.path,
         url.host_header(),
         env!("CARGO_PKG_VERSION")
     );
+    if method == "POST" {
+        req.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n", body.len()));
+    }
     for (k, v) in headers {
         if v.chars().any(|c| c == '\r' || c == '\n') || k.chars().any(|c| c == '\r' || c == '\n' || c == ':') {
             return Err(HttpError::BadUrl("header with a line break".into()));
@@ -472,6 +507,9 @@ pub fn get(url: &Url, headers: &[(&str, String)], limits: &Limits) -> Result<Res
     req.push_str("\r\n");
     let mut stream = Stream::connect(url, limits)?;
     stream.write_all(req.as_bytes(), limits)?;
+    if !body.is_empty() {
+        stream.write_all(body, limits)?;
+    }
     let mut conn = Conn { stream, buf: Vec::new(), pos: 0 };
     let status_line = conn.line(MAX_HEAD, limits)?;
     let mut parts = status_line.split_whitespace();
@@ -546,5 +584,62 @@ mod tests {
     #[test]
     fn the_tls_config_builds_with_the_pure_rust_provider() {
         assert!(tls_config().is_ok());
+    }
+
+    #[test]
+    fn post_sends_exact_bounded_body_once() {
+        use std::io::{BufRead, BufReader};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut socket, _) = server.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut reader = BufReader::new(&socket);
+            let mut head = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                head.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            assert!(head.starts_with("POST /test HTTP/1.1\r\n"));
+            assert!(head.contains("Content-Length: 2\r\n"));
+            assert!(head.contains("Content-Type: application/json\r\n"));
+            let mut body = [0; 2];
+            reader.read_exact(&mut body).unwrap();
+            assert_eq!(&body, b"{}");
+            drop(reader);
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+        });
+        let cancel = AtomicBool::new(false);
+        let limits = Limits {
+            connect: Duration::from_secs(2),
+            stall: Duration::from_secs(2),
+            cancel: &cancel,
+            deadline: Instant::now().checked_add(Duration::from_secs(3)),
+        };
+        let mut response = post_json(&Url::parse(&format!("http://{addr}/test")).unwrap(), &[], b"{}", &limits).unwrap();
+        assert_eq!(response.status, 200);
+        let mut bytes = [0; 2];
+        assert_eq!(response.read(&mut bytes, &limits).unwrap(), 2);
+        assert_eq!(&bytes, b"{}");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn post_rejects_missing_deadline_oversize_and_cancel_before_connect() {
+        let cancel = AtomicBool::new(true);
+        let url = Url::parse("http://127.0.0.1:1/test").unwrap();
+        let mut limits = Limits { connect: Duration::from_secs(1), stall: Duration::from_secs(1), cancel: &cancel, deadline: None };
+        assert!(matches!(post_json(&url, &[], b"{}", &limits), Err(HttpError::Protocol(_))));
+        limits.deadline = Instant::now().checked_add(Duration::from_secs(1));
+        assert!(matches!(post_json(&url, &[], b"{}", &limits), Err(HttpError::Cancelled)));
+        assert!(matches!(post_json(&url, &[], &vec![0; 4 * 1024 * 1024 + 1], &limits), Err(HttpError::Protocol(_))));
+        assert!(matches!(post_json(&url, &[("Authorization", "key\r\nInjected: 1".into())], b"{}", &limits), Err(HttpError::BadUrl(_))));
+        cancel.store(false, Ordering::Relaxed);
+        limits.deadline = Some(Instant::now());
+        assert!(matches!(post_json(&url, &[], b"{}", &limits), Err(HttpError::Stalled)));
     }
 }

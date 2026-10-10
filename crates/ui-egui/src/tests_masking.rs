@@ -649,7 +649,7 @@ fn ai_masks_without_the_model_offer_the_download() {
         // no location configured in this build: no Download button (only Close), and an agent
         // confirming anyway gets the reason; the dialog stays
         h.step();
-        // …but a way to install it by hand: the guide, and the model folder (created on demand)
+        // Manual install remains actionable: guide link plus model folder reveal (created on demand).
         assert!(h.app.widgets.iter().any(|(id, _)| id == "link:samHelp"), "no installation guide link");
         let shown = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let log = shown.clone();

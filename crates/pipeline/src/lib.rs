@@ -1,4 +1,4 @@
-//! The LightCraft develop pipeline (CPU reference implementation).
+//! The Ember develop pipeline (CPU reference implementation).
 //!
 //! Input: a scene-referred, linear Rec.2020 source image (already EXIF-oriented) at any resolution
 //! (full size or a proxy), plus [`DevelopSettings`]. Output: a display-encoded sRGB image at the
@@ -30,10 +30,14 @@ pub mod dust;
 pub mod finish;
 pub mod geometry;
 pub mod local;
+pub mod look;
 pub mod lut;
 pub mod masks;
+pub mod noise;
 pub mod optics;
 pub mod output;
+pub mod personal_auto;
+pub mod personal_auto_spatial;
 pub mod profiles;
 pub mod redeye;
 pub mod spots;

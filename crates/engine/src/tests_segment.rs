@@ -75,6 +75,17 @@ fn status_and_model_commands_without_the_model() {
 
 #[cfg(feature = "sam")]
 #[test]
+fn selecting_a_model_folder_verifies_all_files_before_switching() {
+    let dir = damaged_model("select-invalid");
+    let mut s = Session::with_demo();
+    let error = s.execute("segment.model.selectFolder", &json!({"path": dir})).unwrap_err().to_string();
+    assert!(error.contains("official SAM 3 checkpoint size") || error.contains("safetensors"), "{error}");
+    assert!(s.segmenter.dir.is_none(), "invalid folder must not replace configured folder");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(feature = "sam")]
+#[test]
 fn a_failing_download_ends_with_an_error_and_never_blocks() {
     use std::io::{BufRead, BufReader, Write};
     // a local mirror that has nothing

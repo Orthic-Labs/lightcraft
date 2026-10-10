@@ -29,6 +29,24 @@ pub struct ImportRequest {
     pub album_name: Option<String>,
 }
 
+pub fn import_scan_options(p: &Value, command: &str) -> Result<crate::import::ImportScanOptions> {
+    if let Some(value) = p.get("includeSubfolders")
+        && !value.is_boolean()
+    {
+        return Err(bad(command, "`includeSubfolders` must be a boolean"));
+    }
+    let extensions = |key: &str| -> Result<Vec<String>> {
+        let Some(value) = p.get(key) else { return Ok(Vec::new()) };
+        let Some(values) = value.as_array() else { return Err(bad(command, format!("`{key}` must be an array of extensions"))) };
+        values.iter().map(|value| value.as_str().map(str::to_string).ok_or_else(|| bad(command, format!("`{key}` must contain strings")))).collect()
+    };
+    Ok(crate::import::ImportScanOptions {
+        include_subfolders: bool_or(p, "includeSubfolders", true),
+        allowed_extensions: extensions("allowedExtensions")?,
+        excluded_extensions: extensions("excludedExtensions")?,
+    })
+}
+
 /// Parse and check `library.import`'s params (the app's import task runs the import itself, on a
 /// worker thread, with the same options).
 pub fn import_params(s: &Session, p: &Value) -> Result<ImportRequest> {
@@ -72,7 +90,13 @@ pub fn import_params(s: &Session, p: &Value) -> Result<ImportRequest> {
         }
         None => Default::default(),
     };
+    let raw_jpeg_policy = match str_param(p, "rawJpegPolicy") {
+        Some(v) => crate::import::RawJpegImportPolicy::parse(v)
+            .ok_or_else(|| bad("library.import", format!("unknown rawJpegPolicy `{v}` (keepBoth|rawOnly)")))?,
+        None => Default::default(),
+    };
     let opts = crate::import::ImportOptions {
+        scan: import_scan_options(p, "library.import")?,
         on_deleted,
         mode,
         preset,
@@ -84,6 +108,7 @@ pub fn import_params(s: &Session, p: &Value) -> Result<ImportRequest> {
         metadata_preset,
         convert_dng: bool_or(p, "dng", false),
         local: bool_or(p, "local", false),
+        raw_jpeg_policy,
     };
     let album_name = str_param(p, "albumName").map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
     Ok(ImportRequest { paths, opts, album, album_name })
@@ -1086,14 +1111,24 @@ pub fn specs() -> Vec<CommandSpec> {
             "Review Import",
             [],
             None,
-            "{paths: [file or folder (recursive)]} → {candidates: [{path, name, format, kind, width, height, fileSize, captured, duplicate?: path|content, existing?, error?, previewOnly?: why a raw can only be shown from its embedded preview}], duplicates, scanned} — nothing is added",
+            "{paths: [file or folder (recursive)], includeSubfolders?: bool (default true), allowedExtensions?: [extensions], excludedExtensions?: [extensions], rawJpegPolicy?: keepBoth|rawOnly} → {candidates: [{path, name, format, kind, width, height, fileSize, captured, duplicate?: path|content, existing?, error?, previewOnly?: why a raw can only be shown from its embedded preview, pairing?: {with, kind, relation}, policyExcluded?: rawOnly}], duplicates, scanned} — nothing is added",
             always,
             |s, p| {
                 let paths = strs(p, "paths");
                 if paths.is_empty() {
                     return Err(bad("library.importPreview", "no paths"));
                 }
-                let c = crate::import::scan(s, &paths);
+                let policy = match str_param(p, "rawJpegPolicy") {
+                    Some(v) => crate::import::RawJpegImportPolicy::parse(v)
+                        .ok_or_else(|| bad("library.importPreview", format!("unknown rawJpegPolicy `{v}` (keepBoth|rawOnly)")))?,
+                    None => Default::default(),
+                };
+                let options = import_scan_options(p, "library.importPreview")?;
+                let (mut input, paths) = crate::import::ScanInput::new_with_options(s, &paths, options);
+                input.raw_jpeg_policy = policy;
+                let output = crate::import::scan_with(input, &paths, &crate::import::ScanProgress::default());
+                s.import_probes = output.probes;
+                let c = output.candidates;
                 let dups = c.iter().filter(|c| c.duplicate.is_some()).count();
                 Ok(json!({"scanned": c.len(), "duplicates": dups, "candidates": c}))
             }
@@ -1103,7 +1138,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Import Photos",
             ["File"],
             Some("Cmd+Shift+I"),
-            "{paths: [file or folder (recursive)], mode?: add|copy|move (add = reference the files in place; copy = into the library's Originals/YYYY/YYYY-MM-DD/; move = as copy, then each original and its XMP sidecars are removed from the source — only after the copy is verified (a hard link on the same volume, else copied, synced and compared byte for byte) and its catalog record is saved; failed, duplicate and unchecked files keep their sources; a taken name gets -1, -2…; undo removes the photos from the library but leaves the files at the destination), destination?: folder for copies / moves, organize?: date (YYYY/YYYY-MM-DD) | month (YYYY/YYYY-MM) | flat | a folder template, e.g. `{date:%Y}/{date:%Y%m%d}` → 2026/20260114 (the template's `/` make the folders, each level expanded with the rename tokens and made a safe folder name: never outside the destination; must be relative, no `..`; a level with missing metadata is `unknown`) — dated by capture time, else the import time, rename?: file-name template for copies, original extension added (tokens: {name} {num} {seq} {seq:N} {date} {date:%Y%m%d} {folder} {camera} {lens} {iso} {rating} {title} {creator} {ext}; photo.renameTokens explains each; blank = keep names), renameStart?: 1, metadataPreset?: name, dng?: bool (copy raws as DNG; copy only), local?: bool (browsing: the photos stay out of the library, like library.browse; not with move), album?: albumId, albumName?: new album, preset?: presetId, keywords?: [..], onDeleted?: skip|restore|fresh (a file that is in Recently Deleted: skip = leave it there and say so, restore = bring the photo back with its edits, fresh = delete the trashed record and import the file as new)} → {imported, duplicates: [{path, existing, reason, existingDeleted?}], restored?: [photoId], failed, moved?: [{from, to, sidecars?}], kept?: [{path, reason}] (move: sources left in place and why), album?}",
+            "{paths: [file or folder (recursive)], mode?: add|copy|move (add = reference the files in place; copy = into the library's Originals/YYYY/YYYY-MM-DD/; move = as copy, then each original and its XMP sidecars are removed from the source — only after the copy is verified (a hard link on the same volume, else copied, synced and compared byte for byte) and its catalog record is saved; failed, duplicate and unchecked files keep their sources; a taken name gets -1, -2…; undo removes the photos from the library but leaves the files at the destination), rawJpegPolicy?: keepBoth|rawOnly (pair notices and review default; explicit paths are always honored), destination?: folder for copies / moves, organize?: date (YYYY/YYYY-MM-DD) | month (YYYY/YYYY-MM) | flat | a folder template, e.g. `{date:%Y}/{date:%Y%m%d}` → 2026/20260114 (the template's `/` make the folders, each level expanded with the rename tokens and made a safe folder name: never outside the destination; must be relative, no `..`; a level with missing metadata is `unknown`) — dated by capture time, else the import time, rename?: file-name template for copies, original extension added (tokens: {name} {num} {seq} {seq:N} {date} {date:%Y%m%d} {folder} {camera} {lens} {iso} {rating} {title} {creator} {ext}; photo.renameTokens explains each; blank = keep names), renameStart?: 1, metadataPreset?: name, dng?: bool (copy raws as DNG; copy only), local?: bool (browsing: the photos stay out of the library, like library.browse; not with move), album?: albumId, albumName?: new album, preset?: presetId, keywords?: [..], onDeleted?: skip|restore|fresh (a file that is in Recently Deleted: skip = leave it there and say so, restore = bring the photo back with its edits, fresh = delete the trashed record and import the file as new)} → {imported, duplicates: [{path, existing, reason, existingDeleted?}], restored?: [photoId], failed, moved?: [{from, to, sidecars?}], kept?: [{path, reason}] (move: sources left in place and why), album?}",
             always,
             |s, p| {
                 let req = import_params(s, p)?;

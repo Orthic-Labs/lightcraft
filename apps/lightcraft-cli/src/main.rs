@@ -1,4 +1,4 @@
-//! `lightcraft-cli`: headless LightCraft.
+//! `lightcraft-cli`: headless Ember.
 //!
 //! ```text
 //! lightcraft-cli run [--demo | --library DIR | --connect [ADDR]] [--import PATH]… CMD [key=value…]…
@@ -9,12 +9,24 @@
 //! lightcraft-cli synth-merge hdr|panorama -o DIR
 //! lightcraft-cli commands [--json]
 //! lightcraft-cli controls [--json]
+//! lightcraft-cli cull score --predictions FILE --labels FILE [--out FILE] [--split test]
+//! lightcraft-cli cull baseline --manifest FILE [--reject-below 0..100] [--out FILE]
+//! lightcraft-cli ai personal train --manifest FILE --out NEW_MODEL
+//! lightcraft-cli ai personal extract --manifest FILE --out NEW_MANIFEST
+//! lightcraft-cli ai personal evaluate --manifest FILE --model FILE [--out NEW_REPORT]
+//! lightcraft-cli ai denoise baseline --hardware LABEL --out NEW_REPORT
 //! lightcraft-cli calibrate [--max N] [--out DIR] FOLDERS/FILES…
 //! ```
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod alloc_release;
+mod cull_eval;
+mod cull_timing;
+mod denoise_eval;
+mod personal_auto_eval;
+mod personal_auto_extract;
+mod photo_ai;
 
 use std::io::{BufReader, Write};
 use std::path::Path;
@@ -25,7 +37,7 @@ use lightcraft_mcp::{Backend, DEFAULT_ADDR, Headless, Remote, Server, expand_pat
 use serde_json::{Value, json};
 
 const USAGE: &str = "\
-lightcraft-cli — headless LightCraft (photo library + raw developer)
+lightcraft-cli — headless Ember (photo library + raw developer)
 
 USAGE:
   lightcraft-cli run [OPTIONS] COMMAND [key=value | '{json}']… [COMMAND …]…
@@ -38,17 +50,22 @@ USAGE:
             develop.auto app.export path=/tmp/a.jpg longEdge=1600
       Options:
         --demo            headless, the procedural demo library
-        --library DIR     headless, open (or create) a LightCraft library; edits are saved
+        --library DIR     headless, open (or create) a Ember library; edits are saved
         --import PATH     headless, import a file or folder first (repeatable)
         --connect [ADDR]  drive the running app (`lightcraft --control 7980`; default 127.0.0.1:7980)
         --script FILE|-   also run JSON lines {\"command\": id, \"params\": {…}} (or {\"method\": …})
         --keep-going      continue after a failed command
+  lightcraft-cli look extract SAMPLE… -o look.json [--force]
+      A look target: the rendered statistics (tone percentiles, headroom, colourfulness) that
+      finished sample photos (JPEG/PNG/TIFF exports) have in common. Apply it to any photo with
+      `develop.applyLook path=look.json` (via `run`, MCP or the control channel): Auto refits the
+      eight tone/colour values so the photo lands on the same statistics. See docs/look-targets.md.
   lightcraft-cli mcp [OPTIONS] [FILES/FOLDERS…]
       MCP server (JSON-RPC 2.0 over stdio). Headless by default: an in-process session with the
       given files imported. Options:
         --connect [ADDR]  drive a running app instead (`lightcraft --control 7980`; default 127.0.0.1:7980)
         --demo            headless: start with the procedurally generated demo library
-        --library DIR     headless: open (or create) a persistent LightCraft library; edits are saved
+        --library DIR     headless: open (or create) a persistent Ember library; edits are saved
         --compact         list only the helper tools (every command stays reachable via run_command)
   lightcraft-cli render <IN> -o <OUT> [OPTIONS]
       Develop one file and export it (.jpg, .png, .tif, .webp, .avif or .dng by extension) with the
@@ -66,7 +83,7 @@ USAGE:
       Run the full app UI headlessly (no window, no GPU: CPU-rasterized egui) and write PNGs.
       Options:
         --demo            the procedural demo library (default unless --library or FILES)
-        --library DIR     open (or create) a LightCraft library
+        --library DIR     open (or create) a Ember library
         --script FILE     JSON-lines control-protocol requests (docs/control-protocol.md), one
                           per line: {\"method\": \"ui.set\", \"params\": {\"view\": \"detail\"}}.
                           Replies go to stdout. `ui.screenshot` without a path writes -o (then
@@ -87,10 +104,26 @@ USAGE:
       Write synthetic merge inputs (procedural scene; bracketed DNGs or overlapping PNG views).
   lightcraft-cli commands [--json]   list every command id with its parameters
   lightcraft-cli controls [--json]   list every develop control id with its range
+  lightcraft-cli cull score --predictions FILE --labels FILE [--out FILE] [--split test]
+      Score read-only culling predictions against explicit shoot-level labels.
+  lightcraft-cli cull baseline --manifest FILE [--reject-below 0..100] [--out FILE]
+      Measure classical culling on explicit files in a disposable in-memory catalog.
+  lightcraft-cli ai personal extract --manifest FILE --out NEW_MANIFEST
+      Extract canonical Personal Auto feature schema v2 (28 numeric fields) from explicit labelled photos.
+  lightcraft-cli ai personal train --manifest FILE --out NEW_MODEL
+      Fit experimental style residuals on train shoots; legacy v1/16-feature manifests require re-extraction.
+  lightcraft-cli ai personal evaluate --manifest FILE --model FILE [--out NEW_REPORT]
+      Compare held-out edit distances against supplied deterministic Auto baselines.
+  lightcraft-cli ai denoise baseline --hardware LABEL --out NEW_REPORT [--size 64..512] [--repeats 2..10] [--source-revision LABEL]
+      Record original procedural RGB guided-NR baseline harness results without model inference.
+  lightcraft-cli ai compare --demo|FILES… --out NEW_DIR [--model ID]… [--repeat 1..3] [--budget-usd N] [--prepare-only]
+      Read-only OpenRouter experiment. Renders input/current Auto/model candidates, with JSON &
+      HTML receipts. Uses OPENROUTER_API_KEY from environment; no key enters files or output.
+      --prepare-only makes local reference renders without uploading. Never opens saved libraries.
   lightcraft-cli calibrate [--max N] [--out DIR] FOLDERS/FILES…
       Fit a colour profile per camera model from raw files and their embedded camera JPEGs
       (Sony ARW, Nikon NEF, Fujifilm RAF): up to N files spread over the folders (default 300; 0 = all), pooled per
-      model, written as <model>.json to DIR (default: the profiles folder LightCraft reads,
+      model, written as <model>.json to DIR (default: the profiles folder Ember reads,
       <config>/camera-profiles, or $LIGHTCRAFT_CAMERA_PROFILES). Raws of a profiled model then
       take their colour from the profile and only their tone from their own JPEG.
   lightcraft-cli --version | --help
@@ -145,6 +178,14 @@ fn main() -> ExitCode {
         Some("merge") => merge(&args[1..]),
         Some("synth-merge") => synth_merge(&args[1..]),
         Some("controls") => controls(&args[1..]),
+        Some("ai") if args.get(1).map(String::as_str) == Some("personal") && args.get(2).map(String::as_str) == Some("extract") => {
+            personal_auto_extract::run(&args[1..])
+        }
+        Some("ai") if args.get(1).map(String::as_str) == Some("personal") => personal_auto_eval::run(&args[1..]),
+        Some("ai") if args.get(1).map(String::as_str) == Some("denoise") => denoise_eval::run(&args[1..]),
+        Some("ai") => photo_ai::run(&args[1..]),
+        Some("cull") => cull_eval::run(&args[1..]),
+        Some("look") => look(&args[1..]),
         Some("calibrate") => calibrate(&args[1..]),
         Some("--version" | "-V" | "version") => {
             println!("lightcraft-cli {}", env!("CARGO_PKG_VERSION"));
@@ -310,11 +351,11 @@ fn mcp(args: &[String]) -> Result<(), String> {
             }
             match Remote::connect(&addr) {
                 Ok(r) => {
-                    eprintln!("lightcraft-cli mcp: connected to LightCraft at {addr}");
+                    eprintln!("lightcraft-cli mcp: connected to Ember at {addr}");
                     Box::new(r)
                 }
                 Err(e) => {
-                    eprintln!("lightcraft-cli mcp: LightCraft is not reachable at {addr} yet ({e}); will retry on each call");
+                    eprintln!("lightcraft-cli mcp: Ember is not reachable at {addr} yet ({e}); will retry on each call");
                     Box::new(Remote::lazy(&addr))
                 }
             }
@@ -492,6 +533,52 @@ fn run_step(b: &mut dyn Backend, s: &Step) -> Result<Value, String> {
     if direct { b.call(&s.id, s.params.clone()) } else { b.call("engine.execute", json!({"command": s.id, "params": s.params})) }
 }
 
+/// `look extract SAMPLE… -o look.json`: a look target from rendered sample files.
+fn look(args: &[String]) -> Result<(), String> {
+    if args.first().map(String::as_str) != Some("extract") {
+        return Err("usage: lightcraft-cli look extract SAMPLE… -o look.json [--force]".into());
+    }
+    let mut samples = Vec::new();
+    let mut out = None;
+    let mut force = false;
+    let mut i = 1;
+    while i < args.len() {
+        match args.get(i).map(String::as_str) {
+            Some("-o" | "--out" | "--output") => {
+                i += 1;
+                out = Some(args.get(i).cloned().ok_or("-o needs a path")?);
+            }
+            Some("--force") => force = true,
+            Some(a) if a.starts_with('-') => return Err(format!("unknown option {a}")),
+            Some(a) => samples.push(a.to_string()),
+            None => break,
+        }
+        i += 1;
+    }
+    let out = out.ok_or("look extract: missing -o look.json")?;
+    if samples.is_empty() {
+        return Err("look extract: give at least one rendered sample (JPEG, PNG, TIFF…)".into());
+    }
+    if samples.len() > 256 {
+        return Err("look extract: at most 256 samples".into());
+    }
+    if !force && std::path::Path::new(&out).exists() {
+        return Err(format!("{out}: exists (pass --force to overwrite)"));
+    }
+    let mut decoded = Vec::with_capacity(samples.len());
+    for path in &samples {
+        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        let d = lightcraft_codecs::decode(&bytes, lightcraft_codecs::DecodeOptions::fit(1024, 1024))
+            .map_err(|e| format!("{path}: {e} (samples are rendered files, not raws)"))?;
+        decoded.push(d.to_working());
+    }
+    let look = lightcraft_pipeline::look::extract_linear(&decoded).ok_or("look extract: no usable sample (empty images?)")?;
+    let text = serde_json::to_string_pretty(&look).map_err(|e| e.to_string())?;
+    std::fs::write(&out, text).map_err(|e| format!("{out}: {e}"))?;
+    println!("{}", serde_json::json!({"out": out, "samples": look.samples, "luminance": look.luminance, "clip": look.clip, "chroma": look.chroma}));
+    Ok(())
+}
+
 fn run(args: &[String]) -> Result<(), String> {
     let mut connect: Option<String> = None;
     let mut demo = false;
@@ -547,40 +634,40 @@ fn run(args: &[String]) -> Result<(), String> {
     if steps.is_empty() {
         return Err("run: no command given (see `lightcraft-cli commands`)".into());
     }
-    let mut backend: Box<dyn Backend> =
-        match connect {
-            Some(addr) => {
-                if demo || library.is_some() || !imports.is_empty() {
-                    return Err("--demo, --library and --import apply to headless mode only".into());
-                }
-                Box::new(Remote::connect(&addr).map_err(|e| {
-                    format!("LightCraft is not reachable at {addr} ({e}); start it with `lightcraft --control {}`", connect_port(&addr))
-                })?)
+    let mut backend: Box<dyn Backend> = match connect {
+        Some(addr) => {
+            if demo || library.is_some() || !imports.is_empty() {
+                return Err("--demo, --library and --import apply to headless mode only".into());
             }
-            None => {
-                let mut h = match &library {
-                    Some(dir) => {
-                        let mut h = Headless::default();
-                        h.session.open_library(dir, demo).map_err(|e| library_error(dir, e))?;
-                        library_warnings(&mut h.session, "lightcraft-cli");
-                        h
-                    }
-                    None if demo => Headless::demo(),
-                    None => Headless::default(),
-                };
-                if !imports.is_empty() {
-                    let paths = expand_paths(&imports);
-                    let r = h.session.execute("library.import", &json!({"paths": paths})).map_err(|e| e.to_string())?;
-                    // what follows acts on the imported photos (already-known files are reported as duplicates)
-                    let mut ids: Vec<Value> = r["imported"].as_array().cloned().unwrap_or_default();
-                    ids.extend(r["duplicates"].as_array().into_iter().flatten().filter_map(|d| d.get("existing").filter(|v| v.is_u64()).cloned()));
-                    if let Some(first) = ids.first().cloned() {
-                        h.session.execute("library.select", &json!({"ids": ids, "active": first})).map_err(|e| e.to_string())?;
-                    }
+            Box::new(
+                Remote::connect(&addr)
+                    .map_err(|e| format!("Ember is not reachable at {addr} ({e}); start it with `lightcraft --control {}`", connect_port(&addr)))?,
+            )
+        }
+        None => {
+            let mut h = match &library {
+                Some(dir) => {
+                    let mut h = Headless::default();
+                    h.session.open_library(dir, demo).map_err(|e| library_error(dir, e))?;
+                    library_warnings(&mut h.session, "lightcraft-cli");
+                    h
                 }
-                Box::new(h)
+                None if demo => Headless::demo(),
+                None => Headless::default(),
+            };
+            if !imports.is_empty() {
+                let paths = expand_paths(&imports);
+                let r = h.session.execute("library.import", &json!({"paths": paths})).map_err(|e| e.to_string())?;
+                // what follows acts on the imported photos (already-known files are reported as duplicates)
+                let mut ids: Vec<Value> = r["imported"].as_array().cloned().unwrap_or_default();
+                ids.extend(r["duplicates"].as_array().into_iter().flatten().filter_map(|d| d.get("existing").filter(|v| v.is_u64()).cloned()));
+                if let Some(first) = ids.first().cloned() {
+                    h.session.execute("library.select", &json!({"ids": ids, "active": first})).map_err(|e| e.to_string())?;
+                }
             }
-        };
+            Box::new(h)
+        }
+    };
     let mut out = std::io::stdout().lock();
     let mut failed = 0;
     for s in &steps {

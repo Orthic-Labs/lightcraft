@@ -27,6 +27,8 @@ pub const IDLE_UNLOAD: Duration = Duration::from_secs(10 * 60);
 
 /// What to compute.
 pub enum Kind {
+    /// Drop any loaded checkpoint before processing the next request.
+    Reset,
     /// Load the model and encode the photo (so the first click is fast).
     Prepare,
     Clicks(Vec<lightcraft_segment::Click>),
@@ -137,6 +139,22 @@ impl Worker {
         !self.dead() && self.shared.loaded.load(Ordering::SeqCst)
     }
 
+    /// Ask the worker to release its checkpoint and encoded-photo cache. The worker owns these
+    /// values, so the drop happens on its thread even if inference is currently in progress.
+    pub fn discard_model(&mut self, next_dir: Option<&std::path::Path>) {
+        let (reply, _result) = mpsc::channel();
+        let job = Job {
+            dir: next_dir.map(PathBuf::from).unwrap_or_default(),
+            key: 0,
+            render: None,
+            missing: None,
+            kind: Kind::Reset,
+            tag: Tag::Prepare,
+            reply,
+        };
+        let _ = self.submit(job);
+    }
+
     /// Queue `job`; returns at once.
     pub fn submit(&mut self, job: Job) -> Result<(), String> {
         if self.dead() {
@@ -208,7 +226,16 @@ fn run(rx: &mpsc::Receiver<Job>, shared: &Shared, idle: Duration) {
         while let Ok(j) = rx.try_recv() {
             queue.push_back(j);
         }
+        // A model-folder change invalidates every queued request. Run reset first so stale jobs
+        // cannot retain the previous checkpoint while the new folder becomes active.
+        if let Some(index) = queue.iter().position(|job| matches!(job.kind, Kind::Reset))
+            && index > 0
+            && let Some(reset) = queue.remove(index)
+        {
+            queue.push_front(reset);
+        }
         let Some(mut job) = queue.pop_front() else { continue };
+        let reset_dir = matches!(job.kind, Kind::Reset).then(|| job.dir.clone());
         let is_detail = matches!(job.kind, Kind::Detail { .. });
         // counts the job as pending until just before its reply goes out: a caller woken by the
         // reply must not still see the worker busy with it
@@ -228,6 +255,17 @@ fn run(rx: &mpsc::Receiver<Job>, shared: &Shared, idle: Duration) {
                 Err("the AI model failed unexpectedly (it will be reloaded on the next try)".to_string())
             }
         };
+        if let Some(reset_dir) = reset_dir {
+            let mut retained = VecDeque::new();
+            for stale in queue.drain(..) {
+                if !reset_dir.as_os_str().is_empty() && stale.dir == reset_dir {
+                    retained.push_back(stale);
+                } else {
+                    cancel_queued(stale, shared);
+                }
+            }
+            queue = retained;
+        }
         if result.is_err() && !is_detail {
             state.cache = None;
         }
@@ -235,6 +273,12 @@ fn run(rx: &mpsc::Receiver<Job>, shared: &Shared, idle: Duration) {
         drop(done);
         let _ = job.reply.send(Outcome { tag: job.tag, result, superseded: false });
     }
+}
+
+fn cancel_queued(job: Job, shared: &Shared) {
+    let counter = if matches!(job.kind, Kind::Detail { .. }) { &shared.detail } else { &shared.pending };
+    let _ = counter.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| Some(n.saturating_sub(1)));
+    let _ = job.reply.send(Outcome { tag: job.tag, result: Ok(None), superseded: true });
 }
 
 /// The model for `dir`, loading it when needed.
@@ -309,6 +353,11 @@ fn text_logits(model: &mut Sam3, enc: &mut Encoded, text: &str) -> Result<Option
 fn run_job(state: &mut State, shared: &Shared, job: &mut Job) -> Result<Option<SegMask>, String> {
     let side = lightcraft_segment::MASK_SIDE;
     match std::mem::replace(&mut job.kind, Kind::Prepare) {
+        Kind::Reset => {
+            *state = State::default();
+            shared.loaded.store(false, Ordering::SeqCst);
+            Ok(None)
+        }
         Kind::Prepare => {
             encoded(state, shared, job)?;
             Ok(None)

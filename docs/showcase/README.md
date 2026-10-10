@@ -1,6 +1,8 @@
 # README showcase
 
-The screenshots in `docs/images/` are captured by driving LightCraft over its control channel.
+Existing `docs/images/` screenshots show upstream LightCraft before Ember branding. They remain historical references; regenerate captures from a qualified Ember revision when available.
+
+The screenshots in `docs/images/` are captured by driving Ember over its control channel.
 
 ```sh
 # public-domain set (downloaded into the gitignored corpus/, see assets/ATTRIBUTION.md for sources)

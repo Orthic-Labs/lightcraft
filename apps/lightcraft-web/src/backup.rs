@@ -25,6 +25,13 @@ pub const DEFAULT_LIBRARY_DIR: &str = "library";
 /// Largest backup (offsets are 32-bit without zip64).
 pub const MAX_BYTES: u64 = 0xFFFF_FFFF - (64 << 20);
 
+/// Largest single entry restore reads into memory. Browser restores are deliberately bounded
+/// per entry even though the zip format itself allows almost 4 GiB entries.
+pub const MAX_RESTORE_ENTRY_BYTES: u64 = 256 << 20;
+
+/// Largest central directory restore reads into memory.
+pub const MAX_RESTORE_DIRECTORY_BYTES: u64 = 64 << 20;
+
 const LOCAL_SIG: u32 = 0x0403_4b50;
 const CENTRAL_SIG: u32 = 0x0201_4b50;
 const END_SIG: u32 = 0x0605_4b50;
@@ -34,10 +41,10 @@ const UTF8: u16 = 0x0800;
 const DOS_DATE: u16 = (1 << 5) | 1;
 
 /// The readme inside every backup.
-pub const README: &str = "LightCraft library backup (browser version)\n\n\
+pub const README: &str = "Ember library backup (browser version)\n\n\
 library/      the catalog (catalog.snap + catalog.log), presets, view state and preferences\n\
 originals/    every imported photo, as originals/<content hash>/<file name>\n\n\
-Restore it in LightCraft for the web with File > Restore Library from Backup...\n\
+Restore it in Ember for the web with File > Restore Library from Backup...\n\
 The photos in originals/ are the untouched files you imported; edits live in the catalog.\n";
 
 /// Is `name` a safe library folder name (`library` or `library-<letters, digits, ->`)?
@@ -233,12 +240,26 @@ pub fn data_offset(entry: &ZipEntry, local: &[u8]) -> Result<u64, String> {
 /// Check an entry's bytes.
 pub fn verify(entry: &ZipEntry, data: &[u8]) -> Result<(), String> {
     if entry.method != 0 {
-        return Err(format!("{}: compressed entries are not supported (not a LightCraft backup?)", entry.name));
+        return Err(format!("{}: compressed entries are not supported (not an Ember backup?)", entry.name));
     }
     if data.len() as u64 != entry.size || crc32fast::hash(data) != entry.crc {
         return Err(format!("{}: damaged (checksum mismatch)", entry.name));
     }
     Ok(())
+}
+
+/// Check that stored original bytes match their content-addressed storage key.
+pub fn verify_original_hash(hash: &str, data: &[u8]) -> Result<(), String> {
+    if crate::store::content_hash(data) == hash { Ok(()) } else { Err(format!("originals/{hash}: content hash mismatch")) }
+}
+
+/// Validate one accepted entry during restore preflight. Returns whether its storage key needs a
+/// write: library files always do, while a matching existing original can be reused safely.
+pub fn preflight_restore_entry(entry: &ZipEntry, data: &[u8], original_hash: Option<&str>, existing_original: Option<&[u8]>) -> Result<bool, String> {
+    verify(entry, data)?;
+    let Some(hash) = original_hash else { return Ok(true) };
+    verify_original_hash(hash, data)?;
+    Ok(!existing_original.is_some_and(|bytes| bytes.len() as u64 <= MAX_RESTORE_ENTRY_BYTES && crate::store::content_hash(bytes) == hash))
 }
 
 /// A name for the restored library's folder.
@@ -302,5 +323,79 @@ mod tests {
     fn size_limits_are_errors_not_panics() {
         let mut w = ZipWriter { offset: MAX_BYTES - 10, ..Default::default() };
         assert!(w.entry("x", &[0; 64]).is_err());
+    }
+
+    #[test]
+    fn original_hash_matches_bytes_even_when_zip_crc_is_valid() {
+        let original = b"original image";
+        let replacement = b"replacement image";
+        let hash = crate::store::content_hash(original);
+        let name = original_entry(&hash, "photo.png");
+        let zip = build(&[(name.as_str(), replacement)]);
+        let tail = &zip[zip.len() - tail_len(zip.len() as u64) as usize..];
+        let (offset, size) = find_central(tail).unwrap();
+        let entries = parse_central(&zip[offset as usize..(offset + size) as usize]).unwrap();
+        let entry = &entries[0];
+        let start = data_offset(entry, &zip[entry.header as usize..entry.header as usize + 30]).unwrap() as usize;
+        verify(entry, &zip[start..start + replacement.len()]).unwrap();
+        assert!(verify_original_hash(&hash, replacement).is_err());
+        assert!(verify_original_hash(&hash, original).is_ok());
+    }
+
+    #[test]
+    fn preflight_repairs_corrupt_original_but_reuses_matching_key() {
+        let original = b"original image";
+        let hash = crate::store::content_hash(original);
+        let entry =
+            ZipEntry { name: original_entry(&hash, "photo.png"), crc: crc32fast::hash(original), size: original.len() as u64, header: 0, method: 0 };
+        assert!(preflight_restore_entry(&entry, original, Some(&hash), Some(b"blue image")).unwrap());
+        assert!(!preflight_restore_entry(&entry, original, Some(&hash), Some(original)).unwrap());
+        assert!(preflight_restore_entry(&entry, original, Some(&hash), None).unwrap());
+    }
+
+    #[test]
+    fn late_invalid_entry_keeps_preflight_write_phase_empty() {
+        let original = b"original image";
+        let hash = crate::store::content_hash(original);
+        let original_entry = ZipEntry {
+            name: super::original_entry(&hash, "photo.png"),
+            crc: crc32fast::hash(original),
+            size: original.len() as u64,
+            header: 0,
+            method: 0,
+        };
+        let catalog_entry = ZipEntry { name: "library/catalog.log".into(), crc: crc32fast::hash(b"catalog"), size: 7, header: 0, method: 0 };
+        let checks = [(&original_entry, &original[..], Some(hash.as_str()), Some(&b"corrupt"[..])), (&catalog_entry, &b"tampered"[..], None, None)];
+        let mut plan = Vec::new();
+        let result = checks
+            .iter()
+            .try_for_each(|(entry, data, hash, existing)| preflight_restore_entry(entry, data, *hash, *existing).map(|write| plan.push(write)));
+        let active_before = "library";
+        let active_after = result.as_ref().ok().map(|_| "library-restored").unwrap_or(active_before);
+        let writes = result.ok().map(|_| plan).unwrap_or_default();
+        assert!(writes.is_empty());
+        assert_eq!(active_after, active_before);
+    }
+
+    #[test]
+    fn valid_retry_repairs_existing_corrupt_key_then_reuses_it() {
+        let original = b"original image";
+        let hash = crate::store::content_hash(original);
+        let entry = ZipEntry {
+            name: super::original_entry(&hash, "photo.png"),
+            crc: crc32fast::hash(original),
+            size: original.len() as u64,
+            header: 0,
+            method: 0,
+        };
+        let corrupt = b"blue image";
+        let should_repair = preflight_restore_entry(&entry, original, Some(&hash), Some(corrupt)).unwrap();
+        assert!(should_repair);
+        let mut stored = corrupt.to_vec();
+        if should_repair {
+            stored = original.to_vec();
+        }
+        assert_eq!(stored, original);
+        assert!(!preflight_restore_entry(&entry, original, Some(&hash), Some(&stored)).unwrap());
     }
 }

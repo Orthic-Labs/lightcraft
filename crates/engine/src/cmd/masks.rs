@@ -444,11 +444,25 @@ pub fn specs() -> Vec<CommandSpec> {
             }
         ),
         cmd!(
+            query "segment.model.selectFolder",
+            "Use SAM 3 Model Folder",
+            [],
+            None,
+            "{path} — verify an existing local SAM 3 folder (model.safetensors, vocab.json, merges.txt) and use it → {dir, installed}",
+            super::always,
+            |s, p| {
+                let c = "segment.model.selectFolder";
+                let path = p.get("path").and_then(Value::as_str).ok_or_else(|| bad(c, "path is required"))?;
+                s.segmenter.select_model_dir(std::path::PathBuf::from(path)).map_err(ai_err)?;
+                Ok(json!({"dir": path, "installed": s.segmenter.installed()}))
+            }
+        ),
+        cmd!(
             query "segment.model.download",
             "Download AI Mask Model",
             [],
             None,
-            "{acknowledged: true} — download the SAM 3 model (about 3.4 GB, Meta's SAM License, not LightCraft's) in the background, from the configured mirrors; only after the user agreed to it. Watch segment.model.status; segment.model.cancel stops it (it resumes later) → {started, installed, downloading}",
+            "{acknowledged: true} — download the SAM 3 model (about 3.4 GB, Meta's SAM License, not Ember's) in the background, from the configured mirrors; only after the user agreed to it. Watch segment.model.status; segment.model.cancel stops it (it resumes later) → {started, installed, downloading}",
             super::always,
             |s, p| {
                 let c = "segment.model.download";

@@ -1,4 +1,4 @@
-# LightCraft — the desktop app (`lightcraft`) and the CLI/MCP server (`lightcraft-cli`), built from
+# Ember — the desktop app (`lightcraft`) and the CLI/MCP server (`lightcraft-cli`), built from
 # this repository:
 #
 #   nix build          # → ./result/bin/lightcraft, ./result/bin/lightcraft-cli
@@ -9,7 +9,7 @@
 #   * `CRAFT_FONTS_DIR` embeds the CJK fonts from storytold/craft-fonts (the `craft-fonts`
 #     flake input); without it everything builds and runs, but Japanese and Chinese text have no glyphs;
 #   * the desktop file, hicolor icons and AppStream metadata are the same files the .deb/.rpm ship
-#     (packaging/linux/), so `apt` and NixOS users see one identical LightCraft;
+#     (packaging/linux/), so `apt` and NixOS users see one identical Ember;
 #   * `doCheck` runs `cargo test --workspace`, what `cargo xtask ci` runs. `nix build` runs it too;
 #     `pkgs.lightcraft.overrideAttrs { doCheck = false; }` skips it for a faster, build-only install.
 #
@@ -53,7 +53,7 @@ let
   isLinux = stdenv.hostPlatform.isLinux;
 
   # AppStream id: also the desktop file name, and the icon name in share/icons/hicolor.
-  appId = "ai.storyteller.lightcraft";
+  appId = "com.orthiclabs.ember";
 
   # Libraries the binaries open at run time with dlopen(): nothing links them, so no RPATH points at
   # them — winit loads libxkbcommon/libxcb, wgpu the Vulkan loader (NixOS patches that loader to
@@ -163,6 +163,8 @@ rustPlatform.buildRustPackage {
     install -Dm644 -t "$doc" \
       README.md LICENSE-MIT LICENSE-APACHE NOTICE \
       assets/ATTRIBUTION.md assets/fonts/OFL-Inter.txt
+    install -Dm644 docs/licenses/pytorch-bicubic-LICENSE.txt \
+      "$doc/docs/licenses/pytorch-bicubic-LICENSE.txt"
   ''
   + lib.optionalString (craft-fonts != null) ''
     for lic in ${toString craft-fonts}/fonts/*/OFL.txt; do
@@ -188,12 +190,12 @@ rustPlatform.buildRustPackage {
   meta = {
     description = "Photo library and non-destructive raw developer";
     longDescription = ''
-      LightCraft organises a photo library and develops raw files non-destructively: masks,
+      Ember organises a photo library and develops raw files non-destructively: masks,
       presets, colour grading, local adjustments and batch export, driven by the same command
       layer as its UI. It ships with lightcraft-cli, a headless renderer, command runner and MCP
       server for AI agents.
     '';
-    homepage = "https://getartcraft.com/apps/lightcraft";
+    homepage = "https://github.com/Orthic-Labs/lightcraft";
     license = with lib.licenses; [
       mit
       asl20

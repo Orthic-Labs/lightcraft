@@ -1,8 +1,8 @@
 # XMP sidecars and interchange
 
-LightCraft keeps its catalog as the source of truth, and can also store each photo's metadata and develop settings in
-an XMP sidecar next to the original. Sidecars let edits travel with the files (backups, another LightCraft library,
-other tools), and let LightCraft pick up edits made elsewhere.
+Ember keeps its catalog as the source of truth, and can also store each photo's metadata and develop settings in
+an XMP sidecar next to the original. Sidecars let edits travel with the files (backups, another Ember library,
+other tools), and let Ember pick up edits made elsewhere.
 
 ## Sidecar files
 
@@ -42,25 +42,25 @@ used — on import (it then also files a copied photo in its date folder) and by
 A sidecar may already hold another application's data — e.g. its `crs:` develop settings and `xmpMM:History` — often
 the only copy of those edits outside that application's catalog. Saving never drops it:
 
-- LightCraft **owns** the properties in the table above: `xmp:Rating`, `xmp:Label`, `dc:title`, `dc:description`,
+- Ember **owns** the properties in the table above: `xmp:Rating`, `xmp:Label`, `dc:title`, `dc:description`,
   `dc:rights`, `dc:creator`, `dc:subject`, `Iptc4xmpCore:Location`, `Iptc4xmpCore:AltTextAccessibility`,
   `Iptc4xmpCore:ExtDescrAccessibility`, `photoshop:City`/`State`/`Country`, `xmpRights:Marked`/`UsageTerms`/
-  `WebStatement` and everything in `lc:`. They are replaced on every save, and removed when LightCraft has no value
-  (clearing a title in LightCraft clears it in the file). All of them are read back on import, so the library starts
+  `WebStatement` and everything in `lc:`. They are replaced on every save, and removed when Ember has no value
+  (clearing a title in Ember clears it in the file). All of them are read back on import, so the library starts
   from what the sidecar said.
 - The **capture time** (`exif:DateTimeOriginal`, `photoshop:DateCreated`) and **GPS** (`exif:GPSLatitude`,
-  `exif:GPSLongitude`) are replaced only when LightCraft has a value; otherwise the file's stay.
+  `exif:GPSLongitude`) are replaced only when Ember has a value; otherwise the file's stay.
 - **Everything else is kept byte for byte**: other namespaces (`crs:`, `xmpMM:`, `lr:hierarchicalSubject`, unknown
-  ones), `xmp:CreatorTool`, comments, the packet wrapper and padding. LightCraft's properties go into one
+  ones), `xmp:CreatorTool`, comments, the packet wrapper and padding. Ember's properties go into one
   `rdf:Description` of their own; owned properties written by another application (in attribute or element form) are
   removed from its description, which otherwise stays as it was.
 - A sidecar that can't be read as XMP (not well-formed, not UTF-8, no `rdf:RDF`) is first copied to
   `<name>.xmp.bak-<date><time>` (`-1`, `-2`… if taken — a backup is never overwritten), then replaced. A sidecar that
   can't be read at all (permissions) is left alone and the save fails.
 
-Limits: LightCraft writes keywords to `dc:subject` only, so another application's `lr:hierarchicalSubject` is kept as
-it was and may still list keywords removed in LightCraft. LightCraft doesn't write `crs:`: the other application's
-develop settings stay as that application left them, next to LightCraft's own (`lc:settings`, which LightCraft reads
+Limits: Ember writes keywords to `dc:subject` only, so another application's `lr:hierarchicalSubject` is kept as
+it was and may still list keywords removed in Ember. Ember doesn't write `crs:`: the other application's
+develop settings stay as that application left them, next to Ember's own (`lc:settings`, which Ember reads
 first).
 
 ## Shared names
@@ -72,12 +72,12 @@ have none. So saving one photo never overwrites the other's metadata (`Session::
 
 ## Face regions (MWG)
 
-LightCraft reads face, pet, focus and barcode regions in the Metadata Working Group's region schema
+Ember reads face, pet, focus and barcode regions in the Metadata Working Group's region schema
 (`mwg-rs:Regions`, `http://www.metadataworkinggroup.com/schemas/regions/`), as Lightroom, digiKam, Picasa and others
 write them, from sidecars and from XMP embedded in the file. Named faces become people in the People view
 (LR-LIB-PEOPLE in [`parity.md`](parity.md)), and every region is drawn as a box in the loupe.
 
-- **Read only.** LightCraft never writes `mwg-rs:Regions`; saving a sidecar keeps another application's regions byte
+- **Read only.** Ember never writes `mwg-rs:Regions`; saving a sidecar keeps another application's regions byte
   for byte. Removing or resizing a box in the loupe changes the library only.
 - **Areas**: `stArea:x`/`y` are the box's centre, `w`/`h` its size, normalized to the photo (`stArea:unit="pixel"`
   areas are divided by `mwg-rs:AppliedToDimensions`, and dropped without it). Boxes are clipped to the photo; one
@@ -85,7 +85,7 @@ write them, from sidecars and from XMP embedded in the file. Named faces become 
 - **Orientation**: regions are stored on the upright (EXIF-oriented) photo. A `mwg-rs:Rotation` of −π/2, +π/2 or ±π
   (how Lightroom marks a box given in the sensor's frame for Exif orientation 6, 8 or 3) is turned back into the
   upright frame; MWG can't say "mirrored", so boxes on mirrored photos (orientations 2, 4, 5, 7) are taken as written.
-  Boxes follow LightCraft's own Rotate Left/Right and flips.
+  Boxes follow Ember's own Rotate Left/Right and flips.
 - **Re-reading**: a sidecar that has `mwg-rs:Regions` — even with an empty list — replaces the photo's regions, so
   regions removed in another application go away here too. A sidecar without `mwg-rs:Regions` (an application that
   doesn't do regions) leaves the photo's regions as they are.
@@ -93,7 +93,7 @@ write them, from sidecars and from XMP embedded in the file. Named faces become 
 ## Reading `crs:` develop fields
 
 Many raw developers store edits as `crs:` properties (`http://ns.adobe.com/camera-raw-settings/1.0/`) in sidecars, in
-DNG files and in XMP presets. LightCraft reads the common ones and maps them to its own controls. We implemented this
+DNG files and in XMP presets. Ember reads the common ones and maps them to its own controls. We implemented this
 from the public XMP specification and by observing what each field does; no third-party code or preset files were used.
 Our pipeline renders differently, so **values carry over but the look is approximate**.
 
@@ -102,7 +102,7 @@ object that gets merged like a preset, so everything else keeps its current or d
 `crs:AlreadyApplied="True"` are skipped, because those pixels already contain the edit. Only process-version 2012+ field
 names are read (e.g. `Exposure2012`, not the older `Exposure`).
 
-| `crs:` field(s) | LightCraft control | Notes |
+| `crs:` field(s) | Ember control | Notes |
 |---|---|---|
 | `Exposure2012` | `light.exposure` | EV, 1:1 |
 | `Contrast2012`, `Highlights2012`, `Shadows2012`, `Whites2012`, `Blacks2012` | `light.contrast` … `light.blacks` | −100..100, 1:1 |
@@ -173,7 +173,7 @@ carry over are listed in `preset.import`'s `unmapped` as `Mask: <kind>`.
 | Import | `preset.import {paths, group?, dryRun?}`: files or folders (recursive): `.lcpreset`, `.xmp`, classic `.lrtemplate` (a Lua table: `value.settings` holds the same field names as `crs:`), photos that carry their edits in XMP ("DNG presets" from mobile apps; their crop, geometry and custom white balance are left out) and `.zip` bundles of any of these. Presets in a folder (or a folder inside a zip) go to a group named after it, unless the file names its own group. The result lists, per preset, the settings that couldn't be carried over (`unmapped`, e.g. `CameraProfile`, `Look`, local masks), and the app's toast names them; fields that only describe the preset or the photo (`Cluster`, `SortName`, `Description`, `SupportsAmount2`, `RequiresRGBTables`, `CropConstrainToWarp`, `OverrideLookVignette`, `AsShotTemperature` / `AsShotTint`, an off `HDREditMode`, empty `PointColors` slots) aren't listed. Older (process version 2010) fields — `Exposure`, `Contrast`, `FillLight`, `HighlightRecovery`, `Shadows`, `Brightness`, `Clarity`, `ToneCurve` — are approximated with today's sliders when a preset has no 2012-era fields. Dropping preset files on the window imports them too. In the app: File ▸ Import Presets…, or Presets panel ▸ ⋯ ▸ Import Presets…. A preset that's already there (same name, group and settings) is skipped. If an id clashes, the import gets a fresh `user.*` id, and built-in presets are never replaced. |
 | XMP presets | Read with the `crs:` table above, with `crs:Name` as the name (falling back to the file name) and `crs:Group` as the group (falling back to "Imported Presets"). Only the fields the preset sets are included, so applying it leaves everything else alone and the Amount slider scales it like any other preset. We only read XMP presets; we don't write them. |
 
-LightCraft ships no third-party presets. Its built-in presets are its own values (`crates/engine/src/presets.rs`).
+Ember ships no third-party presets. Its built-in presets are its own values (`crates/engine/src/presets.rs`).
 
 ## Luminar looks (`.lmp`, `.mplumpack`)
 
@@ -205,5 +205,5 @@ with a blend mode other than Normal or with a mask are reported, not applied. Bi
 or `.zip` bundles — as creative profiles: they appear in the profile browser under their folder's (or zip's) name and
 take the Amount slider (0–200 %) like the built-in looks. The LUT is applied to the finished, display-encoded colour
 (trilinear; `DOMAIN_MIN` / `DOMAIN_MAX` honoured; 1D LUTs are not supported); photos with a LUT profile render on the
-CPU. A library on disk keeps a copy of each file in its `Profiles/` folder. Adobe's own profile formats (`.dcp`, XMP
+CPU. A library on disk keeps a copy of each file in its `Profiles/` folder. Reference-editor profile formats (`.dcp`, XMP
 camera/creative profiles with embedded tables) are deliberately not read.

@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "fixture_kind": "SYNTHETIC",
+  "dataset_id": "synthetic-culling-v1",
+  "media_policy": "no_media_committed",
+  "shoots": [
+    {
+      "shoot_id": "shoot-train-001",
+      "split": "train",
+      "photos": [
+        {"photo_id": "photo-train-001-a", "asset_ref": "synthetic://culling/train/001/soft-a", "burst_id": "burst-train-001", "ground_truth": "reject"},
+        {"photo_id": "photo-train-001-b", "asset_ref": "synthetic://culling/train/001/sharp-b", "burst_id": "burst-train-001", "ground_truth": "keep"},
+        {"photo_id": "photo-train-001-c", "asset_ref": "synthetic://culling/train/001/sharp-c", "burst_id": "burst-train-001", "ground_truth": "keep"},
+        {"photo_id": "photo-train-001-d", "asset_ref": "synthetic://culling/train/001/unrated-d", "burst_id": null, "ground_truth": "unknown"}
+      ],
+      "bursts": [
+        {"burst_id": "burst-train-001", "photo_ids": ["photo-train-001-a", "photo-train-001-b", "photo-train-001-c"], "acceptable_winners": ["photo-train-001-b", "photo-train-001-c"]}
+      ]
+    },
+    {
+      "shoot_id": "shoot-train-002",
+      "split": "train",
+      "photos": [
+        {"photo_id": "photo-train-002-a", "asset_ref": "synthetic://culling/train/002/obscured-a", "burst_id": null, "ground_truth": "reject"},
+        {"photo_id": "photo-train-002-b", "asset_ref": "synthetic://culling/train/002/usable-b", "burst_id": null, "ground_truth": "keep"},
+        {"photo_id": "photo-train-002-c", "asset_ref": "synthetic://culling/train/002/unrated-c", "burst_id": null, "ground_truth": "unknown"}
+      ],
+      "bursts": []
+    },
+    {
+      "shoot_id": "shoot-validation-001",
+      "split": "validation",
+      "photos": [
+        {"photo_id": "photo-validation-001-a", "asset_ref": "synthetic://culling/validation/001/usable-a", "burst_id": "burst-validation-001", "ground_truth": "keep"},
+        {"photo_id": "photo-validation-001-b", "asset_ref": "synthetic://culling/validation/001/usable-b", "burst_id": "burst-validation-001", "ground_truth": "keep"},
+        {"photo_id": "photo-validation-001-c", "asset_ref": "synthetic://culling/validation/001/soft-c", "burst_id": "burst-validation-001", "ground_truth": "reject"},
+        {"photo_id": "photo-validation-001-d", "asset_ref": "synthetic://culling/validation/001/unrated-d", "burst_id": null, "ground_truth": "unknown"}
+      ],
+      "bursts": [
+        {"burst_id": "burst-validation-001", "photo_ids": ["photo-validation-001-a", "photo-validation-001-b", "photo-validation-001-c"], "acceptable_winners": ["photo-validation-001-a", "photo-validation-001-b"]}
+      ]
+    },
+    {
+      "shoot_id": "shoot-validation-002",
+      "split": "validation",
+      "photos": [
+        {"photo_id": "photo-validation-002-a", "asset_ref": "synthetic://culling/validation/002/unrated-a", "burst_id": "burst-validation-002", "ground_truth": "unknown"},
+        {"photo_id": "photo-validation-002-b", "asset_ref": "synthetic://culling/validation/002/unrated-b", "burst_id": "burst-validation-002", "ground_truth": "unknown"}
+      ],
+      "bursts": [
+        {"burst_id": "burst-validation-002", "photo_ids": ["photo-validation-002-a", "photo-validation-002-b"], "acceptable_winners": []}
+      ]
+    },
+    {
+      "shoot_id": "shoot-test-001",
+      "split": "test",
+      "photos": [
+        {"photo_id": "photo-test-001-a", "asset_ref": "synthetic://culling/test/001/soft-a", "burst_id": "burst-test-001", "ground_truth": "reject"},
+        {"photo_id": "photo-test-001-b", "asset_ref": "synthetic://culling/test/001/sharp-b", "burst_id": "burst-test-001", "ground_truth": "keep"},
+        {"photo_id": "photo-test-001-c", "asset_ref": "synthetic://culling/test/001/unrated-c", "burst_id": "burst-test-001", "ground_truth": "unknown"}
+      ],
+      "bursts": [
+        {"burst_id": "burst-test-001", "photo_ids": ["photo-test-001-a", "photo-test-001-b", "photo-test-001-c"], "acceptable_winners": ["photo-test-001-b"]}
+      ]
+    },
+    {
+      "shoot_id": "shoot-test-002",
+      "split": "test",
+      "photos": [
+        {"photo_id": "photo-test-002-a", "asset_ref": "synthetic://culling/test/002/usable-a", "burst_id": null, "ground_truth": "keep"},
+        {"photo_id": "photo-test-002-b", "asset_ref": "synthetic://culling/test/002/obscured-b", "burst_id": null, "ground_truth": "reject"},
+        {"photo_id": "photo-test-002-c", "asset_ref": "synthetic://culling/test/002/unrated-c", "burst_id": null, "ground_truth": "unknown"}
+      ],
+      "bursts": []
+    }
+  ]
+}

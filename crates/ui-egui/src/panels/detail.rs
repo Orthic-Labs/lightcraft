@@ -214,6 +214,13 @@ fn animated_rect(ctx: &egui::Context, anim: &mut bool, target: Rect) -> Rect {
     r
 }
 
+#[cfg(test)]
+/// Return loupe request dimensions for final on-screen size; Draft quality is selected separately.
+fn loupe_request_dimensions(target: Rect, ppp: f32, max_edge: f32, aspect: f32, _interactive: bool) -> (usize, usize) {
+    let want = (target.width().max(target.height()) * ppp).min(max_edge) as usize;
+    if aspect >= 1.0 { (want, (want as f32 / aspect) as usize) } else { ((want as f32 * aspect) as usize, want) }
+}
+
 /// What a window render of the loupe needs to know about the view it belongs to.
 struct WindowCtx {
     id: PhotoId,
@@ -387,7 +394,6 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     app.image_rect = Some(img_rect);
     // request renders: the loupe at display resolution (drafts during drags)
     let interacting = app.session.interaction.is_some();
-    let scale = if interacting { 0.6 } else { 1.0 };
     // render at the final size: a click-zoom animation only changes how the result is drawn
     let native_long = native[0].max(native[1]);
     let drawn_long = target_rect.width().max(target_rect.height()) * ppp;
@@ -400,7 +406,8 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         canvas_long: canvas.width().max(canvas.height()) * ppp,
         native_long,
         texture_side,
-        draft_scale: scale,
+        // Draft quality is selected on the RenderJob while request dimensions stay at display size.
+        draft_scale: 1.0,
         windows: !app.ui.soft_proof && view_overlay(app, &d) == lightcraft_pipeline::Overlay::None,
     };
     let mut plan = crate::region::plan(&app.ui.settings, sizes);
@@ -457,7 +464,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     }
     // until the loupe has this photo: show its cached render / embedded preview / a thumbnail
     if app.renderer.textures.get(&Slot::Main).is_none_or(|t| t.photo != id)
-        && let Some(q) = app.session.quick_view_job(id, want.max(8), !crop_tool)
+        && let Some(q) = app.session.quick_view_job(id, rw.max(rh).max(8), !crop_tool)
     {
         app.renderer.request_quick(Slot::Preview, q, 110);
     }
@@ -757,7 +764,7 @@ const REGION_HANDLES: [(f32, f32, egui::CursorIcon); 8] = [
 /// Face/pet/focus regions read from XMP (MWG-RS), drawn as boxes over the photo. Hovering a box shows
 /// a × in its corner and eight resize handles. A drag previews the new box live and is reported once,
 /// on release (one undo step); the × reports the region to remove. Both are catalog-only edits:
-/// LightCraft doesn't write regions to XMP. Regions are stored on the upright (EXIF-oriented) photo;
+/// Ember doesn't write regions to XMP. Regions are stored on the upright (EXIF-oriented) photo;
 /// `orient` is the user's Rotate / Flip on top of it, which the loupe's normalized frame includes.
 fn region_overlay(
     ui: &egui::Ui,
@@ -1903,9 +1910,12 @@ fn film_badges(p: &egui::Painter, t: &Tokens, fr: Rect, ph: &lightcraft_catalog:
 
 #[cfg(test)]
 mod preview_geometry_tests {
-    use super::{fit_rect, fit_texture_rect};
+    use std::sync::Arc;
+
+    use super::{fit_rect, fit_texture_rect, loupe_request_dimensions};
     use crate::state::Zoom;
     use egui::{Rect, pos2, vec2};
+    use lightcraft_catalog::Op;
 
     #[test]
     fn portrait_preview_keeps_its_ratio_inside_a_landscape_frame() {
@@ -1925,6 +1935,40 @@ mod preview_geometry_tests {
         assert!((image.width() / image.height() - 0.5).abs() < 1e-6);
         assert_eq!(image.size(), vec2(100.0, 200.0));
         assert_eq!(image.center(), area.center());
+    }
+
+    #[test]
+    fn interactive_loupe_request_keeps_full_display_dimensions() {
+        let target = Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 675.0));
+        let full = loupe_request_dimensions(target, 2.0, 8192.0, 16.0 / 9.0, false);
+        // Draft quality is selected separately on RenderJob; request dimensions stay unchanged.
+        let draft = loupe_request_dimensions(target, 2.0, 8192.0, 16.0 / 9.0, true);
+        assert_eq!(full, (2400, 1350));
+        assert_eq!(draft, full);
+
+        let mut session = lightcraft_engine::Session::with_demo();
+        let id = session.active().expect("demo session has active photo");
+        let job = session.loupe_job(id, full.0, full.1, true).expect("loupe job");
+        let draft_job = job.clone().draft();
+        assert_eq!((draft_job.request.max_w, draft_job.request.max_h), full);
+        assert_ne!(draft_job.key, job.key, "draft quality keeps separate cache identity");
+    }
+
+    #[test]
+    fn latest_develop_revision_changes_loupe_key_without_changing_dimensions() {
+        let mut session = lightcraft_engine::Session::with_demo();
+        let id = session.active().expect("demo session has active photo");
+        let size = (960, 540);
+        let first = session.loupe_job(id, size.0, size.1, true).expect("first loupe job");
+        let mut settings = (*session.catalog.photo(id).expect("demo photo").develop).clone();
+        settings.light.exposure = 1.0;
+        session
+            .catalog
+            .apply(Op::SetDevelop { id, settings: Arc::new(settings), label: "preview drag".into(), edited: None })
+            .expect("develop revision applies");
+        let latest = session.loupe_job(id, size.0, size.1, true).expect("latest loupe job");
+        assert_eq!((first.request.max_w, first.request.max_h), (latest.request.max_w, latest.request.max_h));
+        assert_ne!(first.key, latest.key, "latest develop revision must replace prior loupe request");
     }
 }
 

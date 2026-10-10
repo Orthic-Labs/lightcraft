@@ -1,4 +1,4 @@
-# Releasing LightCraft
+# Releasing Ember
 
 The release pipeline is [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 It runs on every push to the `release` branch. A maintainer can also dispatch it manually, with
@@ -14,7 +14,7 @@ still apply.
    marked as prereleases.
 3. Push to `release`, or dispatch the workflow on `release` (a dispatch on another branch is a dry run; see below).
 4. Check the workflow run and its artifacts. On success, the workflow creates or updates a **draft**
-   GitHub Release named `LightCraft v<version>`, targeted at the commit that triggered the run.
+   GitHub Release named `Ember v<version>`, targeted at the commit that triggered the run.
    Review the draft and its `SHA256SUMS.txt`, then publish it in GitHub Releases when ready.
 
 The workflow replaces assets when it updates an existing draft. It stops rather than overwriting a
@@ -34,8 +34,8 @@ and the WASM web app. The platform scripts in [`packaging/`](../packaging/) writ
   AppImageUpdate fetches only the changed blocks from the latest published (non-pre-) release.
 - Flatpak: a single-file `.flatpak` bundle for each architecture, repackaged from that
   architecture's Linux tarball (`packaging/linux/flatpak-bundle.sh` with
-  `packaging/linux/flatpak/ai.storyteller.lightcraft.bundle.yml`; no Rust build). The from-source
-  manifest `ai.storyteller.lightcraft.yml` is for Flathub; packaging-lint keeps their runtime and
+  `packaging/linux/flatpak/com.orthiclabs.ember.bundle.yml`; no Rust build). The from-source
+  manifest `com.orthiclabs.ember.yml` is for Flathub; packaging-lint keeps their runtime and
   `finish-args` identical.
 - FreeBSD: `lightcraft-<version>-freebsd-x86_64.tar.gz`, a `/usr/local`-style tree built in a
   FreeBSD 14.3 VM (`packaging/freebsd/package.sh`, the same packages as `freebsd.yml`). Install

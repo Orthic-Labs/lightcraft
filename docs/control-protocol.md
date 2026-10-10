@@ -59,7 +59,7 @@ views, and only apply over their image areas. Panning stops at the image edges.
 
 With a persistent library, every command that changes something is written to the catalog journal (fsynced) before
 it replies. If that write fails (disk full, volume gone, permissions), the command replies `ok: false` with
-`"saved in memory but not written to disk: <reason>; LightCraft will retry"`. The change itself **is** applied (and
+`"saved in memory but not written to disk: <reason>; Ember will retry"`. The change itself **is** applied (and
 undoable) and stays queued: the next command, and the app's frame loop every couple of seconds, retry the write, so
 nothing is lost once the disk is writable again — unless the app quits first. Meanwhile `ui.inspect` → `unsaved`
 is `{ops, error}` (else `null`), `library.info` reports `unsavedOps` / `unsavedError`, and the top bar's cloud icon

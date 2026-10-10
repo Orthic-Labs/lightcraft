@@ -269,8 +269,16 @@ pub(crate) fn follow_folder(s: &mut Session, from: &str, to: &str) {
 fn follow_library_folder(chosen: &mut Option<String>, from: &str, to: &str) {
     let Some(c) = chosen.as_deref() else { return };
     if let Some(rest) = lightcraft_catalog::query::folder_rest(c, from) {
-        // joined by the platform, so the result is spelled like `to` and like a path read from disk
-        *chosen = Some(rest.iter().fold(std::path::PathBuf::from(to), |p, name| p.join(name)).to_string_lossy().to_string());
+        // Compare by folder identity, while retaining the destination's separator and the
+        // chosen subfolder's spelling for display.
+        if rest.is_empty() {
+            *chosen = Some(to.to_string());
+            return;
+        }
+        let separator = if to.contains('\\') || (cfg!(windows) && to.as_bytes().get(1) == Some(&b':')) { '\\' } else { '/' };
+        let rest = rest.join(&separator.to_string());
+        let prefix = to.trim_end_matches(['/', '\\']);
+        *chosen = Some(if prefix.is_empty() { format!("{separator}{rest}") } else { format!("{prefix}{separator}{rest}") });
     }
 }
 

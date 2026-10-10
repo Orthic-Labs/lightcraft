@@ -99,10 +99,10 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
         Dialog::ConfirmDelete { .. } => "Delete Photos",
         Dialog::RemoveFolder { disk: true, .. } => "Remove Disk from Library",
         Dialog::RemoveFolder { .. } => "Remove Folder from Library",
-        // (nothing to download from in this build: the dialog explains the manual install)
+        // Nothing to download from in this build: explain manual installation.
         Dialog::SamModel { .. } if sam_by_hand(&app.session.segmenter) => "Install the SAM 3 Model",
         Dialog::SamModel { .. } => "Download the SAM 3 Model?",
-        Dialog::About => "About LightCraft",
+        Dialog::About => "About Ember",
         Dialog::Shortcuts => "Keyboard Shortcuts",
     }
     .to_string();
@@ -754,11 +754,12 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         1 => crate::credits::contributors_ui(app, ui),
                         2 => crate::credits::models_ui(ui),
                         _ => {
-                            ui.label(egui::RichText::new("LightCraft").font(t.semibold(20.0)).color(t.text));
+                            ui.label(egui::RichText::new("Ember").font(t.semibold(20.0)).color(t.text));
+                            ui.label("Orthic Labs fork, based on LightCraft by ArtCraft Team & contributors.");
                             ui.label(crate::i18n::tr_format!("Version {} — a clean-room, pure-Rust photo library and raw developer.", env!("CARGO_PKG_VERSION")));
                             ui.label(crate::i18n::tr_format!("MIT OR Apache-2.0. Fonts: {} (OFL). Icons: original.", crate::theme::font_credits()));
                             ui.add_space(10.0);
-                            let discord = egui::Button::new(egui::RichText::new(crate::i18n::tr("Join the ArtCraft Discord")).font(t.semibold(15.0)).color(egui::Color32::WHITE))
+                            let discord = egui::Button::new(egui::RichText::new(crate::i18n::tr("Upstream Community")).font(t.semibold(15.0)).color(egui::Color32::WHITE))
                                 .fill(t.accent)
                                 .min_size(egui::vec2(260.0, 34.0));
                             let r = ui.add(discord).on_hover_text(crate::links::DISCORD);
@@ -768,9 +769,9 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                             }
                             ui.add_space(6.0);
                             for (label, url) in [
-                                ("LightCraft website", crate::links::APP_PAGE),
+                                ("Ember project", crate::links::APP_PAGE),
                                 ("Source code on GitHub", crate::links::GITHUB),
-                                ("ArtCraft — more creative apps", crate::links::WEBSITE),
+                                ("Upstream LightCraft", crate::links::WEBSITE),
                             ] {
                                 let r = ui.link(crate::i18n::tr(label)).on_hover_text(url);
                                 if r.clicked() {
@@ -885,16 +886,14 @@ pub fn keeps_open(app: &LightcraftApp, dlg: &Dialog) -> bool {
     matches!(dlg, Dialog::SamModel { .. }) && !app.session.segmenter.installed()
 }
 
-/// No SAM 3 model, no download running and nowhere to download it from: installing it by hand is
-/// all the dialog can offer.
+/// No SAM 3 model, download running or configured mirror: manual installation is all this dialog can offer.
 fn sam_by_hand(sam: &lightcraft_engine::segment::Segmenter) -> bool {
     !sam.installed() && !sam.download_status().running && sam.mirrors().is_empty()
 }
 
-/// The model installation guide.
 const SAM_HELP: &str = "https://github.com/storytold/lightcraft/blob/main/docs/ai-masks.md#getting-the-model";
 
-/// Show the SAM 3 model folder in the file manager (created first, so there is something to show).
+/// Show SAM 3 model folder in file manager, creating it first when needed.
 fn show_model_folder(app: &mut LightcraftApp, dir: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let reveal = app.services.reveal.as_mut().ok_or("not available here")?;
@@ -905,23 +904,24 @@ fn show_model_folder(app: &mut LightcraftApp, dir: &std::path::Path) -> Result<(
 fn sam_model_body(app: &mut LightcraftApp, ui: &mut egui::Ui, error: Option<&str>) {
     use lightcraft_engine::segment::{LICENSE_NAME, LICENSE_URL, MODEL_BYTES};
     let t = Tokens::get(ui.ctx());
-    let seg = &app.session.segmenter;
-    let d = seg.download_status();
-    if seg.installed() {
+    let (installed, d, dir, mirrors_empty) = {
+        let seg = &app.session.segmenter;
+        (seg.installed(), seg.download_status(), seg.dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default(), seg.mirrors().is_empty())
+    };
+    if installed {
         ui.label(crate::i18n::tr("The SAM 3 model is installed: Object and Describe masks are ready."));
         return;
     }
     let gb = |b: u64| b as f64 / 1e9;
     ui.label(crate::i18n::tr(
-        "Object and Describe masks use SAM 3, Meta's segmentation model. It isn't part of LightCraft, and everything else works without it.",
+        "Object and Describe masks use SAM 3, Meta's segmentation model. It isn't part of Ember, and everything else works without it.",
     ));
-    let dir = seg.dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
     ui.label(format!("{} {:.1} GB, {} {dir}", crate::i18n::tr("A one-time download of about"), gb(MODEL_BYTES), crate::i18n::tr("saved in")));
     ui.label(
         egui::RichText::new(format!(
             "{} {LICENSE_NAME} — {}",
             crate::i18n::tr("Licence:"),
-            crate::i18n::tr("Meta's terms, not LightCraft's. Downloading it means accepting them.")
+            crate::i18n::tr("Meta's terms, not Ember's. Downloading it means accepting them.")
         ))
         .color(t.text_label),
     );
@@ -930,7 +930,13 @@ fn sam_model_body(app: &mut LightcraftApp, ui: &mut egui::Ui, error: Option<&str
     if r.clicked() {
         let _ = crate::links::open(app, LICENSE_URL);
     }
-    let seg = &app.session.segmenter;
+    let guide_label = if mirrors_empty { "How to install the model" } else { "SAM 3 install guide" };
+    let guide_id = if mirrors_empty { "link:samHelp" } else { "link:samGuide" };
+    let r = ui.link(crate::i18n::tr(guide_label)).on_hover_text(SAM_HELP);
+    crate::widgets::register(ui.ctx(), guide_id, r.rect);
+    if r.clicked() {
+        let _ = crate::links::open(app, SAM_HELP);
+    }
     if d.running {
         ui.add_space(4.0);
         let frac = if d.total > 0 { d.done as f64 / d.total as f64 } else { 0.0 };
@@ -946,33 +952,36 @@ fn sam_model_body(app: &mut LightcraftApp, ui: &mut egui::Ui, error: Option<&str
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         return;
     }
-    if seg.mirrors().is_empty() {
-        // nothing to download from: say how to install it by hand, with the folder and the guide a click away
-        let dir = seg.dir.clone();
+    ui.horizontal(|ui| {
+        if app.services.pick_folder.is_some() {
+            let r = ui.button(crate::i18n::tr("Select Existing Model Folder…"));
+            crate::widgets::register(ui.ctx(), "button:samSelectFolder", r.rect);
+            if r.clicked()
+                && let Some(path) = app.services.pick_folder.as_mut().and_then(|pick| pick())
+            {
+                match app.run("segment.model.selectFolder", json!({"path": path})) {
+                    Ok(_) => app.toast(ui.ctx(), crate::i18n::tr("SAM 3 model folder verified.")),
+                    Err(e) => app.toast_error(ui.ctx(), e),
+                }
+            }
+        }
+        if !dir.is_empty() && app.services.reveal.is_some() {
+            let r = ui.button(crate::i18n::tr(crate::menus::reveal_label()));
+            crate::widgets::register(ui.ctx(), "button:samFolder", r.rect);
+            if r.clicked()
+                && let Err(e) = show_model_folder(app, std::path::Path::new(&dir))
+            {
+                app.toast_error(ui.ctx(), e);
+            }
+        }
+    });
+    if mirrors_empty {
         ui.label(
             egui::RichText::new(crate::i18n::tr(
                 "This build can't download the model yet. To install it by hand, put model.safetensors, vocab.json and merges.txt from Meta's facebook/sam3 in the folder above: Object and Describe work as soon as they are there.",
             ))
             .color(t.text_dim),
         );
-        ui.horizontal_wrapped(|ui| {
-            if let Some(dir) = dir.filter(|_| app.services.reveal.is_some()) {
-                let r = ui.button(crate::i18n::tr(crate::menus::reveal_label()));
-                crate::widgets::register(ui.ctx(), "button:samFolder", r.rect);
-                if r.clicked()
-                    && let Err(e) = show_model_folder(app, &dir)
-                {
-                    app.toast(ui.ctx(), e);
-                }
-            }
-            let r = ui.link(crate::i18n::tr("How to install the model")).on_hover_text(SAM_HELP);
-            crate::widgets::register(ui.ctx(), "link:samHelp", r.rect);
-            if r.clicked()
-                && let Err(e) = crate::links::open(app, SAM_HELP)
-            {
-                app.toast(ui.ctx(), e);
-            }
-        });
     }
     if let Some(e) = error.map(str::to_string).or(d.error) {
         ui.label(egui::RichText::new(format!("{} {e}", crate::i18n::tr("The download didn't work:"))).color(egui::Color32::from_rgb(230, 90, 80)));

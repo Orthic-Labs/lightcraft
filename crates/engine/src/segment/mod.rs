@@ -1,7 +1,7 @@
 //! AI masks: Object (clicks) and Describe (text) selections computed with SAM 3
 //! (`lightcraft-segment`, cargo feature `sam`; the desktop app enables it).
 //!
-//! **Nothing requires the model.** It is not part of LightCraft (SAM License); the user
+//! **Nothing requires the model.** It is not part of Ember (SAM License); the user
 //! downloads it when they first use an AI mask and agree to (`segment.model.download`), or
 //! puts the files in the model folder themselves. Without it, AI mask requests fail with a
 //! clear "not installed" error; renders, exports and every other feature never touch it
@@ -32,7 +32,7 @@ use crate::Session;
 pub const INPUT_EDGE: usize = 1008;
 /// Download size of the model (`model.safetensors`; the tokenizer files add ~2 MB).
 pub const MODEL_BYTES: u64 = 3_439_938_512;
-/// The model's licence (not LightCraft's): shown before downloading.
+/// The model's licence (not Ember's): shown before downloading.
 pub const LICENSE_NAME: &str = "SAM License (Meta)";
 pub const LICENSE_URL: &str = "https://github.com/facebookresearch/sam3/blob/main/LICENSE";
 /// How errors about a missing model start (the UI offers the download on it).
@@ -157,6 +157,23 @@ impl Segmenter {
     /// Whether this build can compute AI masks at all.
     pub const AVAILABLE: bool = cfg!(feature = "sam");
 
+    /// Validate a user-selected folder without mutating a session. Desktop hosts run this on a
+    /// worker thread so hashing a large checkpoint never blocks owner-thread commands.
+    pub fn validate_model_dir_with_progress<F>(dir: &std::path::Path, progress: F) -> Result<(), String>
+    where
+        F: FnMut(u64, u64) -> bool,
+    {
+        #[cfg(feature = "sam")]
+        {
+            lightcraft_segment::validate_model_dir_with_progress(dir, progress).map_err(|e| e.to_string())
+        }
+        #[cfg(not(feature = "sam"))]
+        {
+            let _ = (dir, progress);
+            Err("AI masks are not available in this build".into())
+        }
+    }
+
     /// Whether the model's files are in place.
     pub fn installed(&self) -> bool {
         #[cfg(feature = "sam")]
@@ -164,6 +181,35 @@ impl Segmenter {
             return lightcraft_segment::is_model_dir(dir);
         }
         false
+    }
+
+    /// Verify a user-selected model folder before making it active.
+    pub fn select_model_dir(&mut self, dir: PathBuf) -> Result<(), String> {
+        if !Self::AVAILABLE {
+            return Err("AI masks are not available in this build".into());
+        }
+        if dir.as_os_str().is_empty() || dir.to_string_lossy().len() > 8_192 || dir.to_string_lossy().contains('\0') {
+            return Err("invalid SAM 3 model folder".into());
+        }
+        #[cfg(feature = "sam")]
+        lightcraft_segment::validate_model_dir(&dir).map_err(|e| e.to_string())?;
+        self.configure_model_dir(Some(dir));
+        Ok(())
+    }
+
+    /// Set the configured folder without requiring its files to exist yet. Hosts use this for
+    /// persisted preferences & download destinations; changing it always drops any in-memory
+    /// checkpoint before a request can load from the new folder.
+    pub fn configure_model_dir(&mut self, dir: Option<PathBuf>) {
+        if self.dir == dir {
+            return;
+        }
+        #[cfg(feature = "sam")]
+        if self.worker.loaded() || self.worker.pending() > 0 || self.worker.detail() > 0 {
+            self.worker.discard_model(dir.as_deref());
+        }
+        self.pending = None;
+        self.dir = dir;
     }
 
     /// Whether requests are queued or running (loading, analyzing the photo, a click…).
@@ -240,7 +286,7 @@ impl Segmenter {
             return Err(format!("{NOT_INSTALLED} yet: it is downloading ({pct} %)."));
         }
         Err(format!(
-            "{NOT_INSTALLED}. Download it (about {:.1} GB, {LICENSE_NAME}) when LightCraft offers it, with `segment.model.download {{\"acknowledged\": true}}`, or put model.safetensors, vocab.json and merges.txt in {}.",
+            "{NOT_INSTALLED}. Download it (about {:.1} GB, {LICENSE_NAME}) when Ember offers it, with `segment.model.download {{\"acknowledged\": true}}`, or put model.safetensors, vocab.json and merges.txt in {}.",
             MODEL_BYTES as f64 / 1e9,
             dir.display()
         ))

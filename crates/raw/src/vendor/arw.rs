@@ -255,8 +255,10 @@ fn read_quad_tiles(bytes: &[u8], info: &ImageInfo) -> Result<Vec<u16>> {
         .par_iter()
         .map(|c| {
             let src = chunk_bytes(bytes, c).ok_or_else(|| RawError::Corrupt("tile offset past end of file".into()))?;
-            let f = ljpeg::decode(src, (c.width as usize * c.height as usize).max(1 << 16))?;
-            if f.components != 4 || f.data.len() < f.width * f.height * 4 {
+            let decode_limit = (c.width as usize).checked_mul(c.height as usize).ok_or(RawError::Limit("ARW tile too large"))?.max(1 << 16);
+            let f = ljpeg::decode(src, decode_limit)?;
+            let frame_samples = f.width.checked_mul(f.height).and_then(|n| n.checked_mul(4)).ok_or(RawError::Limit("ARW tile too large"))?;
+            if f.components != 4 || f.data.len() < frame_samples {
                 return Err(RawError::Corrupt(format!(
                     "lossless ARW tile: {} samples in a {}×{}×{} frame",
                     f.data.len(),
@@ -447,23 +449,22 @@ pub(crate) fn decode(bytes: &[u8], mode: Mode) -> Result<RawImage> {
     let raw = raw_ifd(&tiff).ok_or_else(|| RawError::Unsupported("ARW without a CFA image IFD (old ARW or SR2)".into()))?;
     let info = raw.image()?;
     let (w, h) = (info.width as usize, info.height as usize);
-    if w * h > crate::MAX_SAMPLES {
-        return Err(RawError::Limit("image too large"));
-    }
+    let sample_count = w.checked_mul(h).filter(|&n| n > 0 && n <= crate::MAX_SAMPLES).ok_or(RawError::Limit("image too large"))?;
     let bits = info.bits() as u32;
     let linear_rgb = info.compression == 7 && info.photometric == photometric::YCBCR;
     let chunks = info.chunks(bytes.len() as u64);
-    let strip_len: u64 = chunks.iter().map(|c| c.len).sum();
+    let strip_len = chunks.iter().try_fold(0u64, |total, c| total.checked_add(c.len)).ok_or(RawError::Limit("raw image data too large"))?;
+    let sample_count_u64 = sample_count as u64;
     let (data, out_bits) = match info.compression {
         7 if linear_rgb => (RawData::U16(read_ycbcr_tiles(bytes, &info, raw, mode)?), 14),
-        32767 if chunks.len() == 1 && strip_len >= (w * h) as u64 && strip_len < (w * h) as u64 * 5 / 4 && mode == Mode::Header => {
+        32767 if chunks.len() == 1 && strip_len >= sample_count_u64 && strip_len < sample_count_u64 * 5 / 4 && mode == Mode::Header => {
             chunk_bytes(bytes, &chunks[0]).ok_or_else(|| RawError::Corrupt("raw strip outside file".into()))?;
             (RawData::U16(Vec::new()), 14)
         }
-        32767 if chunks.len() == 1 && strip_len >= (w * h) as u64 && strip_len < (w * h) as u64 * 5 / 4 => {
+        32767 if chunks.len() == 1 && strip_len >= sample_count_u64 && strip_len < sample_count_u64 * 5 / 4 => {
             let src = chunk_bytes(bytes, &chunks[0]).ok_or_else(|| RawError::Corrupt("raw strip outside file".into()))?;
             let curve = code_curve(&raw.u64s(TONE_CURVE).unwrap_or_else(|| vec![8000, 10400, 12900, 14100]));
-            let mut data = vec![0u16; w * h];
+            let mut data = vec![0u16; sample_count];
             data.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
                 let row = src.get(y * w..((y + 1) * w).min(src.len())).unwrap_or(&[]);
                 if row.len() == w {
@@ -482,7 +483,7 @@ pub(crate) fn decode(bytes: &[u8], mode: Mode) -> Result<RawImage> {
             }
         },
         1 => {
-            let packing = if strip_len >= (w * h * 2) as u64 { Packing::Word16 } else { Packing::Msb };
+            let packing = if strip_len >= sample_count_u64 * 2 { Packing::Word16 } else { Packing::Msb };
             (read_image_in(mode, bytes, &info, tiff.order, packing)?, bits)
         }
         _ => (read_image_in(mode, bytes, &info, tiff.order, Packing::Msb)?, bits),
@@ -490,12 +491,12 @@ pub(crate) fn decode(bytes: &[u8], mode: Mode) -> Result<RawImage> {
     let RawData::U16(ref samples) = data else { return Err(RawError::Unsupported("float ARW".into())) };
     // "12-bit uncompressed" files (e.g. ILCE-7RM2) say BitsPerSample 12 but store 16-bit words on the 14-bit scale
     // of the other modes (black 512, peaks near 16383): black and white follow the data, `bits` keeps the tag
-    let scale_bits = if info.compression == 1 && out_bits < 14 && strip_len >= (w * h * 2) as u64 && samples.iter().any(|&v| v >> (out_bits + 1) != 0)
-    {
-        14
-    } else {
-        out_bits
-    };
+    let scale_bits =
+        if info.compression == 1 && out_bits < 14 && strip_len >= sample_count_u64 * 2 && samples.iter().any(|&v| v >> (out_bits + 1) != 0) {
+            14
+        } else {
+            out_bits
+        };
 
     let cfa = match (raw.u64s(t::CFA_REPEAT_PATTERN_DIM).as_deref(), raw.bytes(t::CFA_PATTERN_EP)) {
         (Some([2, 2]), Some(p)) if p.len() == 4 && p.iter().all(|&c| c <= 2) => Cfa { width: 2, height: 2, pattern: p.to_vec() },
@@ -562,6 +563,43 @@ pub(crate) fn decode(bytes: &[u8], mode: Mode) -> Result<RawImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn procedural_arw(width: u32, height: u32, rows_per_strip: u32, offsets: Vec<u64>, counts: Vec<u64>) -> Vec<u8> {
+        use lightcraft_tiff::{ByteOrder, IfdBuilder, TiffWriter, Value};
+        let mut raw = IfdBuilder::new();
+        raw.set(t::MAKE, Value::Ascii("SONY".into()));
+        raw.set(t::MODEL, Value::Ascii("ILCE-7M4".into()));
+        raw.set(t::IMAGE_WIDTH, Value::Long(vec![width]));
+        raw.set(t::IMAGE_LENGTH, Value::Long(vec![height]));
+        raw.set(t::BITS_PER_SAMPLE, Value::Short(vec![14]));
+        raw.set(t::SAMPLES_PER_PIXEL, Value::Short(vec![1]));
+        raw.set(t::PHOTOMETRIC, Value::Short(vec![photometric::CFA]));
+        raw.set(t::COMPRESSION, Value::Short(vec![32767]));
+        raw.set(t::ROWS_PER_STRIP, Value::Long(vec![rows_per_strip]));
+        raw.set(t::STRIP_OFFSETS, Value::Long8(offsets));
+        raw.set(t::STRIP_BYTE_COUNTS, Value::Long8(counts));
+        let mut file = TiffWriter::new(ByteOrder::Little, true).write(&[raw]).unwrap();
+        file.resize(4097, 0);
+        file
+    }
+
+    #[test]
+    fn decode_rejects_overflowed_strip_byte_counts() {
+        let file = procedural_arw(4, 8, 4, vec![4096, 4096], vec![u64::MAX, u64::MAX]);
+        let Err(RawError::Limit(reason)) = decode(&file, Mode::Header) else {
+            panic!("expected strip length limit");
+        };
+        assert_eq!(reason, "raw image data too large");
+    }
+
+    #[test]
+    fn decode_rejects_sample_count_before_chunk_routing() {
+        let file = procedural_arw(u32::MAX, 2, 2, vec![4096], vec![1]);
+        let Err(RawError::Limit(reason)) = decode(&file, Mode::Header) else {
+            panic!("expected image size limit");
+        };
+        assert_eq!(reason, "image too large");
+    }
 
     #[test]
     fn downsized_lossless_is_linear_rgb_not_cfa() {

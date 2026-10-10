@@ -3,7 +3,7 @@ name = "lightcraft-segment"
 version.workspace = true
 edition.workspace = true
 license = "Apache-2.0"
-description = "LightCraft segmentation: SAM 3 (Segment Anything with Concepts) inference in pure Rust (L3)"
+description = "Ember segmentation: SAM 3 (Segment Anything with Concepts) inference in pure Rust (L3)"
 
 [lints]
 workspace = true
@@ -19,6 +19,12 @@ log = { workspace = true }
 candle-core = { workspace = true }
 candle-nn = { workspace = true }
 lightcraft-fetch = { workspace = true }
+
+# Offline qualification reuses existing production baseline; no new external packages.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+lightcraft-color = { workspace = true }
+lightcraft-raster = { workspace = true }
+lightcraft-pipeline = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 candle-core = { workspace = true, features = ["metal"] }

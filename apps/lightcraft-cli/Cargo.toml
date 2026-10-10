@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "LightCraft command-line tool: headless render, command listing and the MCP server"
+description = "Ember command-line tool: headless render, command listing and the MCP server"
 
 [[bin]]
 name = "lightcraft-cli"
@@ -18,6 +18,9 @@ lightcraft-engine = { workspace = true }
 lightcraft-sysmem = { workspace = true }
 lightcraft-mcp = { workspace = true }
 lightcraft-ui-egui = { workspace = true }
+lightcraft-photo-ai = { workspace = true, features = ["network"] }
+lightcraft-develop = { workspace = true }
+lightcraft-pipeline = { workspace = true }
 lightcraft-codecs = { workspace = true }
 lightcraft-raster = { workspace = true }
 lightcraft-merge = { workspace = true }

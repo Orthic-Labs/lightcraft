@@ -1,0 +1,11 @@
+{
+  "checkedAt": "2026-10-09",
+  "source": "https://openrouter.ai/api/v1/models",
+  "models": [
+    {"id": "deepseek/deepseek-v4.1-flash", "canonicalSlug": "deepseek/deepseek-v4.1-flash-20260910", "inputUsdPerMillion": 0.30, "outputUsdPerMillion": 1.20},
+    {"id": "google/gemini-3.8-flash", "canonicalSlug": "google/gemini-3.8-flash-20260902", "inputUsdPerMillion": 0.75, "outputUsdPerMillion": 3.75},
+    {"id": "google/gemini-3.5-flash-lite", "canonicalSlug": "google/gemini-3.5-flash-lite-20260721", "inputUsdPerMillion": 0.30, "outputUsdPerMillion": 2.50},
+    {"id": "qwen/qwen3.8-flash", "canonicalSlug": "qwen/qwen3.8-flash-20260826", "inputUsdPerMillion": 0.15, "outputUsdPerMillion": 0.47},
+    {"id": "anthropic/claude-haiku-5.5", "canonicalSlug": "anthropic/claude-haiku-5.5-20261007", "inputUsdPerMillion": 0.10, "outputUsdPerMillion": 0.50}
+  ]
+}

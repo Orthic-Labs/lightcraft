@@ -1,4 +1,4 @@
-//! RAW decoding for LightCraft.
+//! RAW decoding for Ember.
 //!
 //! - [`probe`] recognises raw containers; [`decode`] turns a file into a [`RawImage`] (sensor data + everything
 //!   needed to render it: CFA, black/white levels, active area, default crop, orientation, DNG colour tags,
@@ -94,7 +94,8 @@ pub enum RawFormat {
 }
 
 impl RawFormat {
-    /// Whether [`decode`] supports this container (possibly not every compression inside it).
+    /// Whether [`decode`] supports this container (possibly not every compression inside it; compressed ORF
+    /// variants still return [`RawError::Unsupported`]).
     pub fn is_supported(self) -> bool {
         matches!(
             self,
@@ -105,6 +106,7 @@ impl RawFormat {
                 | RawFormat::Nrw
                 | RawFormat::Arw
                 | RawFormat::Raf
+                | RawFormat::Orf
                 | RawFormat::Rw2
                 | RawFormat::Pef
         )

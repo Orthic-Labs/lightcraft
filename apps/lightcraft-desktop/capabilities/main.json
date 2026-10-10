@@ -1,0 +1,14 @@
+{
+  "identifier": "main",
+  "description": "Ember main & secondary photo windows",
+  "windows": [
+    "main",
+    "second-*"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-create"
+  ]
+}

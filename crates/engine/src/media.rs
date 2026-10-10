@@ -571,14 +571,48 @@ impl RenderJob {
             };
         }
         let was_loaded = matches!(self.source, SourceRef::Loaded(_));
-        match self.source.load_source() {
+        // During process teardown, do not replace a refused GPU render with CPU work that can
+        // outlive host shutdown. Check both sides of source loading so a concurrent shutdown
+        // cannot open a late CPU fallback window.
+        let closing = || lightcraft_gpu::shutting_down().then(|| "LightCraft is closing".to_string());
+        let source = match closing() {
+            Some(error) => Err(error),
+            None => self.source.load_source().and_then(|source| closing().map_or(Ok(source), Err)),
+        };
+        match source {
             Ok(source) => {
                 let src = &source.image;
                 let info = source.info_or(self.info);
                 // Thumbnails (many small jobs side by side) stay on the CPU; views and exports use
                 // the GPU when there is one.
                 let gpu = self.cache.is_none();
+                if gpu && let Some(error) = closing() {
+                    return RenderResult {
+                        request_id: self.request_id,
+                        source_key: self.source_key,
+                        photo: self.photo,
+                        level: self.level,
+                        key: self.key,
+                        rendered: Err(error),
+                        loaded: None,
+                        quick: None,
+                    };
+                }
                 let rendered = develop(src, &info, &self.settings, &self.request, self.stages.as_deref(), gpu);
+                // A shutdown racing GPU entry may make `develop` choose its CPU fallback. Never
+                // publish that late result as if it were a completed preview.
+                if gpu && let Some(error) = closing() {
+                    return RenderResult {
+                        request_id: self.request_id,
+                        source_key: self.source_key,
+                        photo: self.photo,
+                        level: self.level,
+                        key: self.key,
+                        rendered: Err(error),
+                        loaded: None,
+                        quick: None,
+                    };
+                }
                 if let Some((cache, key)) = &self.cache {
                     cache.put_at(self.cache_generation, *key, Arc::new(rendered.image.clone()));
                 }
@@ -1082,6 +1116,10 @@ pub struct ProbeInfo {
     pub format: String,
     pub kind: MediaKind,
     pub file_size: u64,
+    /// Native filesystem modification stamp captured with the probe. Import review caches use
+    /// this with [`file_size`](Self::file_size) to reject a stale probe when a file is replaced;
+    /// native probes use `Some(0)` when a filesystem cannot provide a stamp, disabling reuse.
+    pub source_stamp: Option<u128>,
     pub captured: Option<String>,
     pub meta: lightcraft_catalog::Meta,
     pub as_shot_wb: Option<(f64, f64)>,

@@ -1,6 +1,6 @@
-# LightCraft roadmap
+# Ember roadmap
 
-Milestones toward full Adobe Lightroom parity (cloud Lightroom first, then every Lightroom Classic module), with wall-clock
+Milestones toward full Lightroom parity (cloud Lightroom first, then every Lightroom Classic module), with wall-clock
 estimates for continuous (24/7) agent-driven development with 4–6 parallel agents. Estimates are calibrated on the sibling
 projects (DrawCraft reached its first four milestones in ≈ 4½ h) and are revised as milestones land.
 
@@ -25,7 +25,7 @@ duplicate Local entries #22, black GPU exports on an Intel iGPU #78).
 | **Feature checklist** | 79.7% | P0 core and P1 nearly complete: import (Add / Copy / Move, templates, devices), library, grid/loupe/compare/survey, every Edit slider, curves, colour grading, masking tools, crop/Upright, heal/clone, presets/profiles, versions/history, sync, export, menus, shortcuts | P0: full-resolution zoom detail; P1: lens-profile database, content-aware fill (patch synthesis), video playback/trim |
 | **RAW coverage** (formats people shoot) | ~55% | DNG (all kinds), CR2, CR3 lossless Bayer and version 0x100/0x200 C-RAW (M50/R100/R8 pixel-exact corpus), ARW, NEF (uncompressed + Huffman lossless/lossy), RAF (uncompressed, lossless/lossy compressed Bayer and X-Trans), uncompressed ORF, RW2 / RWL / Panasonic RAW (every raw format, checked on 178 files from 118 Panasonic and Leica bodies), PEF; every container's embedded preview (incl. CR3) | **CR3** (every Canon since ~2018), compressed ORF, Nikon lossy-after-split, Canon sRAW, HEIC/AVIF. NEFs labelled compressed but stored uncompressed (Z 6 packed 14-bit, D850 12-bit uncompressed). Per-model verification is thin (~55 corpus files vs >1,000 models) |
 | **Colour & image quality** | ~55–65% | Pipeline is complete and fast; GPU path CPU-exact within 1/255 | **No measured camera calibration database**: ARW, NEF, RW2, RAF, CR3, CR2 and PEF have guarded camera-JPEG colour estimates, with bundled ILCE-7M4, X-H2S and X-T4 profiles (docs/camera-preview-colour.md); other non-DNG raws and rejected estimates use a neutral matrix. Colour fidelity remains incomplete. No lens-profile database. No measured fidelity against Lightroom (tone, highlights, texture/clarity, NR, sharpening are tuned by eye) |
-| **AI & computational** | ~15–20% | Assisted culling (focus, bursts), auto tone, HDR/panorama merge; subject/sky/background masks as classical heuristics | Real segmentation masks (subject, sky, people, objects, landscape, depth), AI denoise, super resolution, lens blur, generative remove, faces/people, natural-language search. **Blocked on a model strategy** (licensable weights or our own training; pure-Rust inference is feasible) |
+| **AI & computational** | ~20% | Assisted culling (focus, bursts), closed-loop deterministic Auto tone (centre-weighted, [docs/auto-tone.md](docs/auto-tone.md)), per-photo noise estimate & Auto Noise Reduction ([docs/noise-reduction.md](docs/noise-reduction.md)), look targets from sample photos ([docs/look-targets.md](docs/look-targets.md)), HDR/panorama merge; subject/sky/background masks as classical heuristics | Real segmentation masks (subject, sky, people, objects, landscape, depth), AI denoise, super resolution, lens blur, generative remove, faces/people, natural-language search. **Blocked on a model strategy** (licensable weights or our own training; pure-Rust inference is feasible) |
 | **Workflow & library** | ~85% (single machine) | Robust catalog (journal + snapshots, background compaction, crash-tested), 85k-photo libraries stay responsive, Local browsing with automatic cleanup, XMP interop, keywords, smart albums, Move import | Opening an 85k library takes 1.7–4.7 s; no cloud sync (out of scope), no tablet companion (#74, roadmap), shared albums, publish services, tethering |
 | **Classic modules** | ~30% | Geotagging from GPX track logs, soft proofing (partial), slideshow (basic) | **Map view, Book, Print, Slideshow module, Web, publish services**: ~40 tracker rows ⬜ |
 | **HDR & video** | 0% | | HDR edit/display/export; video play/trim/edit/export |
@@ -40,9 +40,11 @@ duplicate Local entries #22, black GPU exports on an Intel iGPU #78).
 | Fujifilm raw shooter | ~65% | Uncompressed and lossless/lossy compressed RAF decoded; camera colour calibration remains missing. Verified on 13 bodies, including 14/16-bit GFX; see `docs/raf-compression.md` |
 | Canon CR3 / Olympus compressed-raw shooter | ~45% | CR3 lossless Bayer and version 0x100/0x200 C-RAW develop from sensor data (M50, R100, R8 verified pixel for pixel); other CRX variants and compressed ORF open as embedded JPEG previews. Camera colour and broader model verification remain |
 | Lightroom Classic power user | ~45% | Print, Book, Map, publish, tethering |
-| Relies on AI (masks, denoise) | ~25% | Object / Describe masks via optional SAM 3 (download not yet hosted); no AI denoise |
+| Relies on AI (masks, denoise) | ~25% | Object / Describe masks via optional SAM 3 (download not yet hosted); no learned denoise (classical NR with a measured noise model & Auto NR) |
 
 ## Where we're going
+
+**Ember fork AI sequence, 2026-10-10:** generated CI is restored while defining culling decisions & held-out shoots in parallel. Candidate run 38055623316 built source revision 93678dd1b9977d6ee509679be164fe2ec3b44113 on macOS/arm64 & Windows/x86_64; hidden native QA failed. CPU synthetic denoise receipts were retained as always `UNQUALIFIED`; follow-up source awaits full generated gates & exact-artifact qualification. Source contains cancellable classical analysis, paged review/acceptance, CLI metrics, experimental YuNet inference, offline DINOv2 similarity core/verified loader/antialiased input/classical comparison, experimental MediaPipe raw graphs/still-image decode/crops/blendshapes, 28-field spatial Personal Auto evaluation & procedural classical-NR denoise benchmarks. No learned accuracy, photographic quality or 2,000-RAW timing is claimed. Choose & measure permissive face/eye/similarity weights before learned culling. Cloud BYOK comparison follows local qualification; Personal Auto uses mapped Lightroom settings as weak cold-start labels & validated Ember edits as ground truth. ChatGPT-plan OAuth comes last. See [delivery status](docs/local-ai-delivery.md), [culling protocol](docs/culling-evaluation.md), [Personal Auto evaluation](docs/personal-auto-evaluation.md) & [denoise qualification](docs/denoise-qualification.md).
 
 Priorities, in order. Each points at tracker rows in [`docs/parity.md`](docs/parity.md) → *Top gaps*.
 
@@ -59,7 +61,11 @@ Priorities, in order. Each points at tracker rows in [`docs/parity.md`](docs/par
    (references stay in the local `plan/`), then tune against the numbers.
 5. **Lens profiles of our own** (LR-EDIT-OPTICS-PROFILE, P1).
 6. **AI model strategy** (maintainer decision): which permissively licensed models (or our own training) for
-   segmentation masks and denoise; then pure-Rust inference. Unblocks M12 and Enhance. Object / Describe masks now
+   segmentation masks and denoise; then pure-Rust inference. Unblocks M12 and Enhance. The deterministic side
+   is in place to build on: closed-loop Auto with public fit targets (a DINOv2 scene head would blend them
+   by class probability), a per-photo noise model (the synthetic-noise recipe for training our own denoiser),
+   and look targets (the no-training answer to "make it look like these"); see
+   [docs/local-ai-delivery.md](docs/local-ai-delivery.md) → *Learned next steps*. Object / Describe masks now
    run Meta's SAM 3 in pure Rust (optional, user-consented download under the non-OSI SAM License; CDN mirrors still
    to be set up, docs/ai-masks.md); Subject / Sky / People and Enhance are still open.
 7. **Then:** HDR (Q), the Classic output modules (Print first, then Map view, Book, Slideshow), video (R), localisation
@@ -112,7 +118,7 @@ parity` prints this line on every run, so it stays current):
 The 2026-10-05 count includes three new 🟡 rows that make quality gaps visible (camera colour calibration, verified
 camera coverage, render fidelity), which is why P0 dipped slightly.
 
-✅ counts 1, 🟡 ½, ⬜ 0; out-of-scope rows (cloud sharing, Adobe accounts…) are left out.
+✅ counts 1, 🟡 ½, ⬜ 0; out-of-scope rows (cloud sharing, vendor accounts…) are left out.
 
 **By remaining effort** — rows are not equal: a shortcut and the whole Book module are one row each, and what is
 left is the heavy part (AI, video, Classic output modules, undocumented raw codecs). Remaining work in **Opus agent-hours**
@@ -158,13 +164,13 @@ The milestone estimates in the table above were made before work started and are
 
 - **AI features** (subject/sky/people masks, generative remove) need model weights with licences we can ship; classical
   fallbacks first. No permissively licensed sky-segmentation or raw-denoise model was found — we may need to train our own.
-- **Camera colour and lens data** is a data problem: we never use Adobe's matrices, DCPs or LCPs. DNG-embedded data first,
+- **Camera colour and lens data** is a data problem: we never use reference-editor matrices, DCPs or LCPs. DNG-embedded data first,
   then our own calibration; long-tail camera/lens coverage grows over time.
 - **Raw-format sources:** decided 2026-10-05: decoders are written from *prose* format descriptions (even ones
   published alongside GPL code); decoder source is never read. Still open: freedom-to-operate review for local
   Laplacian filters, PatchMatch and HEVC (HEIC).
-- **Look parity** with Adobe's default rendering is tuned by eye today; the planned fidelity suite (LR-BEHAV-RENDER-FIDELITY)
-  turns it into measured comparisons against local-only Lightroom references.
+- **Look rendering** is tuned by eye today; the planned fidelity suite (LR-BEHAV-RENDER-FIDELITY)
+  turns it into measured output against local reference fixtures.
 
 ## Raw format coverage and known gaps
 
@@ -190,22 +196,22 @@ Not decoded yet — preview only (no permissively licensed description; black-bo
 **Camera colour matrices:** ARW, NEF, RW2, RAF, CR3, CR2 and PEF files can use guarded, separate chromaticity and tone estimates from their own embedded JPEG (see `docs/camera-preview-colour.md`); this is a per-file camera-look estimate with relative WB, not measured calibration or absolute-Kelvin WB. Other non-DNG raws and rejected fits use the documented neutral fallback (camera RGB ≈ linear sRGB, flagged
 `matrix_is_fallback`) with the file's as-shot white-balance multipliers. Clean sources to evaluate next: manufacturer
 matrices stored in the files themselves (Olympus ImageProcessing `ColorMatrix`, Pentax equivalents; Panasonic RW2 files carry none) and our
-own chart-based calibration (M11.4). Adobe matrices are never used.
+own chart-based calibration (M11.4). Reference-editor matrices are never used.
 
 ## Lightroom Classic catalog migration
 
 File → Import Lightroom Catalog… reads `.lrcat` plus committed WAL pages directly through a pure-Rust
 SQLite reader. Originals stay in place; ratings, flags, labels, XMP metadata, hierarchical keywords,
-collections/sets, virtual copies and supported develop settings migrate into LightCraft. Existing edits
+collections/sets, virtual copies and supported develop settings migrate into Ember. Existing edits
 are preserved by default, reimport identities are persistent, and source settings/history/snapshots are
 archived before catalog mutation. Missing originals remain available for relinking.
 
-Rendering is approximate: unsupported Adobe profiles/AI/process settings are reported and archived;
+Rendering is approximate: unsupported reference-editor profiles/AI/process settings are reported and archived;
 history/snapshots remain source data, and smart collections import current membership. The Lightroom
-database is read-only; LightCraft owns subsequent edits. See `docs/lightroom-catalog-import.md`.
+database is read-only; Ember owns subsequent edits. See `docs/lightroom-catalog-import.md`.
 
 ## Log
-- 2026-09-30: roadmap created; M0 in progress; research docs (Lightroom reference, Rust imaging ecosystem) complete.
+- 2026-09-30: roadmap created; M0 in progress.
 - 2026-09-30 (later): app running with the full Lightroom-style UI; pipeline v0; DNG/CR2/ARW; README showcase. ≈ 8 h elapsed.
 - 2026-10-02: parity estimate added (xtask parity prints weighted completion); milestone statuses refreshed.
 - 2026-10-08: Fujifilm camera colour: guarded JPEG matching and relative WB, plus bundled X-H2S/X-T4 profiles from 201/545 photos. On 150 withheld files the pooled profiles improve mean ΔE slightly over per-file fitting (X-H2S 1.70 → 1.62, X-T4 2.43 → 2.34); dark X-H2S samples 8.74 → 2.25. Measured calibration remains open.
@@ -219,6 +225,7 @@ database is read-only; LightCraft owns subsequent edits. See `docs/lightroom-cat
   16-bit words), black levels, in-camera aspect crops and mapped-out defects established on 178 CC0 files from 118
   bodies; RW2 gets the file-local camera look (accepted on 140 of 174 files with a preview).
 - 2026-10-08: independent Rust CR3 lossless and version 0x100/0x200 C-RAW decoding, six exact full-sensor regressions on M50/R100/R8; any CR3 decode error falls back to the embedded JPEG; guarded CR3 camera-JPEG colour fitting with independent framing validation (`docs/cr3.md`). Unverified CRX variants and broader model verification remain.
+- 2026-10-10: generated candidate run 38055623316 built source revision 93678dd1b9977d6ee509679be164fe2ec3b44113 on macOS/arm64 & Windows/x86_64. CPU-only procedural denoise receipts were retained with numeric metrics, digests & repeat timings; native QA failed, follow-up source awaits full generated gates & exact-artifact qualification, & no learned accuracy, photographic quality or 2,000-RAW timing is claimed.
 
 ## Chinese and Japanese interfaces, and text watermarks
 

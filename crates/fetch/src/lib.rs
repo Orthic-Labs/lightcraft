@@ -11,7 +11,7 @@
 //!
 //! What to download and where from belongs to the caller: it passes the [`FileSpec`]s and the
 //! default mirrors (see [`mirrors`]). `lightcraft-segment` does so for the SAM 3 weights, which
-//! are never part of LightCraft (SAM License, see docs/ai-masks.md).
+//! are never part of Ember (SAM License, see docs/ai-masks.md).
 //!
 //! Native only: on wasm32 this crate is empty (the web build downloads no models).
 
@@ -41,6 +41,45 @@ pub struct FileSpec<'a> {
     pub sha256: Option<&'a str>,
     /// Largest size accepted when `size` is not pinned.
     pub max: u64,
+}
+
+/// Lower-case SHA-256 receipt for already-read bytes, without reopening their source.
+///
+/// Caller bounds input size before reading or hashing it. A digest records identity;
+/// authenticity still requires comparison with an independently pinned value.
+pub fn sha256_bytes(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Verify already-read bytes so callers parse exactly what was hashed, without reopening files.
+pub fn verify_bytes(spec: &FileSpec<'_>, bytes: &[u8]) -> Result<bool, String> {
+    validate_files(std::slice::from_ref(spec)).map_err(|error| error.to_string())?;
+    let size = u64::try_from(bytes.len()).map_err(|_| "byte length exceeds verification limit".to_string())?;
+    if size > spec.max || spec.size.is_some_and(|expected| expected != size) {
+        return Ok(false);
+    }
+    Ok(spec.sha256.is_none_or(|expected| sha256_bytes(bytes) == expected))
+}
+
+#[cfg(test)]
+mod byte_verification_tests {
+    use super::{FileSpec, sha256_bytes, verify_bytes};
+
+    #[test]
+    fn digest_receipt_is_stable_lower_case_hex() {
+        assert_eq!(sha256_bytes(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(sha256_bytes(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    #[test]
+    fn verifies_exact_bytes_size_hash_and_spec() {
+        let spec =
+            FileSpec { name: "model.bin", size: Some(3), max: 3, sha256: Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") };
+        assert!(verify_bytes(&spec, b"abc").unwrap());
+        assert!(!verify_bytes(&spec, b"abd").unwrap());
+        assert!(!verify_bytes(&spec, b"abcd").unwrap());
+        assert!(verify_bytes(&FileSpec { max: 0, ..spec }, b"abc").is_err());
+    }
 }
 
 /// Most mirrors used (a hostile list can't make a download loop forever).
@@ -287,31 +326,61 @@ fn short(m: &str) -> String {
 
 /// Whether `path` is already the right file (exact size and hash when pinned).
 fn verified(f: &FileSpec<'_>, path: &Path) -> Result<bool, DownloadError> {
-    let Ok(meta) = std::fs::metadata(path) else { return Ok(false) };
+    verify_file_progress(f, path, |_, _| true).map(|result| result.unwrap_or(false))
+}
+
+/// Verify an existing file while reporting streamed hash progress. `None` means callback
+/// requested cancellation; no file is changed.
+pub fn verify_file_progress<F>(f: &FileSpec<'_>, path: &Path, mut progress: F) -> Result<Option<bool>, DownloadError>
+where
+    F: FnMut(u64, u64) -> bool,
+{
+    let Ok(meta) = std::fs::metadata(path) else { return Ok(Some(false)) };
     if !meta.is_file() || meta.len() == 0 {
-        return Ok(false);
+        return Ok(Some(false));
     }
     if f.size.is_some_and(|s| s != meta.len()) || meta.len() > f.max {
-        return Ok(false);
+        return Ok(Some(false));
     }
     match f.sha256 {
-        Some(want) => Ok(sha256_file(path).map_err(DownloadError::Disk)? == want),
-        None => Ok(true),
+        Some(want) => Ok(sha256_file_progress(path, &mut progress).map_err(DownloadError::Disk)?.map(|got| got == want)),
+        None => Ok(Some(true)),
     }
 }
 
+/// Verify an existing file against its bounded manifest entry without loading it into memory.
+///
+/// This is also used when a user selects a model folder, so manually supplied files receive
+/// the same size and pinned SHA-256 checks as downloaded files.
+pub fn verify_file(f: &FileSpec<'_>, path: &Path) -> Result<bool, DownloadError> {
+    verified(f, path)
+}
+
 fn sha256_file(path: &Path) -> Result<String, String> {
+    sha256_file_progress(path, &mut |_, _| true)?.ok_or_else(|| "hash verification cancelled".into())
+}
+
+fn sha256_file_progress<F>(path: &Path, progress: &mut F) -> Result<Option<String>, String>
+where
+    F: FnMut(u64, u64) -> bool,
+{
     let mut file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
+    let total = file.metadata().map_err(|e| format!("{}: {e}", path.display()))?.len();
+    let mut done = 0_u64;
     loop {
         let n = file.read(&mut buf).map_err(|e| format!("{}: {e}", path.display()))?;
         if n == 0 {
             break;
         }
         h.update(buf.get(..n).unwrap_or_default());
+        done = done.saturating_add(n as u64);
+        if !progress(done, total) {
+            return Ok(None);
+        }
     }
-    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(Some(h.finalize().iter().map(|b| format!("{b:02x}")).collect()))
 }
 
 fn part_path(dir: &Path, name: &str) -> PathBuf {
@@ -335,7 +404,7 @@ fn fetch_file(f: &FileSpec<'_>, url: &str, dir: &Path, opts: &Options, cancel: &
     };
     let fetched = f.size != Some(have) || have == 0;
     if fetched {
-        let limits = Limits { connect: opts.connect_timeout, stall: opts.stall_timeout, cancel };
+        let limits = Limits { connect: opts.connect_timeout, stall: opts.stall_timeout, cancel, deadline: None };
         let mut url = Url::parse(url).map_err(|e| Fail::NextMirror(e.to_string()))?;
         let origin = url.host.clone();
         let mut redirects = 0;

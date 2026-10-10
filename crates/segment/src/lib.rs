@@ -9,18 +9,18 @@
 //! ([`Sam3::encode`]); each click or prompt then reuses the [`Encoded`] features.
 //!
 //! On macOS the model runs on the GPU through Metal; elsewhere (for now) on the CPU. The
-//! weights are not part of LightCraft: they are the `facebook/sam3` checkpoint (SAM License),
+//! weights are not part of Ember: they are the `facebook/sam3` checkpoint (SAM License),
 //! read from a directory the user downloads them to ([`Sam3::load`]).
 //!
 //! Ported from the Hugging Face `transformers` implementation (Apache-2.0); see `NOTICE`.
 //! This crate is therefore licensed under the Apache License 2.0 only (not the MIT option of
-//! the rest of LightCraft). No UI dependencies (L3).
+//! the rest of Ember). No UI dependencies (L3).
 //!
 //! [`fetch`] downloads the model, only when the user asks for it (from configurable mirrors,
-//! verified before use). Nothing in LightCraft requires the model: without it, AI masks report
+//! verified before use). Nothing in Ember requires the model: without it, AI masks report
 //! that it isn't installed and everything else works.
 //!
-//! Modified work (Apache License 2.0, §4(b)): ported by the LightCraft contributors in 2026 from
+//! Modified work (Apache License 2.0, §4(b)): ported by the Ember contributors in 2026 from
 //! the Python/PyTorch SAM 3 code of Hugging Face Transformers (`src/transformers/models/sam3` and `sam3_tracker`), Copyright The HuggingFace
 //! Team and Meta Platforms, Inc.; translated to Rust on candle and restructured. See NOTICE.
 #![forbid(unsafe_code)]
@@ -31,8 +31,38 @@ mod clip;
 #[cfg(not(target_arch = "wasm32"))]
 mod detector;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod dinov2;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod dinov2_artifact;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod dinov2_input;
+#[cfg(not(target_arch = "wasm32"))]
+mod dinov2_inventory;
+#[cfg(not(target_arch = "wasm32"))]
+mod dinov2_positions;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod fetch;
 pub mod mask;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mediapipe;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mediapipe_artifact;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mediapipe_blendshapes;
+#[cfg(not(target_arch = "wasm32"))]
+mod mediapipe_conv;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mediapipe_detector;
+#[cfg(not(target_arch = "wasm32"))]
+mod mediapipe_graph;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mediapipe_input;
+#[cfg(not(target_arch = "wasm32"))]
+mod mediapipe_inventory;
+#[cfg(not(target_arch = "wasm32"))]
+mod mediapipe_ops;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mediapipe_photo;
 #[cfg(not(target_arch = "wasm32"))]
 mod neck;
 #[cfg(not(target_arch = "wasm32"))]
@@ -44,6 +74,8 @@ mod tracker;
 mod vit;
 #[cfg(not(target_arch = "wasm32"))]
 mod weights;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod yunet;
 
 use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
@@ -83,6 +115,56 @@ pub const WEIGHTS_FILE: &str = "model.safetensors";
 /// Whether `dir` holds a usable checkpoint.
 pub fn is_model_dir(dir: &Path) -> bool {
     dir.join(WEIGHTS_FILE).is_file() && dir.join("vocab.json").is_file() && dir.join("merges.txt").is_file()
+}
+
+/// Validate a user-selected checkpoint without loading tensors into a device.
+///
+/// The weights header and every tensor range are checked by `Weights::open`; tokenizer files
+/// are size-bounded before parsing. The official checkpoint size is pinned by the fetch manifest.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn validate_model_dir(dir: &Path) -> Result<()> {
+    validate_model_dir_with_progress(dir, |_, _| true)
+}
+
+/// Validate a selected checkpoint while reporting streamed weight-hash progress. Returning
+/// `false` from callback cancels before model files are activated.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn validate_model_dir_with_progress<F>(dir: &Path, progress: F) -> Result<()>
+where
+    F: FnMut(u64, u64) -> bool,
+{
+    if !dir.is_dir() {
+        return Err(Error::Missing(dir.to_path_buf()));
+    }
+    let weights_path = dir.join(WEIGHTS_FILE);
+    let weights_spec =
+        fetch::SAM3_FILES.iter().find(|spec| spec.name == WEIGHTS_FILE).ok_or_else(|| Error::Model("SAM 3 manifest has no weights entry".into()))?;
+    let weights_size = std::fs::metadata(&weights_path).map_err(|e| Error::Model(format!("{}: {e}", weights_path.display())))?.len();
+    if weights_size != fetch::SAM3_WEIGHTS_SIZE {
+        return Err(Error::Model(format!(
+            "{}: expected official SAM 3 checkpoint size {}, found {weights_size}",
+            weights_path.display(),
+            fetch::SAM3_WEIGHTS_SIZE
+        )));
+    }
+    let verified =
+        fetch::verify_file_progress(weights_spec, &weights_path, progress).map_err(|e| Error::Model(format!("{}: {e}", weights_path.display())))?;
+    let Some(verified) = verified else {
+        return Err(Error::Model("SAM 3 model validation cancelled".into()));
+    };
+    if !verified {
+        return Err(Error::Model(format!("{}: SHA-256 does not match the pinned SAM 3 manifest", weights_path.display())));
+    }
+    let _ = weights::Weights::open(&weights_path)?;
+    for name in ["vocab.json", "merges.txt"] {
+        let path = dir.join(name);
+        let size = std::fs::metadata(&path).map_err(|e| Error::Model(format!("{}: {e}", path.display())))?.len();
+        if size > 16 << 20 {
+            return Err(Error::Model(format!("{}: tokenizer file is too large", path.display())));
+        }
+    }
+    let _ = tokenizer::Tokenizer::load(dir)?;
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]

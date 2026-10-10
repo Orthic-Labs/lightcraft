@@ -229,6 +229,10 @@ fn cmd_wasm() -> Result<(), String> {
     for pkg in &set {
         let mut c = cargo();
         c.args(["check", "--target", "wasm32-unknown-unknown", "-p", pkg]);
+        // Desktop SAM uses native ONNX workers; the shared host still checks without that native-only default.
+        if pkg == "lightcraft-desktop-host" {
+            c.arg("--no-default-features");
+        }
         let ok = run(c, &format!("cargo check --target wasm32-unknown-unknown -p {pkg}")).is_ok();
         results.push((pkg.clone(), ok));
     }
@@ -263,8 +267,8 @@ fn cmd_ci() -> Result<(), String> {
             "test",
             Box::new(|| {
                 let mut c = cargo();
-                c.args(["test", "--workspace"]);
-                run(c, "cargo test --workspace")
+                c.args(["test", "--workspace", "--no-fail-fast"]);
+                run(c, "cargo test --workspace --no-fail-fast")
             }),
         ),
         ("parity", Box::new(|| parity::run(&root(), false))),

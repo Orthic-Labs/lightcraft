@@ -35,7 +35,11 @@ impl Scratch {
         Scratch(dir)
     }
     fn path(&self, rel: &str) -> String {
-        self.0.join(rel).to_string_lossy().to_string()
+        let mut path = self.0.clone();
+        for component in rel.split(['/', '\\']).filter(|component| !component.is_empty()) {
+            path.push(component);
+        }
+        path.to_string_lossy().to_string()
     }
 }
 
@@ -198,11 +202,11 @@ fn same_folder(actual: Option<&str>, expected: &str, why: &str) {
 #[test]
 fn a_renamed_folder_stays_the_chosen_one_and_undo_follows_it_back() {
     let dir = Scratch::new("rename");
-    std::fs::create_dir_all(dir.0.join("trip/day1")).unwrap();
+    std::fs::create_dir_all(dir.0.join("trip").join("day1")).unwrap();
     let (trip, renamed) = (dir.path("trip"), dir.path("holiday"));
     let mut s = Session::new();
-    add(&mut s, &format!("{trip}/a.jpg"));
-    add(&mut s, &format!("{trip}/day1/b.jpg"));
+    add(&mut s, &dir.path("trip/a.jpg"));
+    add(&mut s, &dir.path("trip/day1/b.jpg"));
     s.execute("library.filter", &json!({"libraryFolder": trip})).unwrap();
     assert_eq!(s.visible().len(), 2);
     s.execute("folder.rename", &json!({"path": trip, "name": "holiday"})).unwrap();
@@ -216,11 +220,12 @@ fn a_renamed_folder_stays_the_chosen_one_and_undo_follows_it_back() {
 #[test]
 fn a_moved_folder_keeps_a_chosen_subfolder_chosen() {
     let dir = Scratch::new("move");
-    std::fs::create_dir_all(dir.0.join("trip/day1")).unwrap();
+    std::fs::create_dir_all(dir.0.join("trip").join("day1")).unwrap();
     std::fs::create_dir_all(dir.0.join("archive")).unwrap();
-    let (day1, moved) = (dir.path("trip/day1"), dir.path("archive/trip/day1"));
+    let day1 = dir.path("trip/day1");
+    let moved = dir.0.join("archive").join("trip").join("day1").to_string_lossy().to_string();
     let mut s = Session::new();
-    add(&mut s, &format!("{day1}/b.jpg"));
+    add(&mut s, &dir.path("trip/day1/b.jpg"));
     s.execute("library.filter", &json!({"libraryFolder": day1})).unwrap();
     s.execute("folder.move", &json!({"path": dir.path("trip"), "into": dir.path("archive")})).unwrap();
     same_folder(s.filter.library_folder.as_deref(), &moved, "the subfolder follows its parent");
@@ -236,6 +241,9 @@ fn following_a_folder_reads_both_spellings_the_same_way() {
     s.filter.library_folder = Some("/a/x/../b/sub".into());
     crate::cmd::browse::follow_folder(&mut s, "/a/b", "/a/c");
     same_folder(s.filter.library_folder.as_deref(), "/a/c/sub", "a subfolder stays a subfolder, never widens to its parent");
+    s.filter.library_folder = Some(r"C:\a\b\sub".into());
+    crate::cmd::browse::follow_folder(&mut s, r"C:\a\b", r"C:\a\c");
+    assert_eq!(s.filter.library_folder.as_deref(), Some(r"C:\a\c\sub"), "a Windows subfolder keeps native separators");
     s.filter.library_folder = Some("/elsewhere/b".into());
     crate::cmd::browse::follow_folder(&mut s, "/a/b", "/a/c");
     assert_eq!(s.filter.library_folder.as_deref(), Some("/elsewhere/b"), "other folders are left alone");
@@ -247,7 +255,7 @@ fn following_a_folder_keeps_the_case_of_the_subfolder_names() {
     let mut s = Session::new();
     s.filter.library_folder = Some("/A/Trip/Day1".into());
     crate::cmd::browse::follow_folder(&mut s, "/A/Trip", "/B");
-    assert_eq!(s.filter.library_folder.as_deref(), Some(std::path::Path::new("/B").join("Day1").to_str().unwrap()));
+    assert_eq!(s.filter.library_folder.as_deref(), Some("/B/Day1"));
 }
 
 #[test]
@@ -304,14 +312,14 @@ fn removing_the_folder_being_shown_returns_to_all_photos() {
 #[test]
 fn a_renamed_folder_stays_the_one_shown_and_undo_follows_it_back() {
     let dir = Scratch::new("source-rename");
-    std::fs::create_dir_all(dir.0.join("trip/day1")).unwrap();
-    let (trip, day1, renamed) = (dir.path("trip"), dir.path("trip/day1"), dir.path("holiday"));
+    std::fs::create_dir_all(dir.0.join("trip").join("day1")).unwrap();
+    let (trip, day1) = (dir.path("trip"), dir.path("trip/day1"));
     let mut s = Session::new();
-    add(&mut s, &format!("{trip}/a.jpg"));
-    add(&mut s, &format!("{day1}/b.jpg"));
+    add(&mut s, &dir.path("trip/a.jpg"));
+    add(&mut s, &dir.path("trip/day1/b.jpg"));
     source_folder(&mut s, &day1);
     s.execute("folder.rename", &json!({"path": trip, "name": "holiday"})).unwrap();
-    same_folder(s.library_folder.as_deref(), &format!("{renamed}/day1"), "the subfolder follows its parent");
+    same_folder(s.library_folder.as_deref(), &format!("{}/day1", dir.path("holiday")), "the subfolder follows its parent");
     assert_eq!(s.visible().len(), 1);
     s.execute("edit.undo", &json!({})).unwrap();
     same_folder(s.library_folder.as_deref(), &day1, "the choice is the same folder");

@@ -1,4 +1,4 @@
-//! The LightCraft engine façade.
+//! The Ember engine façade.
 //!
 //! Every user-visible action is a command with a stable id (`photo.rate`, `develop.set`,
 //! `album.create`, `mask.add`…) and JSON parameters. The egui UI, the CLI, the control channel and
@@ -11,9 +11,11 @@
 #![forbid(unsafe_code)]
 
 pub mod availability;
+pub mod branding;
 mod camera_preview;
 pub mod camera_profiles;
 pub mod cmd;
+pub use cmd::cull::{CullApplyJob, CullJob, CullJobResult, CullPhotoSnapshot, CullProgressFn};
 pub mod crs;
 pub mod crs_masks;
 pub mod demo;
@@ -24,6 +26,7 @@ pub mod fonts;
 pub mod guard;
 pub mod import;
 mod import_move;
+pub mod import_pairs;
 pub mod library;
 mod lightroom_archive;
 pub mod lightroom_catalog;
@@ -67,7 +70,7 @@ pub enum EngineError {
     Catalog(#[from] lightcraft_catalog::CatalogError),
     /// The command's change is applied (in memory, undoable) but its journal records could not
     /// be written. They stay queued and are written by the next successful save.
-    #[error("saved in memory but not written to disk: {0}; LightCraft will retry")]
+    #[error("saved in memory but not written to disk: {0}; Ember will retry")]
     NotSaved(String),
     /// Another process (the app, `lightcraft-cli`, another computer) has the library open.
     #[error("{0}")]
@@ -128,6 +131,10 @@ pub struct Interaction {
     pub label: String,
     pub photo: PhotoId,
     pub original: Arc<DevelopSettings>,
+    /// Original settings for every explicit target staged during this interaction.
+    /// Active-photo edits keep `photo`/`original` for existing callers; this list lets
+    /// multi-photo slider gestures commit as one undo step too.
+    pub(crate) originals: Vec<(PhotoId, Arc<DevelopSettings>)>,
 }
 
 /// Source of [`Session::visible_shared`] generations (process-wide, so two sessions never share one).
@@ -319,7 +326,8 @@ impl Session {
         (spec.enabled)(self).map_err(|why| EngineError::Disabled(id.to_string(), why))?;
         let empty = Value::Object(Default::default());
         let params = if params.is_null() { &empty } else { params };
-        self.run_command(id, spec.journal.then_some(params), |s| (spec.run)(s, params))
+        let read_only_cull = id == "photo.analyze" && params.get("dryRun").and_then(Value::as_bool) == Some(true);
+        self.run_command(id, (spec.journal && !read_only_cull).then_some(params), |s| (spec.run)(s, params))
     }
 
     /// Run `f` as command `id` with what [`Session::execute`] does around every command: the
@@ -327,6 +335,13 @@ impl Session {
     /// `NotSaved`). Not journaled. The app's import task commits its batches this way.
     pub fn execute_fn(&mut self, id: &str, f: impl FnOnce(&mut Session) -> Result<Value>) -> Result<Value> {
         self.run_command(id, None, f)
+    }
+
+    /// Finish detached work through the command's enabled, journal & persistence contract.
+    pub fn execute_prepared_command(&mut self, id: &str, params: &Value, f: impl FnOnce(&mut Session) -> Result<Value>) -> Result<Value> {
+        let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        (spec.enabled)(self).map_err(|why| EngineError::Disabled(id.to_string(), why))?;
+        self.run_command(id, spec.journal.then_some(params), f)
     }
 
     fn run_command(&mut self, id: &str, journal: Option<&Value>, f: impl FnOnce(&mut Session) -> Result<Value>) -> Result<Value> {
@@ -617,25 +632,46 @@ impl Session {
         }
         let id = self.active().ok_or_else(|| EngineError::Other("no active photo".into()))?;
         let original = self.develop_of(id).unwrap_or_default();
-        self.interaction = Some(Interaction { label: label.into(), photo: id, original });
+        self.interaction = Some(Interaction { label: label.into(), photo: id, original: original.clone(), originals: vec![(id, original)] });
         Ok(())
     }
 
     /// Commit the interaction as one undo step (no-op if nothing changed).
     pub fn end_interaction(&mut self) -> Result<()> {
         let Some(i) = self.interaction.take() else { return Ok(()) };
-        let Some(cur) = self.develop_of(i.photo) else { return Ok(()) };
-        if *cur == *i.original {
+        if i.originals.len() == 1 {
+            let Some((id, original)) = i.originals.into_iter().next() else { return Ok(()) };
+            let Some(cur) = self.develop_of(id) else { return Ok(()) };
+            if *cur == *original {
+                return Ok(());
+            }
+            // Preserve normal active-photo semantics, including Auto Sync, for one-target drags.
+            self.apply_silent(Op::SetDevelop { id, settings: original, label: i.label.clone(), edited: None })?;
+            return self.set_develop(id, (*cur).clone(), &i.label);
+        }
+        let mut ops = Vec::new();
+        for (id, original) in i.originals {
+            let Some(cur) = self.develop_of(id) else { continue };
+            if *cur == *original {
+                continue;
+            }
+            // Restore originals silently, then commit every changed target as one step.
+            self.apply_silent(Op::SetDevelop { id, settings: original, label: i.label.clone(), edited: None })?;
+            if let Some(op) = self.develop_op(id, (*cur).clone(), &i.label) {
+                ops.push(op);
+            }
+        }
+        if ops.is_empty() {
             return Ok(());
         }
-        // Restore the original silently, then commit the final value as one step.
-        self.apply_silent(Op::SetDevelop { id: i.photo, settings: i.original.clone(), label: i.label.clone(), edited: None })?;
-        self.set_develop(i.photo, (*cur).clone(), &i.label)
+        self.commit(&i.label, Op::Batch { ops })
     }
 
     pub fn cancel_interaction(&mut self) -> Result<()> {
         if let Some(i) = self.interaction.take() {
-            self.apply_silent(Op::SetDevelop { id: i.photo, settings: i.original, label: i.label, edited: None })?;
+            for (id, original) in i.originals {
+                self.apply_silent(Op::SetDevelop { id, settings: original, label: i.label.clone(), edited: None })?;
+            }
         }
         Ok(())
     }
@@ -782,6 +818,10 @@ pub fn json_delta(old: &Value, new: &Value) -> Option<Value> {
 mod tests;
 #[cfg(test)]
 mod tests_color;
+#[cfg(test)]
+mod tests_cull_jobs;
+#[cfg(test)]
+mod tests_cull_review;
 #[cfg(test)]
 mod tests_export;
 #[cfg(test)]

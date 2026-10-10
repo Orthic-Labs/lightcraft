@@ -8,7 +8,7 @@
 //! catalog between frames, with a progress window and Cancel; the whole import is one undo step.
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
-use lightcraft_engine::import::{ImportCandidate, ScanInput, ScanOutput, ScanProgress, scan_with};
+use lightcraft_engine::import::{ImportCandidate, ImportScanOptions, ScanInput, ScanOutput, ScanProgress, scan_with};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
@@ -84,6 +84,8 @@ pub struct ImportDialog {
     pub trashed: Vec<bool>,
     /// What to do with those: "" (leave them), `restore` or `fresh` (the `onDeleted` param).
     pub on_deleted: String,
+    /// Folder scan choices; changing them then rescans source before probing.
+    pub scan_options: ImportScanOptions,
     /// The candidate clicked last: where a Shift-click range starts ([`ImportDialog::click`]).
     #[serde(skip)]
     pub last_clicked: Option<usize>,
@@ -107,11 +109,15 @@ fn file_type(c: &ImportCandidate) -> String {
 
 impl ImportDialog {
     pub fn new(candidates: Vec<ImportCandidate>) -> Self {
-        let checked = candidates.iter().map(|c| c.duplicate.is_none() && c.error.is_none()).collect();
+        let checked = candidates.iter().map(|c| c.duplicate.is_none() && c.error.is_none() && c.policy_excluded.is_none()).collect();
         ImportDialog { candidates, checked, ..Default::default() }
     }
     pub fn importable(&self, i: usize) -> bool {
-        self.candidates.get(i).is_some_and(|c| c.error.is_none() && (c.duplicate.is_none() || self.is_trashed(i) && !self.on_deleted.is_empty()))
+        self.candidates.get(i).is_some_and(|c| {
+            c.error.is_none()
+                && (c.policy_excluded.is_none() || c.policy_excluded.as_deref() == Some("rawOnly"))
+                && (c.duplicate.is_none() || self.is_trashed(i) && !self.on_deleted.is_empty())
+        })
     }
     /// The file types among the candidates (`ARW`, `JPG`…, upper case, sorted) and how many of each.
     pub fn file_types(&self) -> Vec<(String, usize)> {
@@ -387,6 +393,7 @@ pub struct ScanTask {
     rx: std::sync::mpsc::Receiver<ScanOutput>,
     /// Open the review with "copy into the library" checked (a camera / card).
     pub copy: bool,
+    pub options: ImportScanOptions,
     /// Browsing a folder (Local): the photos are read in place instead of opening the review.
     browse: bool,
     /// What is being scanned (the review's source).
@@ -395,11 +402,15 @@ pub struct ScanTask {
 
 /// Scan `paths` in the background, then open the review dialog (see [`poll_scan`]).
 pub fn open(app: &mut LightcraftApp, paths: Vec<String>) -> Result<Value, String> {
+    open_with_options(app, paths, ImportScanOptions::default())
+}
+
+pub fn open_with_options(app: &mut LightcraftApp, paths: Vec<String>, options: ImportScanOptions) -> Result<Value, String> {
     if app.scan.is_some() {
         return Err("a scan is already running".into());
     }
     let sources = paths.clone();
-    let (input, paths) = ScanInput::new(&mut app.session, &paths);
+    let (input, paths) = ScanInput::new_with_options(&mut app.session, &paths, options.clone());
     let progress = std::sync::Arc::new(ScanProgress::default());
     let (tx, rx) = std::sync::mpsc::channel();
     let p = progress.clone();
@@ -410,7 +421,7 @@ pub fn open(app: &mut LightcraftApp, paths: Vec<String>) -> Result<Value, String
     std::thread::spawn(job);
     #[cfg(target_arch = "wasm32")]
     job();
-    app.scan = Some(ScanTask { progress, rx, copy: false, browse: false, sources });
+    app.scan = Some(ScanTask { progress, rx, copy: false, browse: false, sources, options });
     Ok(json!({"scanning": true}))
 }
 
@@ -471,7 +482,7 @@ pub fn browse(app: &mut LightcraftApp, path: &str, subfolders: Option<bool>) -> 
     std::thread::spawn(job);
     #[cfg(target_arch = "wasm32")]
     job();
-    app.scan = Some(ScanTask { progress, rx, copy: false, browse: true, sources: Vec::new() });
+    app.scan = Some(ScanTask { progress, rx, copy: false, browse: true, sources: Vec::new(), options: ImportScanOptions::default() });
     app.renderer.forget_imports();
     Ok(json!({"path": dir_s, "subfolders": subfolders, "scanning": true}))
 }
@@ -521,6 +532,7 @@ pub fn poll_scan(app: &mut LightcraftApp, ctx: &egui::Context) {
         })
         .collect();
     d.copy = task.copy;
+    d.scan_options = task.options;
     d.sources = task.sources;
     app.ui.dialog = Some(crate::state::Dialog::Import { opts: Box::new(d) });
 }
@@ -860,6 +872,31 @@ pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &mut ImportDialog) {
             }
         });
     });
+    let mut rescan = false;
+    field(ui, "Scan filters", |ui| {
+        ui.checkbox(&mut d.scan_options.include_subfolders, crate::i18n::tr("Include subfolders"));
+        let mut allowed = d.scan_options.allowed_extensions.join(", ");
+        let mut excluded = d.scan_options.excluded_extensions.join(", ");
+        ui.horizontal(|ui| {
+            ui.label(crate::i18n::tr("Only types"));
+            if ui.text_edit_singleline(&mut allowed).changed() {
+                d.scan_options.allowed_extensions = allowed.split(',').map(str::trim).filter(|v| !v.is_empty()).map(str::to_string).collect();
+            }
+            ui.label(crate::i18n::tr("Exclude"));
+            if ui.text_edit_singleline(&mut excluded).changed() {
+                d.scan_options.excluded_extensions = excluded.split(',').map(str::trim).filter(|v| !v.is_empty()).map(str::to_string).collect();
+            }
+            rescan = crate::widgets::text_button(ui, "importRescan", crate::i18n::tr("Rescan"), false).clicked();
+        });
+    });
+    if rescan && !d.sources.is_empty() {
+        let sources = d.sources.clone();
+        let options = d.scan_options.clone();
+        if let Err(error) = open_with_options(app, sources, options) {
+            app.toast(ui.ctx(), crate::i18n::tr_format!("Scan failed: {error}", error = error));
+        }
+        return;
+    }
     // with more than one file type: a toggle per type checks or unchecks all of its files
     let types = d.file_types();
     if types.len() > 1 {

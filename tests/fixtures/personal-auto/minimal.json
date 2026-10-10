@@ -1,0 +1,346 @@
+{
+  "version": 1,
+  "feature_schema": [
+    "ev.p01",
+    "ev.p05",
+    "ev.median",
+    "ev.p95",
+    "ev.p995",
+    "ev.spread",
+    "chroma.p90",
+    "luminance.mean",
+    "luminance.stddev",
+    "scene.shadow_share",
+    "scene.highlight_share",
+    "source.aspect",
+    "source.raw",
+    "baseline.exposure",
+    "source.wb_temp",
+    "source.wb_tint",
+    "spatial.g00.ev.mean",
+    "spatial.g00.ev.stddev",
+    "spatial.g00.chroma.mean",
+    "spatial.g01.ev.mean",
+    "spatial.g01.ev.stddev",
+    "spatial.g01.chroma.mean",
+    "spatial.g10.ev.mean",
+    "spatial.g10.ev.stddev",
+    "spatial.g10.chroma.mean",
+    "spatial.g11.ev.mean",
+    "spatial.g11.ev.stddev",
+    "spatial.g11.chroma.mean"
+  ],
+  "controls": [
+    "light.contrast",
+    "color.vibrance",
+    "color.saturation"
+  ],
+  "shoots": [
+    {
+      "shoot_id": "synthetic-train",
+      "split": "train",
+      "camera": {
+        "make": "Synthetic",
+        "model": "Fixture"
+      },
+      "photos": [
+        {
+          "photo_id": "synthetic-train-1",
+          "features": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0.2,
+            0.2,
+            0.1,
+            0.1,
+            0.1,
+            1.5,
+            1,
+            0,
+            6500,
+            0,
+            0.11,
+            0.021,
+            0.18,
+            0.24,
+            0.031,
+            0.23,
+            0.37,
+            0.041,
+            0.28,
+            0.49,
+            0.051,
+            0.34
+          ],
+          "baseline": {
+            "light.contrast": 0,
+            "color.vibrance": 0,
+            "color.saturation": 0
+          },
+          "weakLabelColdStart": {
+            "values": {
+              "light.contrast": 8,
+              "color.vibrance": 2,
+              "color.saturation": 1
+            },
+            "confidence": {
+              "light.contrast": 1,
+              "color.vibrance": 1,
+              "color.saturation": 1
+            },
+            "provenance": {
+              "source": "synthetic-weak"
+            }
+          },
+          "emberGroundTruth": {
+            "values": {
+              "light.contrast": 10,
+              "color.vibrance": 3,
+              "color.saturation": 2
+            },
+            "provenance": {
+              "accepted": true,
+              "origin": "synthetic-human-edit"
+            },
+            "confidence": {
+              "light.contrast": 1,
+              "color.vibrance": 1,
+              "color.saturation": 1
+            }
+          }
+        },
+        {
+          "photo_id": "synthetic-train-2",
+          "features": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+            0.4,
+            0.4,
+            0.1,
+            0.1,
+            0.1,
+            1.5,
+            1,
+            0,
+            6500,
+            0,
+            0.61,
+            0.071,
+            0.42,
+            0.74,
+            0.081,
+            0.47,
+            0.87,
+            0.091,
+            0.52,
+            0.93,
+            0.101,
+            0.58
+          ],
+          "baseline": {
+            "light.contrast": 0,
+            "color.vibrance": 0,
+            "color.saturation": 0
+          },
+          "weakLabelColdStart": {
+            "values": {
+              "light.contrast": 6,
+              "color.vibrance": 1,
+              "color.saturation": 0.5
+            },
+            "provenance": {
+              "source": "synthetic-weak"
+            },
+            "confidence": {
+              "light.contrast": 1,
+              "color.vibrance": 1,
+              "color.saturation": 1
+            }
+          },
+          "emberGroundTruth": {
+            "values": {
+              "light.contrast": 7,
+              "color.vibrance": 2,
+              "color.saturation": 1
+            },
+            "provenance": {
+              "accepted": true,
+              "origin": "synthetic-human-edit"
+            },
+            "confidence": {
+              "light.contrast": 1,
+              "color.vibrance": 1,
+              "color.saturation": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "shoot_id": "synthetic-validation",
+      "split": "validation",
+      "camera": {
+        "make": "Synthetic",
+        "model": "Fixture"
+      },
+      "photos": [
+        {
+          "photo_id": "synthetic-validation-1",
+          "features": [
+            0.5,
+            0.5,
+            0.5,
+            0.5,
+            0.5,
+            0,
+            0.3,
+            0.3,
+            0.1,
+            0.1,
+            0.1,
+            1.5,
+            1,
+            0,
+            6500,
+            0,
+            0.36,
+            0.046,
+            0.31,
+            0.44,
+            0.056,
+            0.35,
+            0.55,
+            0.066,
+            0.39,
+            0.63,
+            0.076,
+            0.43
+          ],
+          "baseline": {
+            "light.contrast": 0,
+            "color.vibrance": 0,
+            "color.saturation": 0
+          },
+          "weakLabelColdStart": {
+            "values": {
+              "light.contrast": 5,
+              "color.vibrance": 1,
+              "color.saturation": 0.5
+            },
+            "provenance": {
+              "source": "synthetic-weak"
+            },
+            "confidence": {
+              "light.contrast": 1,
+              "color.vibrance": 1,
+              "color.saturation": 1
+            }
+          },
+          "emberGroundTruth": {
+            "values": {
+              "light.contrast": 6,
+              "color.vibrance": 2,
+              "color.saturation": 1
+            },
+            "provenance": {
+              "accepted": true,
+              "origin": "synthetic-human-edit"
+            },
+            "confidence": {
+              "light.contrast": 1,
+              "color.vibrance": 1,
+              "color.saturation": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "shoot_id": "synthetic-test",
+      "split": "test",
+      "camera": {
+        "make": "Synthetic",
+        "model": "HeldOut"
+      },
+      "photos": [
+        {
+          "photo_id": "synthetic-test-1",
+          "features": [
+            0.25,
+            0.25,
+            0.25,
+            0.25,
+            0.25,
+            0,
+            0.25,
+            0.25,
+            0.1,
+            0.1,
+            0.1,
+            1.5,
+            1,
+            0,
+            6500,
+            0,
+            0.27,
+            0.037,
+            0.26,
+            0.33,
+            0.047,
+            0.29,
+            0.41,
+            0.057,
+            0.32,
+            0.52,
+            0.067,
+            0.36
+          ],
+          "baseline": {
+            "light.contrast": 0,
+            "color.vibrance": 0,
+            "color.saturation": 0
+          },
+          "weakLabelColdStart": {
+            "values": {
+              "light.contrast": 4,
+              "color.vibrance": 1,
+              "color.saturation": 0.5
+            },
+            "provenance": {
+              "source": "synthetic-weak"
+            },
+            "confidence": {
+              "light.contrast": 1,
+              "color.vibrance": 1,
+              "color.saturation": 1
+            }
+          },
+          "emberGroundTruth": {
+            "values": {
+              "light.contrast": 5,
+              "color.vibrance": 1.5,
+              "color.saturation": 0.75
+            },
+            "provenance": {
+              "accepted": true,
+              "origin": "synthetic-human-edit"
+            },
+            "confidence": {
+              "light.contrast": 1,
+              "color.vibrance": 1,
+              "color.saturation": 1
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -19,7 +19,7 @@ use lightcraft_color::transfer::{linear_to_srgb, srgb_to_linear};
 use lightcraft_color::{D50, D65, Mat3, PROPHOTO, REC2020, bradford};
 use serde::{Deserialize, Serialize};
 
-/// Upper bound on table entries (Adobe profiles use ≤ 90 × 30 × 16; guards header-driven sizes).
+/// Upper bound on table entries (supports ≤ 90 × 30 × 16; guards header-driven sizes).
 const MAX_ENTRIES: usize = 1 << 20;
 
 /// A DNG hue/saturation/value mapping table (`ProfileHueSatMapData*` / `ProfileLookTableData`).

@@ -29,7 +29,7 @@ keyboard input, and `X` in the Crop panel swaps the crop aspect.
 Shifted number keys also use the physical number key when the keyboard reports punctuation
 (for example, `Shift+1` as `!`). Letter shortcuts continue to follow the keyboard layout.
 
-`Shift+P` picks and advances in the two library grids. In other views it retains LightCraft's
+`Shift+P` picks and advances in the two library grids. In other views it retains Ember's
 Presets-panel binding. `Shift+Z` remains an alternative pick-and-advance key in all views.
 
 The macOS native menu displays plain-key bindings but leaves execution to egui; only shortcuts
@@ -38,10 +38,3 @@ menu correction is adapted from [PR #261](https://github.com/storytold/lightcraf
 commit `4e012a59a6d2442ba749f109ea27aadb5c0b11a5` by Gardy, and addresses the cause reported in
 [issue #283](https://github.com/storytold/lightcraft/issues/283). That PR was open when checked
 on 2026-10-08; this work extends its fix with library culling bindings and tests.
-
-Public behaviour references, checked 2026-10-08:
-
-- [Lightroom Classic keyboard shortcuts](https://helpx.adobe.com/lightroom-classic/help/keyboard-shortcuts.html)
-- [Lightroom Classic flagging, labelling and rating](https://helpx.adobe.com/lightroom-classic/help/flag-label-rate-photos.html)
-
-Only public descriptions were consulted. No Adobe assets or application data are included.

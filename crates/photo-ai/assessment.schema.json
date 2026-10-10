@@ -1,0 +1,29 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decision", "confidence", "reason", "recipe"],
+  "properties": {
+    "decision": {"type": "string", "enum": ["adjust", "preserve", "review"]},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "reason": {"type": "string", "minLength": 1, "maxLength": 240},
+    "recipe": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["light.exposure", "light.contrast", "light.highlights", "light.shadows", "light.whites", "light.blacks", "color.vibrance", "color.saturation"],
+          "properties": {
+            "light.exposure": {"type": "number", "minimum": -2, "maximum": 2},
+            "light.contrast": {"type": "number", "minimum": -60, "maximum": 60},
+            "light.highlights": {"type": "number", "minimum": -60, "maximum": 60},
+            "light.shadows": {"type": "number", "minimum": -60, "maximum": 60},
+            "light.whites": {"type": "number", "minimum": -60, "maximum": 60},
+            "light.blacks": {"type": "number", "minimum": -60, "maximum": 60},
+            "color.vibrance": {"type": "number", "minimum": -40, "maximum": 40},
+            "color.saturation": {"type": "number", "minimum": -20, "maximum": 20}
+          }
+        }
+      ]
+    }
+  }
+}

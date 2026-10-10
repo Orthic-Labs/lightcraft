@@ -7,6 +7,81 @@ use serde_json::{Value, json};
 
 const BIN: &str = env!("CARGO_BIN_EXE_lightcraft-cli");
 
+#[test]
+fn photo_assessment_prepare_only_preserves_source_and_requires_new_output() {
+    let input = tmp("ai-readonly-input.png");
+    gradient_png(&input);
+    let before = std::fs::read(&input).unwrap();
+    let output = tmp("ai-readonly-report");
+    if output.exists() {
+        std::fs::remove_dir_all(&output).unwrap();
+    }
+    let result = Command::new(BIN)
+        .args(["ai", "compare", "--prepare-only", "--out"])
+        .arg(&output)
+        .arg(&input)
+        .env_remove("OPENROUTER_API_KEY")
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(std::fs::read(&input).unwrap(), before);
+    let report: Value = serde_json::from_slice(&std::fs::read(output.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report["mode"], "prepare-only");
+    assert_eq!(report["libraryMutated"], false);
+    assert_eq!(report["cases"].as_array().unwrap().len(), 1);
+    assert!(report["cases"][0]["runs"].as_array().unwrap().is_empty());
+    assert!(output.join("index.html").is_file());
+    let image = output.join(report["cases"][0]["input"].as_str().unwrap());
+    let proxy = lightcraft_photo_ai::Proxy::new(std::fs::read(image).unwrap()).unwrap();
+    assert_eq!(report["cases"][0]["proxySha256"], proxy.digest());
+    let first_report = std::fs::read(output.join("report.json")).unwrap();
+    let result = Command::new(BIN).args(["ai", "compare", "--prepare-only", "--out"]).arg(&output).arg(&input).output().unwrap();
+    assert!(!result.status.success());
+    assert_eq!(std::fs::read(output.join("report.json")).unwrap(), first_report);
+    assert_eq!(std::fs::read(&input).unwrap(), before);
+    std::fs::remove_dir_all(output).unwrap();
+}
+
+#[test]
+fn look_extract_then_apply_lands_a_photo_on_the_samples_statistics() {
+    // samples: two bright, flat renders; the photo to match: the darker demo library frame
+    let a = tmp("look-sample-a.png");
+    let b = tmp("look-sample-b.png");
+    for (p, base) in [(&a, 150u8), (&b, 165u8)] {
+        let img = lightcraft_raster::Rgba8::from_fn(96, 64, |x, _| [base + (x as u8 / 4), base + (x as u8 / 4), base - 10 + (x as u8 / 4), 255]);
+        let png = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&img), &Default::default()).unwrap();
+        std::fs::write(p, png).unwrap();
+    }
+    let out = tmp("look.json");
+    let _ = std::fs::remove_file(&out);
+    let r = Command::new(BIN).args(["look", "extract"]).arg(&a).arg(&b).arg("-o").arg(&out).output().unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let look: Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+    assert_eq!(look["schema"], "lightcraft.look-target.v1");
+    assert_eq!(look["samples"], 2);
+    // refuses to overwrite, refuses a raw, needs -o
+    assert!(!Command::new(BIN).args(["look", "extract"]).arg(&a).arg("-o").arg(&out).output().unwrap().status.success());
+    let raw = tmp("not-a-sample.RAF");
+    std::fs::write(&raw, b"FUJIFILMCCD-RAW").unwrap();
+    assert!(!Command::new(BIN).args(["look", "extract"]).arg(&raw).arg("-o").arg(tmp("x.json")).output().unwrap().status.success());
+    assert!(!Command::new(BIN).args(["look", "extract"]).arg(&a).output().unwrap().status.success());
+    // apply through `run` on the demo library: the values land, repeat-stable, undo restores
+    let r = Command::new(BIN)
+        .args(["run", "--demo", "develop.applyLook"])
+        .arg(format!("path={}", out.display()))
+        .args(["develop.applyLook", "dryRun=true"])
+        .arg(format!("path={}", out.display()))
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let lines: Vec<Value> = String::from_utf8_lossy(&r.stdout).lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    assert_eq!(lines.len(), 2, "{}", String::from_utf8_lossy(&r.stdout));
+    assert_eq!(lines[0]["ok"], true);
+    assert_eq!(lines[0]["result"]["values"], lines[1]["result"]["values"], "repeat stable");
+    assert!(lines[0]["result"]["values"]["exposure"].as_f64().unwrap().is_finite());
+    assert_eq!(lines[0]["result"]["look"]["samples"], 2);
+}
+
 fn tmp(name: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("lightcraft-cli-test-{}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();

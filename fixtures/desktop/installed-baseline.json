@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "kind": "installed-baseline-contract",
+  "artifact": { "record": "compiler-artifact-record", "sha256": "artifact-record-required-at-run" },
+  "source": { "revision": "RIGHT_GIT_SOURCE_REVISION", "hash": "source-tree-hash-from-right-release" },
+  "baseline": { "capture": "RightKit QA evidence for installed candidate identity and catalog recovery", "required": true },
+  "catalogRecovery": { "required": true, "method": "backup-mutated-catalog-restore", "assert": "logical photo state and counts recover from unchanged backup" },
+  "installerRollback": { "qualified": false, "requiredForCutover": true, "method": "separate candidate-install-failure-restore", "assert": "must be supplied by installation lane" },
+  "qualification": { "runner": "rightkit-qa", "control": "rightkit-control", "hidden": true, "webviews": ["WKWebView", "WebView2"] }
+}
