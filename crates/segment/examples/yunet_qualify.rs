@@ -59,32 +59,12 @@ enum Split {
     Heldout,
 }
 
-impl Split {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Train => "train",
-            Self::Development => "development",
-            Self::Heldout => "heldout",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum CropSlice {
     Full,
     Cropped,
     Smallfaces,
-}
-
-impl CropSlice {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Full => "full",
-            Self::Cropped => "cropped",
-            Self::Smallfaces => "smallfaces",
-        }
-    }
 }
 
 /// Ground truth box normalized to supplied PPM width/height: 0 <= x/y <= 1.
@@ -614,11 +594,9 @@ fn match_detections(detections: &[Detection], truth: &[NormalizedBox], width: us
             }
             let target_box = [target.x0, target.y0, target.x1, target.y1];
             let score = iou(&detection_box, &target_box);
-            if score >= best_iou {
-                if score > best_iou || best.is_none_or(|old| truth_index < old) {
-                    best = Some(truth_index);
-                    best_iou = score;
-                }
+            if score >= best_iou && (score > best_iou || best.is_none_or(|old| truth_index < old)) {
+                best = Some(truth_index);
+                best_iou = score;
             }
         }
         if let Some(truth_index) = best {

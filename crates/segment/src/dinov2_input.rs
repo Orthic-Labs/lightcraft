@@ -251,14 +251,14 @@ mod tests {
             (128.0 / 255.0 - IMAGE_MEAN[1] as f32) / IMAGE_STD[1] as f32,
             (1.0 - IMAGE_MEAN[2] as f32) / IMAGE_STD[2] as f32,
         ];
-        for channel in 0..3 {
+        for (channel, expected) in expected.into_iter().enumerate() {
             let value = channels
                 .get(channel)
                 .and_then(|plane| plane.first())
                 .and_then(|row| row.first())
                 .copied()
                 .ok_or_else(|| Error::Model("test tensor shape".into()))?;
-            assert!((value - expected[channel]).abs() < 1e-6);
+            assert!((value - expected).abs() < 1e-6);
         }
         Ok(())
     }
