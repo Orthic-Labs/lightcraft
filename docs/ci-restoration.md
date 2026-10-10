@@ -1,5 +1,22 @@
 # CI restoration record
 
+## Restoration confirmed, 2026-10-10
+
+Maintainer selected GitHub's fork `re-enable` control. Dispatching existing
+`Packaging lint` workflow on main succeeded & created
+[run 38053737558](https://github.com/Orthic-Labs/lightcraft/actions/runs/38053737558)
+for source revision `561a076eed0d5bb506de3cdf09048ccd435ad8e2`.
+This confirms workflow execution is available again; validation results still
+require completed runs bound to their exact source revision.
+
+Full workspace CI runs on the next main push. Unsigned candidate qualification
+then uses that exact revision on macOS & Windows, with signing/publication
+disabled. Published RightKit foreground readers still require repair before
+macOS background evidence can qualify. Repair proposal is isolated outside
+shared SDK checkout; no SDK changes or dependency upgrades have been applied.
+
+## Suspension history
+
 Checked 2026-10-10 against `Orthic-Labs/lightcraft` at main revision
 `2fef37a4c466acd8c0ae88a1ac5a1d0e1218dbc0`.
 
