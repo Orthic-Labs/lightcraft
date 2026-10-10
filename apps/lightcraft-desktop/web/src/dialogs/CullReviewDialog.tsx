@@ -142,7 +142,7 @@ function resultProposal(result: Record<string, unknown>): Record<string, unknown
 
 function isStaleError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /stale|revision|proposal|changed|out of date/i.test(message);
+  return /stale|changed|out of date/i.test(message);
 }
 
 export function CullReviewDialog({ desktop, photoIds, photos, onClose }: CullReviewDialogProps) {

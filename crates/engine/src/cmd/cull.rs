@@ -1210,4 +1210,89 @@ mod tests {
         assert!(result.value["proposal"]["photos"].as_array().unwrap().is_empty());
         validate_measurement_timing(&job, &result.value["measurementTiming"]).unwrap();
     }
+
+    #[test]
+    fn native_json_roundtrip_preserves_file_identity_f32_binding_and_apply_plan() {
+        let suffix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("lightcraft-cull-transport-{}-{suffix}.raw", std::process::id()));
+        std::fs::write(&path, b"owned cull transport fixture").unwrap();
+        let path_string = path.to_string_lossy().into_owned();
+
+        let mut session = Session::new();
+        let id = PhotoId(9_001);
+        let mut photo = lightcraft_catalog::Photo::new(
+            id,
+            lightcraft_catalog::Source::File { path: path_string.clone() },
+            "native-transport.raw",
+            "RAW",
+            64,
+            64,
+            "2026-10-10T00:00:00",
+        );
+        photo.file_size = std::fs::metadata(&path).unwrap().len();
+        session.catalog.apply(lightcraft_catalog::Op::AddPhoto { photo: Box::new(photo) }).unwrap();
+        session.catalog.revision = 1_u64 << 32;
+        let loader_path = path_string.clone();
+        session.media.file_loader = Some(std::sync::Arc::new(move |source, _| {
+            if source != loader_path {
+                return Err(format!("unexpected cull fixture source: {source}"));
+            }
+            Ok((lightcraft_raster::Rgb32f::filled(64, 64, [0.5, 0.5, 0.5]), lightcraft_pipeline::SourceInfo::default()))
+        }));
+
+        let source = session.catalog.photo(id).unwrap().clone();
+        let source_identity_before = source_identity(&source);
+        let source_again = session.catalog.photo(id).unwrap().clone();
+        assert_eq!(source_identity(&source), source_identity(&source_again));
+        let job = session.plan_cull_job(&[id], Some(100.0), true).unwrap();
+        let snapshot = job.photos[0].clone();
+        assert_eq!(snapshot.source, source_identity_before);
+
+        let sharpness = 49.96_f32;
+        let clipped = 0.125_f32;
+        let row = CullRow {
+            id,
+            file_name: snapshot.file_name.clone(),
+            sharpness,
+            clipped,
+            source: snapshot.source.clone(),
+            flag: snapshot.flag,
+            group: None,
+            best: false,
+            decision: lightcraft_pipeline::cull::report::Decision::Reject,
+            uncertainty: lightcraft_pipeline::cull::report::Uncertainty::Low,
+            reason_codes: vec![lightcraft_pipeline::cull::report::ReasonCode::BelowRejectThreshold],
+        };
+        let result = proposal_result_revision(
+            job.catalog_revision,
+            std::slice::from_ref(&row),
+            Vec::new(),
+            Some(100.0),
+            true,
+            timing_report(vec![photo_timing(id, Some(1.0), Some(2.0), 3.0, TimingStatus::Ok)], 0.5, 4.0),
+        );
+        let proposal = result["proposal"].clone();
+        let binding = proposal["binding"].clone();
+        let transport = serde_json::from_str::<Value>(
+            &serde_json::to_string(&json!({
+                "proposal": proposal,
+                "accept": [{"id": id.0, "flag": "reject"}],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let transported_photo = &transport["proposal"]["photos"][0];
+        assert_eq!(transport["proposal"]["binding"], binding);
+        assert_eq!(transport["proposal"]["catalogRevision"], 1_u64 << 32);
+        assert_eq!(transported_photo["source"], source_identity_before);
+        assert_eq!(transported_photo["group"], Value::Null);
+        assert_eq!(transported_photo["proposedFlag"], "reject");
+        assert_eq!((transported_photo["sharpness"].as_f64().unwrap() as f32).to_bits(), sharpness.to_bits());
+        assert_eq!((transported_photo["clipped"].as_f64().unwrap() as f32).to_bits(), clipped.to_bits());
+
+        let prepared = session.plan_cull_apply(&transport).expect("unchanged native-shaped proposal should plan");
+        assert_eq!(prepared.job.catalog_revision, 1_u64 << 32);
+        assert_eq!(prepared.job.photos[0].source, source_identity_before);
+        std::fs::remove_file(path).unwrap();
+    }
 }
