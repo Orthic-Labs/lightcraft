@@ -16,7 +16,10 @@ mod native {
     use std::time::Instant;
 
     use candle_core::{Device, Tensor};
+    use lightcraft_color::transfer::srgb_to_linear;
     use lightcraft_fetch::sha256_bytes;
+    use lightcraft_pipeline::cull::{signature_checked, similarity_checked};
+    use lightcraft_raster::Rgb32f;
     use lightcraft_segment::dinov2::DinoV2;
     use lightcraft_segment::dinov2_artifact::{MODEL_BYTES, MODEL_SHA256, load_file};
     use lightcraft_segment::dinov2_input::{DinoInputSize, preprocess_rgb8};
@@ -41,6 +44,7 @@ mod native {
     const REPEAT_MAX_ABS_TOLERANCE: f64 = 1e-3;
     const REPEAT_MIN_COSINE: f32 = 0.999;
     const SYNTHETIC_CROSS_SHOOT: &str = "cross-shoot";
+    const BASELINE_ZERO_NORM_EPSILON: f64 = 1e-6;
 
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -103,6 +107,7 @@ mod native {
         device: String,
         out: PathBuf,
         threshold: f32,
+        baseline_threshold: f32,
         size: DinoInputSize,
         repeats: usize,
         hardware: String,
@@ -141,6 +146,13 @@ mod native {
 
     #[derive(Clone, Debug, Serialize)]
     #[serde(rename_all = "camelCase")]
+    struct BaselineTimingReport {
+        signature_us: u64,
+        signature_cache_state: &'static str,
+    }
+
+    #[derive(Clone, Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
     struct ImageReport {
         id: String,
         shoot_id: String,
@@ -150,6 +162,8 @@ mod native {
         input_ppm_sha256: String,
         input_rgb_sha256: String,
         timing: TimingReport,
+        baseline_timing: BaselineTimingReport,
+        baseline_signature_nonzero: bool,
     }
 
     #[derive(Clone, Debug, Serialize)]
@@ -165,12 +179,16 @@ mod native {
         embedding_cosine: f32,
         eligible: bool,
         predicted_similar: Option<bool>,
+        baseline_similarity: Option<f32>,
+        baseline_eligible: bool,
+        baseline_predicted_similar: Option<bool>,
     }
 
     #[derive(Clone, Debug, Default, Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Metrics {
         all_pairs: usize,
+        scored_pairs: usize,
         eligible_pairs: usize,
         unknown_pairs: usize,
         true_positive: usize,
@@ -180,6 +198,7 @@ mod native {
         coverage: Option<f64>,
         precision: Option<f64>,
         recall: Option<f64>,
+        false_merge_rate: Option<f64>,
     }
 
     #[derive(Clone, Debug, Serialize)]
@@ -195,6 +214,15 @@ mod native {
         shoot_id: String,
         split: Split,
         metrics: Metrics,
+    }
+
+    #[derive(Clone, Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct MethodReport {
+        method: &'static str,
+        overall: Metrics,
+        by_split: Vec<SplitReport>,
+        by_shoot: Vec<ShootReport>,
     }
 
     #[derive(Clone, Debug, Serialize)]
@@ -231,6 +259,8 @@ mod native {
         resize_short_edge: usize,
         threshold: f32,
         threshold_provenance: &'static str,
+        baseline_threshold: f32,
+        baseline_threshold_provenance: &'static str,
         repeats: usize,
         preprocessing: &'static str,
         model_load_us: u64,
@@ -242,6 +272,7 @@ mod native {
         pairs: Vec<PairReport>,
         reference: ReferenceReport,
         reference_file_sha256: Option<String>,
+        by_method: Vec<MethodReport>,
     }
 
     struct LoadedReference {
@@ -268,6 +299,7 @@ mod native {
         let model_load_us = elapsed_us(load_start);
 
         let mut embeddings = HashMap::with_capacity(manifest.images.len());
+        let mut baseline_signatures = HashMap::<String, [f32; 64]>::with_capacity(manifest.images.len());
         let mut image_reports = Vec::with_capacity(manifest.images.len());
         let mut image_index = HashMap::with_capacity(manifest.images.len());
         let mut pixel_splits = HashMap::<String, Split>::with_capacity(manifest.images.len());
@@ -277,7 +309,13 @@ mod native {
             let input_rgb_sha256 = sha256_bytes(&ppm.rgb);
             record_pixel_split(&mut pixel_splits, input_rgb_sha256.clone(), image.split).map_err(std::io::Error::other)?;
             let (embedding, timing) = embed_repeated(&model, &ppm, &cli, &device)?;
+            let baseline_start = Instant::now();
+            let baseline_image = ppm_to_linear_rgb(&ppm).map_err(std::io::Error::other)?;
+            let baseline_signature = signature_checked(&baseline_image).map_err(std::io::Error::other)?;
+            let baseline_signature_us = elapsed_us(baseline_start);
+            let baseline_signature_nonzero = signature_is_nonzero(&baseline_signature);
             embeddings.insert(image.id.clone(), embedding);
+            baseline_signatures.insert(image.id.clone(), baseline_signature);
             image_index.insert(image.id.clone(), image);
             image_reports.push(ImageReport {
                 id: image.id.clone(),
@@ -288,6 +326,11 @@ mod native {
                 input_ppm_sha256: ppm.ppm_sha256.clone(),
                 input_rgb_sha256,
                 timing,
+                baseline_timing: BaselineTimingReport {
+                    signature_us: baseline_signature_us,
+                    signature_cache_state: "linearized P6 RGB8 + signature computed once; signature cached for pair scoring",
+                },
+                baseline_signature_nonzero,
             });
         }
 
@@ -299,6 +342,12 @@ mod native {
             let right_image = image_index.get(&pair.right_id).ok_or_else(|| std::io::Error::other("pair right image missing"))?;
             let embedding_cosine = DinoV2::cosine(left, right)?;
             let eligible = !matches!(pair.label, PairLabel::Unknown);
+            let left_signature =
+                baseline_signatures.get(&pair.left_id).ok_or_else(|| std::io::Error::other("pair left baseline signature missing"))?;
+            let right_signature =
+                baseline_signatures.get(&pair.right_id).ok_or_else(|| std::io::Error::other("pair right baseline signature missing"))?;
+            let (baseline_similarity, baseline_eligible, baseline_predicted_similar) =
+                baseline_pair(left_signature, right_signature, pair.label, cli.baseline_threshold)?;
             pair_reports.push(PairReport {
                 id: pair.id.clone(),
                 left_id: pair.left_id.clone(),
@@ -310,6 +359,9 @@ mod native {
                 embedding_cosine,
                 eligible,
                 predicted_similar: eligible.then_some(embedding_cosine >= cli.threshold),
+                baseline_similarity,
+                baseline_eligible,
+                baseline_predicted_similar,
             });
         }
 
@@ -317,6 +369,9 @@ mod native {
         let overall = metrics(&pair_reports, None, None);
         let by_split = split_reports(&pair_reports);
         let by_shoot = shoot_reports(&pair_reports);
+        let baseline_overall = metrics_for_method(&pair_reports, None, None, Method::Baseline);
+        let baseline_by_split = split_reports_for_method(&pair_reports, Method::Baseline);
+        let baseline_by_shoot = shoot_reports_for_method(&pair_reports, Method::Baseline);
         let receipt = Receipt {
             schema: RECEIPT_SCHEMA,
             qualification: "UNQUALIFIED",
@@ -333,17 +388,28 @@ mod native {
             resize_short_edge: cli.size.resize_short_edge(),
             threshold: cli.threshold,
             threshold_provenance: "externally supplied; frozen status unverified",
+            baseline_threshold: cli.baseline_threshold,
+            baseline_threshold_provenance: "externally supplied; frozen status unverified; classical signature cosine",
             repeats: cli.repeats,
             preprocessing: "dinov2_input-v1; RGB8 P6; bicubic A=-0.5; half-pixel; resize short edge; center crop; round/clamp RGB8; ImageNet normalization",
             model_load_us,
             model_load_cache_state: "single-process-start; filesystem-cache-state-unspecified",
-            overall,
-            by_split,
-            by_shoot,
+            overall: overall.clone(),
+            by_split: by_split.clone(),
+            by_shoot: by_shoot.clone(),
             images: image_reports,
             pairs: pair_reports,
             reference: reference_report,
             reference_file_sha256: reference.as_ref().map(|loaded| loaded.sha256.clone()),
+            by_method: vec![
+                MethodReport { method: "dinov2", overall: overall.clone(), by_split: by_split.clone(), by_shoot: by_shoot.clone() },
+                MethodReport {
+                    method: "classical-signature",
+                    overall: baseline_overall.clone(),
+                    by_split: baseline_by_split.clone(),
+                    by_shoot: baseline_by_shoot.clone(),
+                },
+            ],
         };
         write_create_new_json(&cli.out, &receipt)?;
         Ok(())
@@ -365,6 +431,7 @@ mod native {
         let mut device = None;
         let mut out = None;
         let mut threshold = None;
+        let mut baseline_threshold = None;
         let mut size = DinoInputSize::Small224;
         let mut repeats = 3usize;
         let mut hardware = None;
@@ -377,6 +444,7 @@ mod native {
                 "--device" => device = Some(next_arg(&mut args, &flag)?),
                 "--out" => out = Some(next_arg(&mut args, &flag)?),
                 "--threshold" => threshold = Some(parse_threshold(next_arg(&mut args, &flag)?, &flag)?),
+                "--baseline-threshold" => baseline_threshold = Some(parse_threshold(next_arg(&mut args, &flag)?, &flag)?),
                 "--size" => size = parse_size(&next_arg(&mut args, &flag)?)?,
                 "--repeats" => {
                     repeats = next_arg(&mut args, &flag)?.parse::<usize>().map_err(|_| "--repeats must be an integer".to_string())?;
@@ -397,6 +465,7 @@ mod native {
             device: device.ok_or_else(|| "--device cpu|metal is required".to_string())?,
             out: PathBuf::from(out.ok_or_else(|| "--out is required".to_string())?),
             threshold: threshold.ok_or_else(|| "--threshold is required".to_string())?,
+            baseline_threshold: baseline_threshold.ok_or_else(|| "--baseline-threshold is required".to_string())?,
             size,
             repeats,
             hardware: hardware.ok_or_else(|| "--hardware is required".to_string())?,
@@ -406,7 +475,7 @@ mod native {
     }
 
     fn usage() -> String {
-        "usage: dinov2_qualify --weights FILE --manifest FILE --device cpu|metal --out FILE --threshold -1..1 --hardware TEXT [--size small224|large518] [--repeats 2..30] [--source-revision TEXT] [--reference-embeddings FILE]".into()
+        "usage: dinov2_qualify --weights FILE --manifest FILE --device cpu|metal --out FILE --threshold -1..1 --baseline-threshold -1..1 --hardware TEXT [--size small224|large518] [--repeats 2..30] [--source-revision TEXT] [--reference-embeddings FILE]".into()
     }
 
     fn next_arg(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
@@ -594,6 +663,44 @@ mod native {
         Ok(ppm)
     }
 
+    fn ppm_to_linear_rgb(ppm: &Ppm) -> Result<Rgb32f, String> {
+        let pixels = ppm.width.checked_mul(ppm.height).ok_or_else(|| "PPM dimensions overflow".to_string())?;
+        let expected = pixels.checked_mul(3).ok_or_else(|| "PPM RGB length overflow".to_string())?;
+        if ppm.rgb.len() != expected {
+            return Err(format!("PPM RGB length is {}, expected {expected}", ppm.rgb.len()));
+        }
+        let data = ppm
+            .rgb
+            .chunks_exact(3)
+            .map(|pixel| {
+                [
+                    srgb_to_linear(f32::from(pixel[0]) / 255.0),
+                    srgb_to_linear(f32::from(pixel[1]) / 255.0),
+                    srgb_to_linear(f32::from(pixel[2]) / 255.0),
+                ]
+            })
+            .collect();
+        Ok(Rgb32f { width: ppm.width, height: ppm.height, data })
+    }
+
+    fn signature_is_nonzero(signature: &[f32; 64]) -> bool {
+        signature.iter().map(|value| f64::from(*value) * f64::from(*value)).sum::<f64>() > BASELINE_ZERO_NORM_EPSILON
+    }
+
+    fn baseline_pair(
+        left: &[f32; 64],
+        right: &[f32; 64],
+        label: PairLabel,
+        threshold: f32,
+    ) -> Result<(Option<f32>, bool, Option<bool>), Box<dyn std::error::Error>> {
+        if !signature_is_nonzero(left) || !signature_is_nonzero(right) {
+            return Ok((None, false, None));
+        }
+        let score = similarity_checked(left, right).map_err(std::io::Error::other)?;
+        let eligible = !matches!(label, PairLabel::Unknown);
+        Ok((Some(score), eligible, eligible.then_some(score >= threshold)))
+    }
+
     fn parse_ppm(bytes: &[u8]) -> Result<Ppm, String> {
         let mut cursor = 0usize;
         if next_token(bytes, &mut cursor)? != b"P6" {
@@ -729,7 +836,17 @@ mod native {
         start.elapsed().as_micros().min(u64::MAX as u128) as u64
     }
 
+    #[derive(Clone, Copy)]
+    enum Method {
+        Dino,
+        Baseline,
+    }
+
     fn metrics(pairs: &[PairReport], split: Option<Split>, shoot: Option<&str>) -> Metrics {
+        metrics_for_method(pairs, split, shoot, Method::Dino)
+    }
+
+    fn metrics_for_method(pairs: &[PairReport], split: Option<Split>, shoot: Option<&str>, method: Method) -> Metrics {
         let mut result = Metrics::default();
         for pair in pairs {
             if split.is_some_and(|value| value != pair.split) {
@@ -741,19 +858,26 @@ mod native {
                     continue;
                 }
             }
-            add_pair(&mut result, pair);
+            add_pair_for_method(&mut result, pair, method);
         }
         finish_metrics(result)
     }
 
-    fn add_pair(result: &mut Metrics, pair: &PairReport) {
+    fn add_pair_for_method(result: &mut Metrics, pair: &PairReport, method: Method) {
         result.all_pairs = result.all_pairs.saturating_add(1);
-        if !pair.eligible {
+        let (scored, eligible, predicted) = match method {
+            Method::Dino => (true, pair.eligible, pair.predicted_similar),
+            Method::Baseline => (pair.baseline_similarity.is_some(), pair.baseline_eligible, pair.baseline_predicted_similar),
+        };
+        if scored {
+            result.scored_pairs = result.scored_pairs.saturating_add(1);
+        }
+        if !eligible {
             result.unknown_pairs = result.unknown_pairs.saturating_add(1);
             return;
         }
         result.eligible_pairs = result.eligible_pairs.saturating_add(1);
-        let predicted = pair.predicted_similar.unwrap_or(false);
+        let predicted = predicted.unwrap_or(false);
         match (pair.label, predicted) {
             (PairLabel::Similar, true) => result.true_positive = result.true_positive.saturating_add(1),
             (PairLabel::Similar, false) => result.false_negative = result.false_negative.saturating_add(1),
@@ -767,6 +891,7 @@ mod native {
         result.coverage = ratio(result.eligible_pairs, result.all_pairs);
         result.precision = ratio(result.true_positive, result.true_positive.saturating_add(result.false_positive));
         result.recall = ratio(result.true_positive, result.true_positive.saturating_add(result.false_negative));
+        result.false_merge_rate = ratio(result.false_positive, result.false_positive.saturating_add(result.true_negative));
         result
     }
 
@@ -778,12 +903,23 @@ mod native {
     }
 
     fn shoot_reports(pairs: &[PairReport]) -> Vec<ShootReport> {
+        shoot_reports_for_method(pairs, Method::Dino)
+    }
+
+    fn shoot_reports_for_method(pairs: &[PairReport], method: Method) -> Vec<ShootReport> {
         let mut grouped = BTreeMap::<(String, Split), Metrics>::new();
         for pair in pairs {
             let shoot = if pair.left_shoot_id == pair.right_shoot_id { pair.left_shoot_id.clone() } else { SYNTHETIC_CROSS_SHOOT.into() };
-            add_pair(grouped.entry((shoot, pair.split)).or_default(), pair);
+            add_pair_for_method(grouped.entry((shoot, pair.split)).or_default(), pair, method);
         }
         grouped.into_iter().map(|((shoot_id, split), values)| ShootReport { shoot_id, split, metrics: finish_metrics(values) }).collect()
+    }
+
+    fn split_reports_for_method(pairs: &[PairReport], method: Method) -> Vec<SplitReport> {
+        [Split::Train, Split::Validation, Split::Test]
+            .into_iter()
+            .map(|split| SplitReport { split, metrics: metrics_for_method(pairs, Some(split), None, method) })
+            .collect()
     }
 
     fn reference_report(
@@ -863,7 +999,7 @@ mod native {
 
     fn write_create_new_json(path: &Path, receipt: &Receipt) -> Result<(), Box<dyn std::error::Error>> {
         let bytes = serde_json::to_vec_pretty(receipt)?;
-        if bytes.len() > MAX_RECEIPT_BYTES {
+        if bytes.len().checked_add(1).is_none_or(|size| size > MAX_RECEIPT_BYTES) {
             return Err(std::io::Error::other(format!("receipt exceeds {MAX_RECEIPT_BYTES} byte bound")).into());
         }
         let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
@@ -964,6 +1100,64 @@ mod native {
             assert!(parse_ppm(&bytes).is_ok());
             bytes.push(2);
             assert!(parse_ppm(&bytes).is_err());
+        }
+
+        #[test]
+        fn baseline_converts_p6_srgb_to_linear_channels() -> Result<(), String> {
+            let ppm = Ppm { width: 1, height: 1, rgb: vec![128, 32, 255], ppm_sha256: String::new() };
+            let image = ppm_to_linear_rgb(&ppm)?;
+            assert!((image.data[0][0] - srgb_to_linear(128.0 / 255.0)).abs() < 1e-7);
+            assert!((image.data[0][1] - srgb_to_linear(32.0 / 255.0)).abs() < 1e-7);
+            assert_eq!(image.data[0][2], 1.0);
+            Ok(())
+        }
+
+        #[test]
+        fn flat_baseline_signature_abstains_instead_of_predicting_different() -> Result<(), Box<dyn std::error::Error>> {
+            let flat_image = Rgb32f::filled(8, 8, [0.2; 3]);
+            let flat = signature_checked(&flat_image).map_err(std::io::Error::other)?;
+            let mut patterned = [0.0; 64];
+            patterned[0] = 1.0;
+            let result = baseline_pair(&flat, &patterned, PairLabel::Different, 0.5)?;
+            assert_eq!(result.0, None);
+            assert!(!result.1);
+            assert_eq!(result.2, None);
+            Ok(())
+        }
+
+        #[test]
+        fn method_metrics_keep_scored_eligible_unknown_denominators_separate() {
+            let mut pairs = Vec::new();
+            let make = |id: &str, label: PairLabel, score: Option<f32>, eligible: bool, predicted: Option<bool>| PairReport {
+                id: id.into(),
+                left_id: "left".into(),
+                right_id: id.into(),
+                left_shoot_id: "shoot".into(),
+                right_shoot_id: "shoot".into(),
+                split: Split::Test,
+                label,
+                embedding_cosine: score.unwrap_or(0.0),
+                eligible: !matches!(label, PairLabel::Unknown),
+                predicted_similar: (!matches!(label, PairLabel::Unknown)).then_some(score.unwrap_or(0.0) >= 0.5),
+                baseline_similarity: score,
+                baseline_eligible: eligible,
+                baseline_predicted_similar: predicted,
+            };
+            pairs.push(make("similar", PairLabel::Similar, Some(0.9), true, Some(true)));
+            pairs.push(make("false-merge", PairLabel::Different, Some(0.9), true, Some(true)));
+            pairs.push(make("true-negative", PairLabel::Different, Some(0.1), true, Some(false)));
+            pairs.push(make("unknown", PairLabel::Unknown, Some(0.9), false, None));
+            pairs.push(make("flat", PairLabel::Similar, None, false, None));
+            let metrics = metrics_for_method(&pairs, None, None, Method::Baseline);
+            assert_eq!(metrics.all_pairs, 5);
+            assert_eq!(metrics.scored_pairs, 4);
+            assert_eq!(metrics.eligible_pairs, 3);
+            assert_eq!(metrics.unknown_pairs, 2);
+            assert_eq!((metrics.true_positive, metrics.false_positive, metrics.true_negative, metrics.false_negative), (1, 1, 1, 0));
+            assert_eq!(metrics.coverage, Some(0.6));
+            assert_eq!(metrics.precision, Some(0.5));
+            assert_eq!(metrics.recall, Some(1.0));
+            assert_eq!(metrics.false_merge_rate, Some(0.5));
         }
     }
 }

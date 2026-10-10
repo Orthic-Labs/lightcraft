@@ -20,6 +20,12 @@ candle-core = { workspace = true }
 candle-nn = { workspace = true }
 lightcraft-fetch = { workspace = true }
 
+# Offline qualification reuses existing production baseline; no new external packages.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+lightcraft-color = { workspace = true }
+lightcraft-raster = { workspace = true }
+lightcraft-pipeline = { workspace = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 candle-core = { workspace = true, features = ["metal"] }
 candle-nn = { workspace = true, features = ["metal"] }

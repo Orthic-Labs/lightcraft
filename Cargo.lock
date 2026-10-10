@@ -4359,7 +4359,10 @@ version = "0.4.0"
 dependencies = [
  "candle-core",
  "candle-nn",
+ "lightcraft-color",
  "lightcraft-fetch",
+ "lightcraft-pipeline",
+ "lightcraft-raster",
  "log",
  "serde",
  "serde_json",

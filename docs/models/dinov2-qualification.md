@@ -16,12 +16,13 @@ cargo run -p lightcraft-segment --example dinov2_qualify -- \
   --hardware "Apple M-series CPU, host label supplied by operator" \
   --size small224 \
   --threshold 0.80 \
+  --baseline-threshold 0.80 \
   --repeats 3 \
   --source-revision REVISION \
   --out /path/to/new-receipt.json
 ```
 
-`--device` is `cpu` or `metal` (Metal is macOS-only). `--size` is `small224` or `large518`; the helper uses short-edge 256 or 592, then center-crops 224 or 518. Receipt records both `inputSide` and `resizeShortEdge` from `dinov2_input-v1`: bicubic `A=-0.5`, half-pixel coordinates, edge tap normalization, floor long-edge sizing, floor-centered crop, round/clamp RGB8, then ImageNet normalization. This is Ember's bounded contract; it does not claim byte-for-byte torchvision or Pillow parity. `--threshold` is required, finite, externally supplied, and frozen status is unverified; receipt records this provenance. `--repeats` is bounded to `2..=30`. `--out` is create-new: an existing path is refused. `--source-revision` and `--hardware` are bounded receipt metadata (maximum 512 bytes).
+`--device` is `cpu` or `metal` (Metal is macOS-only). `--size` is `small224` or `large518`; helper uses short-edge 256 or 592, then center-crops 224 or 518. Receipt records both `inputSide` & `resizeShortEdge` from `dinov2_input-v1`: bicubic `A=-0.5`, half-pixel coordinates, edge tap normalization, floor long-edge sizing, floor-centered crop, round/clamp RGB8, then ImageNet normalization. This is Ember's bounded contract; it does not claim byte-for-byte torchvision or Pillow parity. `--threshold` & required `--baseline-threshold` are finite, externally supplied, separately frozen, & status remains unverified; receipt records each provenance. DINO threshold applies embedding cosine; baseline threshold applies classical signature cosine. `--repeats` is bounded to `2..=30`. `--out` is create-new: existing path is refused. `--source-revision` & `--hardware` are bounded receipt metadata (maximum 512 bytes).
 
 The model loader reads one bounded file and verifies exact pinned bytes before constructing tensors. Receipt records `modelBytes` and `modelSha256` from `dinov2_artifact`, `manifestSha256`, optional reference-file SHA, and each image's PPM-file and actual RGB input SHA, plus model-load timing. Per-image timing separates first embedding from repeat p50/p95, records repeat max-absolute error and minimum cosine, and rejects repeats beyond max-absolute `1e-3` or cosine `0.999`; repeats recompute preprocessing and forward passes, while final embeddings are cached for pair scoring. These are elapsed harness timings, not cold-process, filesystem, or 2,000-RAW benchmarks.
 
@@ -49,13 +50,13 @@ The validator caps manifest bytes, image count (10,000), pair count (50,000), ID
 
 ## Receipt metrics
 
-Each image report includes supplied width/height and PPM/RGB hashes without a path. Each pair reports its opaque IDs, split, labels, pair embedding cosine, eligibility, and threshold decision. Pair embedding cosine is a similarity score; reference vector cosine fields describe numerical agreement with supplied embeddings and are not pair agreement. `overall`, `bySplit`, and `byShoot` report:
+Each image report includes supplied width/height & PPM/RGB hashes without path. It also records one-time baseline timing for P6 RGB8 sRGB-to-linear conversion plus `signature_checked`, cache state, & whether signature norm is nonzero. Each pair reports opaque IDs, split, labels, DINO embedding cosine, classical baseline cosine when available, method-specific eligibility, & threshold decisions. Pair embedding cosine is a similarity score; reference vector cosine fields describe numerical agreement with supplied embeddings & are not pair agreement. `byMethod` contains `dinov2` & `classical-signature` reports, each with `overall`, `bySplit`, & `byShoot`. Existing top-level DINO `overall`, `bySplit`, & `byShoot` remain:
 
-- `allPairs`, `eligiblePairs`, `unknownPairs`;
+- `allPairs`, `scoredPairs`, `eligiblePairs`, `unknownPairs`;
 - `truePositive`, `falsePositive`, `trueNegative`, `falseNegative`;
-- `coverage` (`eligiblePairs / allPairs`), precision, and recall.
+- `coverage` (`eligiblePairs / allPairs`), precision, recall, & false-merge rate (`falsePositive / (falsePositive + trueNegative)`).
 
-Pairs whose endpoints use different shoots are grouped under the synthetic `cross-shoot` report key; that shoot ID is reserved in manifests, and no pair is duplicated. Shoot-disjoint split validation still applies to every image.
+Baseline signatures use production `lightcraft_pipeline::cull::signature_checked` & `similarity_checked` on one `Rgb32f` image whose P6 channels pass through `lightcraft_color::transfer::srgb_to_linear`. Flat zero-norm signatures abstain: baseline score is absent, pair is unknown, & it never becomes false different. `scoredPairs` counts available method scores; `eligiblePairs` counts scored pairs with known labels; `unknownPairs` counts label unknowns plus method abstentions. Pairs whose endpoints use different shoots are grouped under synthetic `cross-shoot`; that shoot ID is reserved in manifests, & no pair is duplicated. Shoot-disjoint split validation still applies to every image.
 
 ## Optional reference embeddings
 
