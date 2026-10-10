@@ -485,7 +485,7 @@ mod tests {
     fn rejects_hallucinated_or_missing_ids() {
         let proxy = proxy(false).expect("valid proxy fixture must construct");
         let mut result = valid_result();
-        if let Some(item) = result.items.iter_mut().nth(1) {
+        if let Some(item) = result.items.get_mut(1) {
             item.id = "ghost".into();
         }
         let inputs = [ProxyInput { id: "p0", proxy: &proxy }, ProxyInput { id: "p1", proxy: &proxy }];
@@ -500,12 +500,12 @@ mod tests {
         let proxy = proxy(false).expect("valid proxy fixture must construct");
         let inputs = [ProxyInput { id: "p0", proxy: &proxy }, ProxyInput { id: "p1", proxy: &proxy }];
         let mut result = valid_result();
-        if let Some(item) = result.items.iter_mut().next() {
+        if let Some(item) = result.items.first_mut() {
             item.uncertainty = Uncertainty::Unknown;
         }
         assert!(validate_result(&inputs, &result).is_err());
         let mut result = valid_result();
-        if let Some(item) = result.items.iter_mut().next() {
+        if let Some(item) = result.items.first_mut() {
             item.decision = Decision::Keep;
         }
         assert!(validate_result(&inputs, &result).is_err());
@@ -517,7 +517,7 @@ mod tests {
         let inputs = [ProxyInput { id: "p0", proxy: &proxy }, ProxyInput { id: "p1", proxy: &proxy }];
         let mut result = valid_result();
         result.acceptable_winner_ids.push("p1".into());
-        if let Some(item) = result.items.iter_mut().nth(1) {
+        if let Some(item) = result.items.get_mut(1) {
             item.decision = Decision::Pick;
             item.reason_codes = vec![ReasonCode::TieForBest];
             item.reason = "equally supported candidate".into();

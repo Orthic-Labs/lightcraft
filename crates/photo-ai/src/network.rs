@@ -89,16 +89,6 @@ fn echoes_key(bytes: &[u8], key: &str) -> bool {
     std::str::from_utf8(bytes).is_ok_and(|text| text.contains(key)) || serde_json::from_slice::<Value>(bytes).is_ok_and(|value| contains(&value, key))
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn escaped_credentials_cannot_enter_receipts() {
-        assert!(super::echoes_key(br#"{"usage":{"extra":"sk-\u0074est"}}"#, "sk-test"));
-        assert!(super::echoes_key(br#"{"sk-\u0074est":"value"}"#, "sk-test"));
-        assert!(!super::echoes_key(br#"{"usage":{"cost":0.001}}"#, "sk-test"));
-    }
-}
-
 fn limits(cancel: &AtomicBool, seconds: u64) -> Limits<'_> {
     Limits {
         connect: Duration::from_secs(5),
@@ -152,4 +142,14 @@ pub fn preflight(catalog: &Value, model: &str) -> Result<Value, String> {
         return Err("model revision changed; refresh experiment explicitly".into());
     }
     Ok(item.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn escaped_credentials_cannot_enter_receipts() {
+        assert!(super::echoes_key(br#"{"usage":{"extra":"sk-\u0074est"}}"#, "sk-test"));
+        assert!(super::echoes_key(br#"{"sk-\u0074est":"value"}"#, "sk-test"));
+        assert!(!super::echoes_key(br#"{"usage":{"cost":0.001}}"#, "sk-test"));
+    }
 }
