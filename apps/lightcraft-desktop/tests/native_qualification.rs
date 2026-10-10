@@ -1997,7 +1997,8 @@ fn native_hidden_control_journeys() {
                                 .expect("develop route readback must execute");
                             assert_eq!(route.as_str(), Some("detail"), "D must select Detail route");
                             let develop = scenario.dir().join(format!("route-develop-{width}x{height}.png"));
-                            control.screenshot_to(&develop).expect("develop route screenshot must be captured");
+                            wait_for_rendered_preview(control, "img.stage-preview", None);
+                            capture_visible_tool_preview(control, &develop);
                             assert!(develop.is_file());
                             click_dom(control, ".lc-inspector button[data-inspector-collapse]", "manual inspector collapse must execute");
                             wait_for_dom(control, "return (() => { const e = document.querySelector('.lc-inspector'); const layout = e?.parentElement; if (!e || !layout) return false; const r = e.getBoundingClientRect(); const rail = e.querySelector('.lc-inspector__rail')?.getBoundingClientRect(); return e.classList.contains('is-collapsed') && layout.classList.contains('is-inspector-collapsed') && Math.abs(r.width - 44) < 2 && !!rail && Math.abs(rail.right - innerWidth) < 2; })();");
