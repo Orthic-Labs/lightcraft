@@ -302,10 +302,10 @@ pub fn validate_result(proxies: &[ProxyInput<'_>], result: &CullingResult) -> Re
         if item.confidence_kind != ConfidenceKind::Unqualified {
             return Err("confidence must remain explicitly unqualified".into());
         }
-        if let Some(value) = item.confidence {
-            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
-                return Err("confidence must be finite in 0..1".into());
-            }
+        if let Some(value) = item.confidence
+            && (!value.is_finite() || !(0.0..=1.0).contains(&value))
+        {
+            return Err("confidence must be finite in 0..1".into());
         }
     }
     if item_ids.len() != input_ids.len() {
