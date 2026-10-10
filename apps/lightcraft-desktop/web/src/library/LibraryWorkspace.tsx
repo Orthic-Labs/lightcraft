@@ -506,10 +506,13 @@ function VirtualPhotoGrid({ snapshot, mode, thumbSize }: { snapshot: DesktopSnap
     ? Math.max(viewportHeight, pageCount * estimatedPageHeight + Math.max(0, pageCount - 1) * gap + Array.from(pageHeights.current.values()).reduce((delta, height) => delta + height - estimatedPageHeight, 0) + 24)
     : Math.max(viewportHeight, rows * squareRowHeight + 24);
   const showNextPage = isJustified && nextSliceReady && scrollTop + viewportHeight >= currentPageTop + pageHeight(pageIndex) - rowHeight * 2;
+  // Replace only empty geometry DOM when hidden WebKit keeps stale inline layout.
+  // Grid window & previews retain their identity, scroll position & interaction state.
+  const spacerGeometryKey = `${geometrySignature}:${viewportHeight}:${totalHeight}`;
   return (
     <div className={`lc-grid-scroll ${mode === 'squareGrid' ? 'is-square' : 'is-aspect'}`} ref={scrollRef} onScroll={onScroll} onClick={() => setMenu(null)}>
-      <div className="lc-grid-spacer" style={{ height: totalHeight }}>
-        <div className={`lc-grid-window${mode === 'photoGrid' ? ' is-justified' : ''}`} style={{ top: mode === 'photoGrid' ? currentPageTop : squareWindowTop, gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, gap }} onKeyDown={(event) => {
+      <div className="lc-grid-spacer" key={spacerGeometryKey} style={{ height: totalHeight }} aria-hidden="true" />
+      <div className={`lc-grid-window${mode === 'photoGrid' ? ' is-justified' : ''}`} style={{ top: mode === 'photoGrid' ? currentPageTop : squareWindowTop, gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, gap }} onKeyDown={(event) => {
           if (event.key === 'ArrowRight') { event.preventDefault(); moveSelection(1, event); }
           if (event.key === 'ArrowLeft') { event.preventDefault(); moveSelection(-1, event); }
           if (event.key === 'ArrowDown') { event.preventDefault(); moveSelection(columns, event); }
@@ -526,7 +529,6 @@ function VirtualPhotoGrid({ snapshot, mode, thumbSize }: { snapshot: DesktopSnap
           })}</>}
           {slice.loading && photos.length === 0 && <div className="lc-grid-loading" role="status">Loading photos…</div>}
           {slice.error && <div className="lc-grid-error" role="alert">Unable to load photos: {slice.error}</div>}
-        </div>
       </div>
       <GridMenu menu={menu} albums={snapshot.albums} close={() => setMenu(null)} />
     </div>

@@ -70,7 +70,7 @@
 .lc-filter-save { display: flex; align-items: center; gap: 5px; margin-left: auto; }
 .lc-filter-save button { min-height: 28px; padding: 4px 8px; border: 1px solid var(--lc-border); border-radius: 5px; background: transparent; color: inherit; cursor: pointer; font-size: 11px; }
 .lc-grid-scroll { min-height: 0; overflow: auto; background: var(--lc-grid, #17191c); color: #fff; position: relative; }
-.lc-grid-spacer { position: relative; min-width: 100%; }
+.lc-grid-spacer { display: block; min-width: 100%; }
 .lc-grid-window { display: grid; position: absolute; right: 12px; left: 12px; min-height: 100px; align-items: start; }
 .lc-photo-cell { position: relative; min-width: 0; padding: 0; border: 0; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; text-align: left; font: inherit; }
 .lc-photo-frame { display: block; width: 100%; aspect-ratio: var(--lc-aspect); overflow: hidden; position: relative; border: 2px solid transparent; border-radius: 5px; background: #272a2e; }
