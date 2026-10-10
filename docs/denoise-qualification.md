@@ -30,4 +30,5 @@ An initial RGB candidate is post-demosaic. It cannot establish raw-mosaic recons
 
 ## Next evidence
 
-Current harness & regression tests have not executed on this revision. Restore fork Actions, produce baseline receipts, then compare a rights-cleared RGB candidate against identical procedural & consented photographic conditions. Keep source files & catalog authoritative; experimental intermediates belong in disposable cache state.
+Fork Actions are restored. Generated native candidate builds are configured to retain bounded procedural CPU baseline receipts before native QA, bound to exact revision, target, CLI hash & host OS metadata while remaining alwaysUNQUALIFIED. First execution of this integration is pending.
+Next compare a rights-cleared RGB candidate against identical procedural & consented photographic conditions. Keep source files & catalog authoritative; experimental intermediates belong in disposable cache state.

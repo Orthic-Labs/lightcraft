@@ -14,6 +14,7 @@ import {
   sha256,
   sourceIdentity,
 } from "./lib.mjs";
+import { runBaseline } from "./denoise-baseline.mjs";
 
 const mode = process.argv[2];
 if (!new Set(["build", "check"]).has(mode)) fail("usage: node scripts/desktop/candidate.mjs <build|check>");
@@ -88,6 +89,7 @@ if (mode === "build") {
   if (smoke.error || smoke.status !== 0) fail(`headless photo assessment smoke failed: ${smoke.error?.message || smoke.stderr || smoke.status}`);
   const smokeReport = JSON.parse(readFileSync(path.join(root, 'photo-ai-smoke/report.json'), 'utf8'));
   if (smokeReport.mode !== 'prepare-only' || smokeReport.libraryMutated !== false || smokeReport.cases?.length !== 3 || smokeReport.cases.some((item) => item.runs?.length !== 0)) fail('headless photo assessment smoke contract failed');
+  runBaseline({ cli: cli.path, root, revision, platform, architecture });
   const materialized = materializeArtifacts(entries, root, {
     sourceRevision: revision,
     platform,
