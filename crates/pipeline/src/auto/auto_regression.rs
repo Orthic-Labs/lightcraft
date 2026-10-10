@@ -340,3 +340,59 @@ fn fitted_sliders_track_the_tone_map_of_the_source_kind() {
     let jpeg = auto_tone(&src, &SourceInfo::default(), &DevelopSettings::default());
     assert!(jpeg.highlights < raw.highlights, "display source needs more recovery: raw {raw:?}, jpeg {jpeg:?}");
 }
+
+#[test]
+fn auto_is_centre_weighted_and_so_spatially_sensitive() {
+    // A dark subject in the middle of a bright frame: the histogram alone would darken the
+    // frame; the subject should still come up. The same pixels shuffled (same histogram) get a
+    // different Auto, as a spatial Auto must.
+    let framed = Rgb32f::from_fn(64, 64, |x, y| {
+        let (dx, dy) = (x as f32 - 31.5, y as f32 - 31.5);
+        if dx * dx + dy * dy < 14.0 * 14.0 { [0.012, 0.011, 0.01] } else { [0.6, 0.58, 0.55] }
+    });
+    let shuffled = Rgb32f::from_fn(64, 64, |x, y| {
+        let (sx, sy) = ((x * 37 + y * 11) % 64, (x * 5 + y * 23) % 64);
+        framed.get(sx, sy)
+    });
+    let a = auto_tone(&framed, &SourceInfo::default(), &DevelopSettings::default());
+    let b = auto_tone(&shuffled, &SourceInfo::default(), &DevelopSettings::default());
+    assert!(a.exposure > b.exposure + 0.3, "centre subject should weigh more: framed {a:?}, shuffled {b:?}");
+    // a flat frame is unaffected by weighting (every pixel is the same)
+    let flat = Rgb32f::filled(64, 64, [0.05, 0.05, 0.05]);
+    assert_eq!(
+        auto_tone(&flat, &SourceInfo::default(), &DevelopSettings::default()),
+        auto_tone(&flat, &SourceInfo::default(), &DevelopSettings::default())
+    );
+}
+
+#[test]
+fn auto_wb_resists_a_large_coloured_surface_and_holds_tint_near_the_locus() {
+    use super::auto_wb;
+    // a blue-cast scene: 70 % of the frame is a red wall, 30 % a true grey; the cast is the light
+    let cast = [0.8f32, 0.9, 1.25];
+    let scene = Rgb32f::from_fn(64, 64, |x, _| {
+        let base = if x < 45 { [0.5, 0.12, 0.1] } else { [0.2, 0.2, 0.2] };
+        [base[0] * cast[0], base[1] * cast[1], base[2] * cast[2]]
+    });
+    let info = SourceInfo { raw: true, relative_wb: true, ..Default::default() };
+    let (temp, tint) = auto_wb(&scene, &info);
+    let mut s = DevelopSettings::default();
+    s.wb.mode = lightcraft_develop::WbMode::Custom;
+    s.wb.temp = temp;
+    s.wb.tint = tint;
+    let mut corrected = scene.clone();
+    crate::local::white_balance(&mut corrected, &info, &s);
+    let g = corrected.get(60, 10);
+    let spread = (g[0].max(g[1]).max(g[2]) - g[0].min(g[1]).min(g[2])) / g[1];
+    assert!(spread < 0.2, "grey should come out near neutral despite the red wall: {g:?} (temp {temp}, tint {tint})");
+    // a green scene is not a green light: Auto's tint stays bounded, the picker's does not
+    let foliage = Rgb32f::from_fn(32, 32, |_, _| [0.08, 0.3, 0.05]);
+    let (_, tint) = auto_wb(&foliage, &info);
+    assert!(tint.abs() <= 60.0, "{tint}");
+    let (_, exact) = super::neutral_wb(&foliage, &info);
+    assert!(exact > 60.0, "{exact}");
+    // hostile pixels never break it
+    let bad = Rgb32f::from_fn(16, 16, |x, _| if x % 2 == 0 { [f32::NAN, -1.0, f32::INFINITY] } else { [0.2, 0.2, 0.2] });
+    let (t, ti) = auto_wb(&bad, &info);
+    assert!(t.is_finite() && ti.is_finite());
+}

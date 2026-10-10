@@ -19,7 +19,7 @@ use crate::local::effective_wb;
 
 /// Identity of the Auto rules below. Bump it when their output changes: offline receipts
 /// (Personal Auto) bind baseline values to it.
-pub const REVISION: &str = "lightcraft.deterministic-auto.v2";
+pub const REVISION: &str = "lightcraft.deterministic-auto.v3";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct AutoTone {
@@ -75,6 +75,7 @@ impl SceneKey {
 pub struct ScenePopulation {
     /// `log2(Y / 0.18)` of every finite, non-black proxy pixel, ascending.
     pub ev: Vec<f32>,
+    /// Centre-weighted median: half the frame's, half the central ellipse's.
     pub median: f32,
     pub p05: f32,
     pub p95: f32,
@@ -83,8 +84,12 @@ pub struct ScenePopulation {
     pub chroma_p90: f32,
 }
 
-/// Measure `src` under `s`'s white balance (tone settings ignored). `None` for an empty or
-/// entirely invalid image.
+/// Squared radius (normalized: 1 at the frame's edge midpoints) of the central ellipse whose
+/// median counts for half of the scene's key (about 28 % of the frame).
+const CENTRE_R2: f32 = 0.36;
+
+/// Measure `src` under `s`'s white balance (tone settings ignored), centre-weighted (see
+/// [`CENTRE_R2`]). `None` for an empty or entirely invalid image.
 pub fn scene_population(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings) -> Option<ScenePopulation> {
     if src.width == 0 || src.height == 0 || src.data.is_empty() {
         return None;
@@ -93,9 +98,11 @@ pub fn scene_population(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings) ->
     let mut base = DevelopSettings { wb: s.wb, ..DevelopSettings::default() };
     base.light.exposure = 0.0;
     crate::local::scene_linear_pre(&mut img, info, &base);
+    let (w, h) = (img.width.max(1) as f32, img.height.max(1) as f32);
     let mut ev = Vec::with_capacity(img.data.len());
+    let mut centre = Vec::with_capacity(img.data.len() / 2);
     let mut chroma = Vec::with_capacity(img.data.len());
-    for c in &img.data {
+    for (i, c) in img.data.iter().enumerate() {
         let y = luminance_2020(*c);
         if !y.is_finite() || y <= 1e-6 {
             continue;
@@ -105,6 +112,11 @@ pub fn scene_population(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings) ->
             continue;
         }
         ev.push(e);
+        let (px, py) = ((i % img.width) as f32 + 0.5, (i / img.width.max(1)) as f32 + 0.5);
+        let (dx, dy) = ((px / w - 0.5) * 2.0, (py / h - 0.5) * 2.0);
+        if dx * dx + dy * dy < CENTRE_R2 {
+            centre.push(e);
+        }
         let lab = oklab_from_2020(*c);
         let c = (lab[1] * lab[1] + lab[2] * lab[2]).sqrt();
         if c.is_finite() {
@@ -115,8 +127,14 @@ pub fn scene_population(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings) ->
         return None;
     }
     ev.sort_by(|a, b| a.total_cmp(b));
+    centre.sort_by(|a, b| a.total_cmp(b));
     chroma.sort_by(|a, b| a.total_cmp(b));
-    let (median, p05, p95, p995) = (percentile(&ev, 0.5), percentile(&ev, 0.05), percentile(&ev, 0.95), percentile(&ev, 0.995));
+    let global = percentile(&ev, 0.5);
+    // Centre weighting: the key follows the subject as much as the frame (a dark subject
+    // against a bright sky, a lit face in a dark room). Half the frame's median, half the
+    // central ellipse's; without centre pixels (tiny images), the frame's.
+    let median = if centre.is_empty() { global } else { 0.5 * global + 0.5 * percentile(&centre, 0.5) };
+    let (p05, p95, p995) = (percentile(&ev, 0.05), percentile(&ev, 0.95), percentile(&ev, 0.995));
     let chroma_p90 = percentile(&chroma, 0.9);
     Some(ScenePopulation { ev, median, p05, p95, p995, chroma_p90 })
 }
@@ -426,11 +444,22 @@ pub fn auto_bw_mix(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings) -> [f64
     })
 }
 
-/// Grey-world white balance weighted towards mid-tone, low-chroma pixels. Returns (temp, tint).
-pub fn auto_wb(src: &Rgb32f, info: &SourceInfo) -> (f64, f64) {
+/// Power of the low-chroma preference in [`neutral_wb`]'s pixel weights.
+const NEUTRAL_POWER: i32 = 4;
+/// Largest tint Auto WB proposes: real illuminants sit near the Planckian / daylight locus; a
+/// bigger green–magenta estimate is a coloured scene, not a coloured light.
+const MAX_TINT: f64 = 60.0;
+
+/// The white balance that makes `src` neutral: a grey-world mean weighted towards mid-tone,
+/// low-chroma pixels (a large coloured surface barely counts), as (temp, tint), unbounded.
+/// The picker uses it on a sampled patch, which it neutralizes exactly.
+pub fn neutral_wb(src: &Rgb32f, info: &SourceInfo) -> (f64, f64) {
     let img = lightcraft_raster::resample::fit(src, 256, 256, lightcraft_raster::resample::Filter::Box);
     let (mut acc, mut wsum) = ([0.0f64; 3], 0.0f64);
     for c in &img.data {
+        if !c.iter().all(|v| v.is_finite() && *v >= 0.0) {
+            continue;
+        }
         let y = luminance_2020(*c);
         if !(0.01..=2.0).contains(&y) {
             continue;
@@ -438,7 +467,10 @@ pub fn auto_wb(src: &Rgb32f, info: &SourceInfo) -> (f64, f64) {
         let mx = c[0].max(c[1]).max(c[2]);
         let mn = c[0].min(c[1]).min(c[2]);
         let chroma = (mx - mn) / (mx + 1e-6);
-        let w = (1.0 - chroma).powi(2) as f64 * (1.0 - ((y.log2() + 2.5) / 4.0).abs().min(1.0)) as f64;
+        // (1 − chroma)⁴: a coloured surface's vote is ~30× below a cast grey's (a cast grey
+        // reads as chroma 0.3–0.4 as shot), so a wall or a field that fills most of the frame
+        // still loses to the neutrals that are there
+        let w = (1.0 - chroma).powi(NEUTRAL_POWER) as f64 * (1.0 - ((y.log2() + 2.5) / 4.0).abs().min(1.0)) as f64;
         for i in 0..3 {
             acc[i] += c[i] as f64 * w;
         }
@@ -448,11 +480,24 @@ pub fn auto_wb(src: &Rgb32f, info: &SourceInfo) -> (f64, f64) {
         return (info.as_shot_temp, info.as_shot_tint);
     }
     let avg = acc.map(|v| v / wsum);
+    if !avg.iter().all(|v| v.is_finite() && *v > 0.0) {
+        return (info.as_shot_temp, info.as_shot_tint);
+    }
     let xyz = REC2020.to_xyz().apply(avg);
     let shot = lightcraft_color::cct::temp_tint_to_xy(info.as_shot_temp, info.as_shot_tint);
     let seen = bradford(REC2020.white, shot).apply(xyz);
     let (t, tint) = xy_to_temp_tint(Xy::from_xyz(seen));
-    (t.clamp(2000.0, 50000.0).round(), tint.clamp(-150.0, 150.0).round())
+    let t = if t.is_finite() { t.clamp(2000.0, 50000.0).round() } else { info.as_shot_temp };
+    let tint = if tint.is_finite() { tint.clamp(-150.0, 150.0).round() } else { info.as_shot_tint };
+    (t, tint)
+}
+
+/// Auto white balance of a whole scene: [`neutral_wb`] with the tint held near the illuminant
+/// locus ([`MAX_TINT`]): a green field or a magenta wall is a coloured scene, not a coloured
+/// light, and a scene-wide estimate must not neutralize it.
+pub fn auto_wb(src: &Rgb32f, info: &SourceInfo) -> (f64, f64) {
+    let (t, tint) = neutral_wb(src, info);
+    (t, tint.clamp(-MAX_TINT, MAX_TINT))
 }
 
 /// Temperature/tint currently in effect (for UI display).
@@ -529,11 +574,11 @@ mod tint_tests {
 
     #[test]
     fn auto_wb_and_picker_correct_green_with_positive_tint() {
-        // The picker delegates a sampled patch to this same auto_wb implementation.
+        // The picker delegates a sampled patch to neutral_wb (exact, unbounded).
         for (rgb, sign) in [([0.18, 0.24, 0.18], 1.0), ([0.24, 0.18, 0.24], -1.0)] {
             let img = Rgb32f::filled(16, 16, rgb);
             let info = SourceInfo { raw: true, relative_wb: true, ..Default::default() };
-            let (temp, tint) = auto_wb(&img, &info);
+            let (temp, tint) = neutral_wb(&img, &info);
             assert!(tint * sign > 0.0, "{rgb:?}: temp {temp}, tint {tint}");
             let mut s = DevelopSettings::default();
             s.wb.mode = lightcraft_develop::WbMode::Custom;

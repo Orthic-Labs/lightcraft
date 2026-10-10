@@ -421,7 +421,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 }
             }
             let patch = lightcraft_raster::Rgb32f::filled(4, 4, acc);
-            let (t, tint) = lightcraft_pipeline::auto::auto_wb(&patch, &info);
+            let (t, tint) = lightcraft_pipeline::auto::neutral_wb(&patch, &info);
             edit(s, "develop.wbPick", "White Balance", |d| {
                 d.wb.mode = WbMode::Custom;
                 d.wb.temp = t;
