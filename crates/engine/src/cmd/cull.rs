@@ -721,6 +721,10 @@ fn parse_cull_apply(s: &mut Session, p: &Value) -> Result<CullApplyJob> {
     if binding_hash(revision, reject_below, pick_best, &rows) != binding {
         return Err(super::bad(C, "proposal binding does not match contents"));
     }
+    // Re-emit validated rows so wire-level f64 formatting cannot make an unchanged f32
+    // measurement compare unequal to the worker's canonical JSON. Binding still covers exact
+    // f32 bits, source identity, flags, grouping, decisions & proposed actions.
+    let canonical_proposal = proposal_value_revision(revision, &rows, reject_below, pick_best);
     let accept = p.get("accept").and_then(Value::as_array).ok_or_else(|| super::bad(C, "`accept` must be an array of {id, flag}"))?;
     if accept.len() > lightcraft_pipeline::cull::report::MAX_MEASUREMENTS {
         return Err(super::bad(C, "too many accepted culling photos"));
@@ -748,7 +752,7 @@ fn parse_cull_apply(s: &mut Session, p: &Value) -> Result<CullApplyJob> {
             return Err(super::bad(C, format!("proposal photo {} does not match current source or flag", row.id.0)));
         }
     }
-    Ok(CullApplyJob { job, proposal, accepted })
+    Ok(CullApplyJob { job, proposal: canonical_proposal, accepted })
 }
 
 impl Session {
@@ -861,7 +865,7 @@ fn binding_hash(revision: u64, reject_below: Option<f32>, pick_best: bool, rows:
     for row in sorted {
         h.u64(row.id.0).str(&row.file_name).str(&row.source).str(flag_name(row.flag));
         h.u64(row.sharpness.to_bits() as u64).u64(row.clipped.to_bits() as u64);
-        h.u64(row.group.unwrap_or(0) as u64).u64(row.best as u64);
+        h.u64(row.group.is_some() as u64).u64(row.group.unwrap_or(0) as u64).u64(row.best as u64);
         h.str(proposed_flag(&row, reject_below, pick_best).map(flag_name).unwrap_or(""));
         h.str(&serde_json::to_string(&row.decision).unwrap_or_default());
         h.str(&serde_json::to_string(&row.uncertainty).unwrap_or_default());
@@ -1129,6 +1133,41 @@ mod tests {
     }
 
     #[test]
+    fn binding_distinguishes_absent_group_from_zero_and_rejects_tampering() {
+        let mut session = Session::with_demo();
+        let id = session.visible_cloned()[0];
+        let job = session.plan_cull_job(&[id], None, false).unwrap();
+        let snapshot = &job.photos[0];
+        let row = |group| CullRow {
+            id,
+            file_name: snapshot.file_name.clone(),
+            sharpness: 49.96,
+            clipped: 0.0,
+            source: snapshot.source.clone(),
+            flag: snapshot.flag,
+            group,
+            best: false,
+            decision: lightcraft_pipeline::cull::report::Decision::Abstain,
+            uncertainty: lightcraft_pipeline::cull::report::Uncertainty::Abstain,
+            reason_codes: vec![lightcraft_pipeline::cull::report::ReasonCode::Abstained],
+        };
+        let absent = row(None);
+        let zero = row(Some(0));
+        assert_ne!(
+            binding_hash(job.catalog_revision, None, false, std::slice::from_ref(&absent)),
+            binding_hash(job.catalog_revision, None, false, std::slice::from_ref(&zero))
+        );
+
+        let timing = timing_report(vec![photo_timing(id, Some(1.0), Some(2.0), 3.0, TimingStatus::Ok)], 0.5, 4.0);
+        let result = proposal_result_revision(job.catalog_revision, std::slice::from_ref(&zero), Vec::new(), None, false, timing);
+        let mut tampered = result.clone();
+        tampered["photos"][0]["group"] = Value::Null;
+        tampered["proposal"]["photos"][0]["group"] = Value::Null;
+        let error = validate_worker_result(&job, tampered).unwrap_err().to_string();
+        assert!(error.contains("binding"), "group presence tampering is rejected: {error}");
+    }
+
+    #[test]
     fn measurement_timing_covers_each_photo_with_finite_values_and_absent_stages() {
         let mut session = Session::with_demo();
         let ids = session.visible_cloned()[..2].to_vec();
@@ -1299,5 +1338,24 @@ mod tests {
         let nested_prepared = session.plan_cull_apply(&nested).expect("cullSuggest-shaped proposal should plan");
         assert_eq!(nested_prepared.job.catalog_revision, 1_u64 << 32);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn apply_canonicalizes_equivalent_wire_float_before_fresh_measurement_compare() {
+        let mut session = Session::with_demo();
+        let id = session.visible_cloned()[0];
+        let suggestion = cull_suggest(&mut session, &json!({"ids": [id.0], "rejectBelow": 100.0})).unwrap();
+        let mut proposal = suggestion["proposal"].clone();
+        let sharpness = proposal["photos"][0]["sharpness"].as_f64().unwrap() as f32;
+        let adjacent = if sharpness < 100.0 { f32::from_bits(sharpness.to_bits() + 1) } else { f32::from_bits(sharpness.to_bits() - 1) };
+        let wire_value = f64::from(sharpness) + (f64::from(adjacent) - f64::from(sharpness)) * 0.25;
+        assert_eq!((wire_value as f32).to_bits(), sharpness.to_bits());
+        assert_ne!(wire_value, f64::from(sharpness));
+        proposal["photos"][0]["sharpness"] = json!(wire_value);
+        let prepared = session
+            .plan_cull_apply(&json!({"proposal": proposal, "accept": [{"id": id.0, "flag": "reject"}]}))
+            .expect("equivalent wire float remains applyable");
+        let result = prepared.job.run(&|_, _| true).unwrap();
+        assert_eq!(session.finish_cull_apply(prepared, result).unwrap()["accepted"], 1);
     }
 }
