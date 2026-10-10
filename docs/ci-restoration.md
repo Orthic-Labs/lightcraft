@@ -15,6 +15,21 @@ disabled. Published RightKit foreground readers still require repair before
 macOS background evidence can qualify. Repair proposal is isolated outside
 shared SDK checkout; no SDK changes or dependency upgrades have been applied.
 
+## RightKit ownership handoff, 2026-10-10
+
+Adrian assigned SDK work to Claude chat **Rightkit Mac new** & instructed Ember
+chat to leave RightKit work there. Repair request, isolated reviewed patch,
+native failure evidence & required qualification were sent through Pulse to
+`Rightkit Mac new on Adrian’s Mac Mini` (message
+`56d6f028-baa9-4e64-bbab-ff8ba4403484`). Corrected full proposal base SHA was
+sent separately. Pulse reported `sent`
+without recipient verdict; acknowledgment is pending. Do not resend or poll
+its inbox. No SDK files, versions or packages were changed by Ember chat.
+
+SDK owner will handle repair, native feature-matrix qualification & managed
+publication. Ember will consume qualified published versions, then rerun
+exact-revision hidden native QA with existing hard foreground guard intact.
+
 ## Suspension history
 
 Checked 2026-10-10 against `Orthic-Labs/lightcraft` at main revision
