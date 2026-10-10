@@ -119,7 +119,36 @@ failures across test binaries; any failed binary still fails the gate.
 [Native run 38062743357](https://github.com/Orthic-Labs/lightcraft/actions/runs/38062743357)
 uses explicit source `0877ab27d275980269889963534f5af614be1043`, with signing
 & publication disabled. Candidate branch keeps that source available without
-cancelling the earlier main CI run. Native results remain pending.
+cancelling the earlier main CI run. Both builds stopped while compiling the
+new diagnostic helper because its loop assigned an immutable binding; no
+journeys ran. Source `f4b19b5e` corrects that binding.
+
+## Culling & preview follow-up, 2026-10-10
+
+[Native run 38064000491](https://github.com/Orthic-Labs/lightcraft/actions/runs/38064000491)
+built `f4b19b5e0b1c2fd93de97f08111798afd33b7958` on both targets. Extracted
+evidence matches summary SHA-256 entries: 55 Mac files & 62 Windows files.
+Each target passed 14/15 journey bodies. Culling Apply/undo passed on both.
+Windows foreground guards passed; Mac guards still lacked reliable PID/name
+evidence, so its official summary remains failed for all 15 journeys.
+
+Mac Inspector collapse retained StageWorkspace, Inspector & decoded preview
+frame with correct `990px 0px 44px` columns, but lost focus. Source `4f2ea8dd`
+restores captured focus after React's keyed shell commit, clears stale captures
+& refuses targets outside the retained host. Windows scalability retained cell
+focus but failed an image identity predicate during thumbnail proxy promotion;
+its follow-up must retain cell/frame identity while validating decoded current
+pixels. Focus & geometry assertions remain mandatory.
+
+Same-photo editing stress recorded zero observed blank previews, Retry banners,
+image decode errors or blank filmstrip samples: 40 timer samples on Mac & 755
+samples on Windows. Mac's hidden WebKit reported zero animation frames; these
+receipts do not measure smooth frame delivery or photographic accuracy.
+
+[Unsigned follow-up 38065705019](https://github.com/Orthic-Labs/lightcraft/actions/runs/38065705019)
+uses explicit source `4f2ea8dd5bc2e16031886a6f13281cecc7689d53`, with signing
+& publication disabled. SDK repair & dependency integration remain assigned
+to **Rightkit Mac new**; Ember retains published pins & hard foreground checks.
 
 ## Suspension history
 
