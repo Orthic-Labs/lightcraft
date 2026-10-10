@@ -10,6 +10,7 @@ use std::sync::{
 
 use crate::lightroom_sqlite::{Database, LiveTable, Value as SqlValue};
 use lightcraft_catalog::{Album, Flag, Op, Photo, PhotoId, Source};
+use lightcraft_geom::{Affine, Orientation, Point, Rect};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -477,15 +478,150 @@ fn ensure_read_active(cancel: &AtomicBool) -> Result<(), String> {
     if cancel.load(Ordering::Relaxed) { Err("Lightroom import cancelled".into()) } else { Ok(()) }
 }
 
-fn mapped_settings(text: &str, raw: bool, aspect: f64) -> Result<(Value, Vec<String>), String> {
+fn mapped_settings(text: &str, raw: bool, aspect: f64, orientation: Orientation, stored_aspect: Option<f64>) -> Result<(Value, Vec<String>), String> {
     let mut root = crate::preset_import::parse_lua(text)?;
     let deferred = strip_lua_sentinels(&mut root);
-    let (props, values) = crate::preset_import::lua_settings_props(&root)?;
-    let (partial, mut unknown) = crate::crs::to_partial_report(&props, Some(&values), Some(raw), aspect);
+    let (mut props, values) = crate::preset_import::lua_settings_props(&root)?;
+    // Lightroom catalog settings carry crop fields without XMP's HasCrop marker. Keep this
+    // inference local to catalog import; sidecar/import paths retain their own semantics.
+    const CROP: [&str; 5] = ["crs:CropLeft", "crs:CropTop", "crs:CropRight", "crs:CropBottom", "crs:CropAngle"];
+    if !props.contains_key("crs:HasCrop") && CROP.iter().any(|key| props.contains_key(*key)) {
+        props.insert("crs:HasCrop".into(), vec!["True".into()]);
+    }
+    let (mut partial, mut unknown) = crate::crs::to_partial_report(&props, Some(&values), Some(raw), aspect);
+    if !catalog_crop_values_valid(&props) {
+        remove_catalog_crop(&mut partial);
+        unknown.push("Crop: invalid Lightroom catalog values".into());
+    } else if let Some(warning) = catalog_crop(&mut partial, orientation, stored_aspect) {
+        remove_catalog_crop(&mut partial);
+        unknown.push(warning.into());
+    }
     if deferred > 0 {
         unknown.push("Deferred Lightroom adjustments (-999999)".into());
     }
     Ok((partial, unknown))
+}
+
+/// Lightroom stores crop corners in the un-oriented source frame. Carry them into the displayed
+/// frame, then apply Lightroom's straighten angle around that frame's centre. Invalid catalog
+/// dimensions or crop values are left untouched rather than producing non-finite geometry.
+fn catalog_crop_values_valid(props: &crate::crs::Props) -> bool {
+    let number = |key: &str, default: f64| -> Option<f64> {
+        match props.get(key) {
+            None => Some(default),
+            Some(values) => values.first()?.trim().parse::<f64>().ok().filter(|value| value.is_finite()),
+        }
+    };
+    for (key, default) in [("crs:CropLeft", 0.0), ("crs:CropTop", 0.0), ("crs:CropRight", 1.0), ("crs:CropBottom", 1.0)] {
+        let Some(value) = number(key, default) else { return false };
+        if props.contains_key(key) && !(0.0..=1.0).contains(&value) {
+            return false;
+        }
+    }
+    let Some(left) = number("crs:CropLeft", 0.0) else { return false };
+    let Some(top) = number("crs:CropTop", 0.0) else { return false };
+    let Some(right) = number("crs:CropRight", 1.0) else { return false };
+    let Some(bottom) = number("crs:CropBottom", 1.0) else { return false };
+    if right <= left || bottom <= top {
+        return false;
+    }
+    if props.contains_key("crs:CropAngle") {
+        let Some(angle) = props
+            .get("crs:CropAngle")
+            .and_then(|values| values.first())
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|value| value.is_finite() && value.abs() <= 45.0)
+        else {
+            return false;
+        };
+        let _ = angle;
+    }
+    true
+}
+
+fn remove_catalog_crop(partial: &mut Value) {
+    if let Some(object) = partial.as_object_mut() {
+        object.remove("crop");
+    }
+}
+
+fn catalog_crop(partial: &mut Value, orientation: Orientation, stored_aspect: Option<f64>) -> Option<&'static str> {
+    let Some(geometry) = partial.pointer_mut("/crop/geometry").and_then(Value::as_object_mut) else { return None };
+    let edge = |key: &str| geometry.get("rect").and_then(|rect| rect.get(key)).and_then(Value::as_f64);
+    let (Some(x0), Some(y0), Some(x1), Some(y1)) = (edge("x0"), edge("y0"), edge("x1"), edge("y1")) else { return None };
+    if [x0, y0, x1, y1].iter().any(|value| !value.is_finite() || !(0.0..=1.0).contains(value)) || x0 >= x1 || y0 >= y1 {
+        return Some("Crop: invalid Lightroom catalog geometry");
+    }
+    let lightroom_angle = geometry.get("angle").and_then(Value::as_f64).unwrap_or(0.0);
+    if !lightroom_angle.is_finite() || lightroom_angle.abs() > 360.0 {
+        return Some("Crop: invalid Lightroom catalog angle");
+    }
+    if orientation == Orientation::Normal && lightroom_angle == 0.0 {
+        return None;
+    }
+    if lightroom_angle == 0.0 {
+        let rect = orientation.map_norm_rect(Rect::from_points(Point::new(x0, y0), Point::new(x1, y1)));
+        if [rect.x0, rect.y0, rect.x1, rect.y1].iter().all(|value| value.is_finite()) {
+            geometry.insert("rect".into(), json!({"x0": rect.x0, "y0": rect.y0, "x1": rect.x1, "y1": rect.y1}));
+            return None;
+        }
+        return Some("Crop: invalid Lightroom catalog orientation");
+    }
+    let Some(stored_aspect) = stored_aspect.filter(|value| value.is_finite() && *value > 0.0) else {
+        return Some("Crop: skipped straighten because catalog dimensions are invalid");
+    };
+    let (ow, oh) = if orientation.swaps_axes() { (1.0, stored_aspect) } else { (stored_aspect, 1.0) };
+    if !ow.is_finite() || !oh.is_finite() || ow <= 0.0 || oh <= 0.0 {
+        return Some("Crop: invalid Lightroom catalog dimensions");
+    }
+    // Mirrors reverse the angle sign in LightCraft's oriented frame.
+    let angle = if orientation.to_parts().0 { lightroom_angle } else { -lightroom_angle };
+    let to_rotated = Affine::rotate_about(angle.to_radians(), Point::new(ow / 2.0, oh / 2.0));
+    let corner = |x: f64, y: f64| {
+        let (u, v) = orientation.map(x * stored_aspect, y, stored_aspect, 1.0);
+        to_rotated.apply(Point::new(u, v))
+    };
+    let rect = Rect::from_points(corner(x0, y0), corner(x1, y1));
+    let values = [rect.x0 / ow, rect.y0 / oh, rect.x1 / ow, rect.y1 / oh, angle];
+    if values.iter().all(|value| value.is_finite()) {
+        geometry.insert("rect".into(), json!({"x0": values[0], "y0": values[1], "x1": values[2], "y1": values[3]}));
+        geometry.insert("angle".into(), json!(angle));
+        None
+    } else {
+        Some("Crop: invalid Lightroom catalog dimensions")
+    }
+}
+
+/// `Adobe_images.orientation` names where stored top-left/top-right corners land in the displayed
+/// frame: `AB` upright, `BC` clockwise, `DA` counter-clockwise, with mirrored variants supported.
+fn lightroom_orientation(code: &str) -> Option<Orientation> {
+    const ALL: [Orientation; 8] = [
+        Orientation::Normal,
+        Orientation::FlipH,
+        Orientation::Rotate180,
+        Orientation::FlipV,
+        Orientation::Transpose,
+        Orientation::Rotate90,
+        Orientation::Transverse,
+        Orientation::Rotate270,
+    ];
+    let corner = |orientation: Orientation, x: f64, y: f64| match orientation.map(x, y, 1.0, 1.0) {
+        (u, v) if u < 0.5 && v < 0.5 => 'A',
+        (_, v) if v < 0.5 => 'B',
+        (u, _) if u >= 0.5 => 'C',
+        _ => 'D',
+    };
+    ALL.into_iter().find(|&orientation| code.chars().eq([corner(orientation, 0.0, 0.0), corner(orientation, 1.0, 0.0)]))
+}
+
+fn stored_aspect(row: &Row) -> Option<f64> {
+    let width = row.get("fileWidth").and_then(Value::as_f64)?;
+    let height = row.get("fileHeight").and_then(Value::as_f64)?;
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    let aspect = width / height;
+    aspect.is_finite().then_some(aspect)
 }
 
 fn strip_lua_sentinels(value: &mut crate::preset_import::Lua) -> usize {
@@ -680,7 +816,14 @@ pub(crate) fn apply_prepared(s: &mut crate::Session, data: CatalogImport, contex
             p.meta.keywords = src.keywords.clone();
         }
         if !src.settings.is_empty() && !keep_develop {
-            match mapped_settings(&src.settings, p.kind == lightcraft_catalog::MediaKind::Raw, p.width.max(1) as f64 / p.height.max(1) as f64) {
+            let orientation = lightroom_orientation(text(&src.image, "orientation")).unwrap_or_default();
+            match mapped_settings(
+                &src.settings,
+                p.kind == lightcraft_catalog::MediaKind::Raw,
+                p.width.max(1) as f64 / p.height.max(1) as f64,
+                orientation,
+                stored_aspect(&src.image),
+            ) {
                 Ok((partial, unknown)) => {
                     p.develop = Arc::new(lightcraft_develop::apply_partial(&p.develop, &partial, 1.0));
                     p.edited = Some(now.clone());
@@ -866,7 +1009,7 @@ mod tests {
         cyclic.collections[0].insert("parent".into(), json!(10));
         assert!(apply(&mut s, cyclic, false).is_err());
         assert_eq!(s.catalog.to_snapshot(), before);
-        assert!(mapped_settings(&format!("{}0{}", "{".repeat(1000), "}".repeat(1000)), true, 1.0).is_err());
+        assert!(mapped_settings(&format!("{}0{}", "{".repeat(1000), "}".repeat(1000)), true, 1.0, Orientation::Normal, Some(1.5)).is_err());
     }
     #[test]
     fn compressed_xmp_is_bounded_and_settings_are_data_only() {
@@ -876,8 +1019,118 @@ mod tests {
         assert_eq!(xmp(Some(&json!(encoded))).unwrap(), String::from_utf8_lossy(packet));
         encoded[0] = 0xff;
         assert!(xmp(Some(&json!(encoded))).is_err());
-        let (partial, _) = mapped_settings("s = { Exposure2012 = 0.75, ToneCurvePV2012 = {0,0,128,150,255,255} }", true, 1.5).unwrap();
+        let (partial, _) =
+            mapped_settings("s = { Exposure2012 = 0.75, ToneCurvePV2012 = {0,0,128,150,255,255} }", true, 1.5, Orientation::Normal, Some(1.5))
+                .unwrap();
         assert_eq!(partial["light"]["exposure"], 0.75);
+    }
+
+    #[test]
+    fn catalog_crop_fields_follow_orientation_and_reject_bad_dimensions() {
+        let settings = "s = { CropLeft = 0.1, CropRight = 0.6, CropTop = 0.2, CropBottom = 0.9 }";
+        let crop = |orientation| {
+            let (partial, unknown) = mapped_settings(settings, true, 1.5, orientation, Some(1.5)).unwrap();
+            let rect = &partial["crop"]["geometry"]["rect"];
+            assert!(!unknown.iter().any(|key| key.starts_with("Crop")), "{unknown:?}");
+            [rect["x0"].as_f64(), rect["y0"].as_f64(), rect["x1"].as_f64(), rect["y1"].as_f64()].map(|value| (value.unwrap() * 1e9).round() / 1e9)
+        };
+        for (code, expected) in [
+            ("AB", [0.1, 0.2, 0.6, 0.9]),
+            ("BA", [0.4, 0.2, 0.9, 0.9]),
+            ("CD", [0.4, 0.1, 0.9, 0.8]),
+            ("DC", [0.1, 0.1, 0.6, 0.8]),
+            ("AD", [0.2, 0.1, 0.9, 0.6]),
+            ("BC", [0.1, 0.1, 0.8, 0.6]),
+            ("CB", [0.1, 0.4, 0.8, 0.9]),
+            ("DA", [0.2, 0.4, 0.9, 0.9]),
+        ] {
+            assert_eq!(crop(lightroom_orientation(code).unwrap()), expected, "{code}");
+        }
+
+        let (partial, _) = mapped_settings("s = { CropAngle = 2 }", true, 1.5, Orientation::Rotate90, Some(1.5)).unwrap();
+        assert_eq!(partial["crop"]["geometry"]["angle"], -2.0);
+        let (partial, _) = mapped_settings(settings, true, 1.5, Orientation::Normal, None).unwrap();
+        assert_eq!(
+            [
+                partial["crop"]["geometry"]["rect"]["x0"].as_f64(),
+                partial["crop"]["geometry"]["rect"]["y0"].as_f64(),
+                partial["crop"]["geometry"]["rect"]["x1"].as_f64(),
+                partial["crop"]["geometry"]["rect"]["y1"].as_f64(),
+            ]
+            .map(|value| value.unwrap()),
+            [0.1, 0.2, 0.6, 0.9]
+        );
+        let (partial, unknown) = mapped_settings(
+            "s = { CropLeft = 0.1, CropRight = 0.6, CropTop = 0.2, CropBottom = 0.9, CropAngle = 2 }",
+            true,
+            1.5,
+            Orientation::Rotate90,
+            None,
+        )
+        .unwrap();
+        assert!(partial.get("crop").is_none());
+        assert!(unknown.iter().any(|warning| warning.contains("dimensions")));
+        let (partial, unknown) = mapped_settings("s = { CropLeft = \"nope\", CropRight = 0.6 }", true, 1.5, Orientation::Normal, Some(1.5)).unwrap();
+        assert!(partial.get("crop").is_none());
+        assert!(unknown.iter().any(|warning| warning.contains("invalid")));
+        assert!(stored_aspect(&row(json!({"fileWidth": 0, "fileHeight": 100}))).is_none());
+        assert!(stored_aspect(&row(json!({"fileWidth": "bad", "fileHeight": 100}))).is_none());
+    }
+
+    #[test]
+    fn straightened_catalog_crops_preserve_aspect_and_mirror_sign() {
+        let cases = [
+            (
+                "s = { CropAngle = -9.34444, CropBottom = 0.802034, CropLeft = 0.05499, CropRight = 0.94501, CropTop = 0.197966 }",
+                Orientation::Normal,
+                [0.0935892619821715, 0.09359009062947415, 0.9064107380178285, 0.9064099093705258],
+                9.34444,
+            ),
+            (
+                "s = { CropAngle = -1.48964, CropBottom = 0.962457, CropLeft = 0.010429, CropRight = 0.989571, CropTop = 0.037543 }",
+                Orientation::Rotate90,
+                [0.018608817271099032, 0.018609202353514116, 0.981391182728901, 0.981390797646486],
+                1.48964,
+            ),
+        ];
+        for (settings, orientation, expected, angle) in cases {
+            let (partial, _) = mapped_settings(settings, true, 1.5, orientation, Some(9504.0 / 6336.0)).unwrap();
+            let geometry = &partial["crop"]["geometry"];
+            let rect = &geometry["rect"];
+            let got = [rect["x0"].as_f64(), rect["y0"].as_f64(), rect["x1"].as_f64(), rect["y1"].as_f64()].map(|value| value.unwrap());
+            assert!(got.iter().zip(expected.iter()).all(|(got, expected)| (*got - *expected).abs() < 1e-12), "{got:?} != {expected:?}");
+            assert!((geometry["angle"].as_f64().unwrap() - angle).abs() < 1e-12);
+        }
+        let (partial, _) = mapped_settings(
+            "s = { CropAngle = 2, CropLeft = 0.1, CropRight = 0.9, CropTop = 0.1, CropBottom = 0.9 }",
+            true,
+            1.5,
+            Orientation::FlipH,
+            Some(1.5),
+        )
+        .unwrap();
+        assert_eq!(partial["crop"]["geometry"]["angle"], 2.0);
+    }
+
+    #[test]
+    fn imported_catalog_crop_survives_apply_and_undo() {
+        let mut data = sample();
+        data.photos.retain(|photo| photo.source_id == 1);
+        data.collections.clear();
+        data.members.clear();
+        let photo = data.photos.first_mut().unwrap();
+        photo.image.insert("orientation".into(), json!("BC"));
+        photo.settings = "s = { CropLeft = 0.1, CropRight = 0.6, CropTop = 0.2, CropBottom = 0.9 }".into();
+        let mut s = crate::Session::new();
+        let report = apply(&mut s, data, false).unwrap();
+        let id = PhotoId(report["mapping"]["1"].as_u64().unwrap());
+        let geometry = &s.catalog.photo(id).unwrap().develop.crop.geometry;
+        let actual = [geometry.rect.x0, geometry.rect.y0, geometry.rect.x1, geometry.rect.y1];
+        let expected = [0.1, 0.1, 0.8, 0.6];
+        assert!(actual.iter().zip(expected).all(|(actual, expected)| (*actual - expected).abs() < 1e-12), "{actual:?}");
+        assert_eq!(s.undo.len(), 1);
+        s.undo_step().unwrap();
+        assert!(s.catalog.is_empty());
     }
 
     #[test]
@@ -896,7 +1149,7 @@ mod tests {
         assert_eq!(p.develop.light.shadows, 65.0);
         assert_eq!(p.develop.light.blacks, -22.0);
         assert!(report["unmapped"]["2"].as_array().unwrap().iter().any(|v| v.as_str().is_some_and(|v| v.contains("Deferred"))));
-        let (partial, _) = mapped_settings("s = { Exposure2012 = -5, Contrast2012 = -100 }", true, 1.0).unwrap();
+        let (partial, _) = mapped_settings("s = { Exposure2012 = -5, Contrast2012 = -100 }", true, 1.0, Orientation::Normal, Some(1.5)).unwrap();
         assert_eq!(partial["light"]["exposure"], -5.0);
         assert_eq!(partial["light"]["contrast"], -100.0);
     }
