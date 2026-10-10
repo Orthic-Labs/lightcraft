@@ -150,6 +150,26 @@ uses explicit source `4f2ea8dd5bc2e16031886a6f13281cecc7689d53`, with signing
 & publication disabled. SDK repair & dependency integration remain assigned
 to **Rightkit Mac new**; Ember retains published pins & hard foreground checks.
 
+## Full workspace failure collection, 2026-10-10
+
+[CI run 38064075030](https://github.com/Orthic-Labs/lightcraft/actions/runs/38064075030)
+at `f4b19b5e0b1c2fd93de97f08111798afd33b7958` passed frontend checks/build,
+Rust formatting & all-target clippy. `--no-fail-fast` collected 11 test failures:
+two desktop-host task completion waits, four culling validation fixtures,
+one Windows path expectation, three pipeline measurement/spatial fixtures &
+one loupe draft sizing expectation. Parity, layers, assets & WASM did not run
+after the failed test gate.
+
+Follow-up retains production validation & corrects fixtures against actual
+contracts: group presence participates in test-side binding hashes; coherent
+aggregate counts let tampering reach binding validation; normalized folder
+paths preserve their supplied separator; tiny nonzero signatures have unit
+self-similarity; spatial chroma uses the existing colour conversion & WB
+overflow exercises the blue coefficient. Task waits use bounded monotonic
+deadlines with progress diagnostics. Loupe draft checks use physical canvas
+size plus the existing rounding allowance while still prohibiting full-size
+drafts. Generated CI must verify these changes.
+
 ## Suspension history
 
 Checked 2026-10-10 against `Orthic-Labs/lightcraft` at main revision

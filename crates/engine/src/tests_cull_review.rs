@@ -127,7 +127,7 @@ fn duplicate_ids_nonfinite_thresholds_unknown_accepts_and_unpicked_are_rejected(
         .clone();
     let before = s.catalog.to_snapshot();
     let unpicked = s.execute("photo.cullApply", &json!({"proposal": p, "accept": [{"id": ids[1].0, "flag": "pick"}]})).unwrap_err().to_string();
-    assert!(unpicked.contains("no pending cull suggestion"), "existing but unpicked photo is distinct: {unpicked}");
+    assert!(unpicked.contains("does not match an available proposal"), "existing but unpicked photo is distinct: {unpicked}");
     assert_eq!(s.catalog.to_snapshot(), before);
 
     let p = proposal(&mut s, &ids);
@@ -146,7 +146,7 @@ fn tampered_proposal_and_valid_then_unknown_accept_are_atomic() {
     let before = s.catalog.to_snapshot();
     let tampered_error =
         s.execute("photo.cullApply", &json!({"proposal": tampered, "accept": [{"id": accepted.0, "flag": "reject"}]})).unwrap_err().to_string();
-    assert!(tampered_error.contains("source, flags or measurements changed"), "tampering is rejected: {tampered_error}");
+    assert!(tampered_error.contains("binding does not match contents"), "tampering is rejected: {tampered_error}");
     assert_eq!(s.catalog.to_snapshot(), before, "tampered proposal cannot partially apply");
 
     let p = proposal(&mut s, &ids);

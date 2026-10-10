@@ -1163,6 +1163,7 @@ mod tests {
         let mut tampered = result.clone();
         tampered["photos"][0]["group"] = Value::Null;
         tampered["proposal"]["photos"][0]["group"] = Value::Null;
+        tampered["groups"] = json!(0);
         let error = validate_worker_result(&job, tampered).unwrap_err().to_string();
         assert!(error.contains("binding"), "group presence tampering is rejected: {error}");
     }

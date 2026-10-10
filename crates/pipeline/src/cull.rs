@@ -282,7 +282,14 @@ mod tests {
         assert!(clip.is_finite());
         assert!(sig.iter().all(|v| v.is_finite()));
         assert_eq!(combined, Measurements { sharpness: sharp, clipped: clip, signature: sig });
-        assert_eq!(similarity_checked(&sig, &sig), Ok(0.0));
+
+        // Tiny-image binning leaves non-zero signature energy in its populated final cell;
+        // identical valid signatures therefore have unit similarity within float tolerance.
+        let norm_sq = sig.iter().map(|v| v * v).sum::<f32>();
+        assert!(norm_sq > 0.0);
+        let self_similarity = similarity_checked(&sig, &sig).expect("finite tiny signature");
+        assert!((self_similarity - 1.0).abs() <= 1e-6, "self similarity {self_similarity}");
+        assert_eq!(similarity_checked(&[0.0; 64], &[0.0; 64]), Ok(0.0));
     }
 
     #[test]

@@ -363,7 +363,12 @@ mod in_the_loupe {
         h.request("engine.execute", json!({"command": "develop.set", "params": {"control": "light.exposure", "value": 0.5}}), T);
         h.settle(SETTLE);
         let main = rendered_long_edge(&h);
-        assert!(main <= 1000 && main * 4 < native, "the whole-frame draft is {main} px for a {native} px photo");
+        let canvas = h.app.canvas_rect.expect("the canvas is laid out");
+        let canvas_long = (canvas.width().max(canvas.height()) * h.view.ctx.pixels_per_point()).ceil() as usize;
+        assert!(
+            main.saturating_add(64) >= canvas_long && main <= canvas_long.saturating_add(64) && main * 4 < native,
+            "the whole-frame draft is {main} px for a {native} px photo on a {canvas_long} px canvas"
+        );
         let region = h.app.region_view.expect("the window is drafted too");
         assert_eq!(region.full.0.max(region.full.1), native, "at 100 %, magnified by the GPU");
         let (w, hh) = region_tile(&h).expect("a window draft");

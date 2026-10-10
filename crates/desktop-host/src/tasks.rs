@@ -1456,7 +1456,7 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::sync::atomic::AtomicBool;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     struct ReleaseProbe(Arc<AtomicBool>);
 
@@ -1503,6 +1503,36 @@ mod tests {
             completed: Arc::new(AtomicUsize::new(0)),
             cancel: Arc::new(AtomicBool::new(cancelled)),
             worker: None,
+        }
+    }
+
+    fn wait_for_flag(flag: &AtomicBool, timeout: Duration, label: &str) {
+        let started = Instant::now();
+        while !flag.load(Ordering::Acquire) {
+            if started.elapsed() >= timeout {
+                panic!("{label}: flag was not set within {timeout:?}");
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn wait_for_terminal(tasks: &mut Tasks, session: &mut Session, id: &str, timeout: Duration, label: &str) -> TerminalTask {
+        let started = Instant::now();
+        loop {
+            tasks.poll(session);
+            if let Some(task) = tasks.completed_jobs().into_iter().find(|task| task.id == id) {
+                return task;
+            }
+            if started.elapsed() >= timeout {
+                let status = tasks
+                    .statuses()
+                    .into_iter()
+                    .find(|job| job.id == id)
+                    .map(|job| format!("progress={}/{}", job.completed, job.total))
+                    .unwrap_or_else(|| "task absent from running & completed records".into());
+                panic!("{label}: task {id} did not reach terminal state within {timeout:?}; {status}");
+            }
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -1623,14 +1653,7 @@ mod tests {
         let Ok(started) = started else { return };
         let Some(task_id) = started.get("taskId").and_then(Value::as_str) else { return };
         assert_eq!(started.get("kind").and_then(Value::as_str), Some("cullApply"));
-        for _ in 0..2_000 {
-            tasks.poll(&mut session);
-            if !tasks.running() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        let terminal = tasks.completed_jobs().into_iter().find(|job| job.id == task_id).expect("cull apply terminal record");
+        let terminal = wait_for_terminal(&mut tasks, &mut session, task_id, Duration::from_secs(10), "cull apply");
         assert_eq!(terminal.state, "done");
         assert_eq!(terminal.result.as_ref().and_then(|value| value.get("accepted")).and_then(Value::as_u64), Some(1));
         assert_eq!(session.undo.len(), undo_before + 1, "accepted flags are one undoable batch");
@@ -1856,24 +1879,11 @@ mod tests {
         let mut tasks = Tasks::new();
         let response = tasks.start_import_review(&mut session, &json!({"paths": [path.to_string_lossy()]})).expect("review task starts");
         let task_id = response["taskId"].as_str().expect("task id").to_string();
-        for _ in 0..200 {
-            if entered.load(Ordering::Acquire) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        assert!(entered.load(Ordering::Acquire), "probe should run off owner thread");
+        wait_for_flag(&entered, Duration::from_secs(5), "import review probe");
         assert_eq!(tasks.cancel(Some(&task_id)).expect("cancel review")["cancelled"], 1);
         assert_eq!(session.selection, selection_before, "cancellation must not change selection");
         release.store(true, Ordering::Release);
-        for _ in 0..200 {
-            tasks.poll(&mut session);
-            if tasks.completed_jobs().iter().any(|task| task.id == task_id) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        let cancelled = tasks.completed_jobs().into_iter().find(|task| task.id == task_id).expect("cancelled review terminal record");
+        let cancelled = wait_for_terminal(&mut tasks, &mut session, &task_id, Duration::from_secs(10), "cancelled import review");
         assert_eq!(cancelled.state, "cancelled");
 
         session.media.file_probe = Some(Arc::new(|_| {
@@ -1888,14 +1898,7 @@ mod tests {
         }));
         let response = tasks.start_import_review(&mut session, &json!({"paths": [path.to_string_lossy()]})).expect("second review task starts");
         let task_id = response["taskId"].as_str().expect("task id").to_string();
-        for _ in 0..200 {
-            tasks.poll(&mut session);
-            if tasks.completed_jobs().iter().any(|task| task.id == task_id) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        let completed = tasks.completed_jobs().into_iter().find(|task| task.id == task_id).expect("review terminal record");
+        let completed = wait_for_terminal(&mut tasks, &mut session, &task_id, Duration::from_secs(10), "import review");
         assert_eq!(completed.state, "done");
         assert_eq!(completed.result.as_ref().and_then(|value| value.get("scanned")).and_then(Value::as_u64), Some(1));
         assert_eq!(completed.result.as_ref().and_then(|value| value.get("duplicates")).and_then(Value::as_u64), Some(0));

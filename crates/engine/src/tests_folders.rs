@@ -255,7 +255,7 @@ fn following_a_folder_keeps_the_case_of_the_subfolder_names() {
     let mut s = Session::new();
     s.filter.library_folder = Some("/A/Trip/Day1".into());
     crate::cmd::browse::follow_folder(&mut s, "/A/Trip", "/B");
-    assert_eq!(s.filter.library_folder.as_deref(), Some(std::path::Path::new("/B").join("Day1").to_str().unwrap()));
+    assert_eq!(s.filter.library_folder.as_deref(), Some("/B/Day1"));
 }
 
 #[test]

@@ -75,6 +75,7 @@ fn rebind_proposal(proposal: &mut Value) {
             .str(row["flag"].as_str().expect("proposal flag"));
         hash.u64((row["sharpness"].as_f64().expect("proposal sharpness") as f32).to_bits() as u64)
             .u64((row["clipped"].as_f64().expect("proposal clipped") as f32).to_bits() as u64)
+            .u64((!row["group"].is_null()) as u64)
             .u64(row["group"].as_u64().unwrap_or(0))
             .u64(row["best"].as_bool().expect("proposal best") as u64)
             .str(row["proposedFlag"].as_str().unwrap_or(""));

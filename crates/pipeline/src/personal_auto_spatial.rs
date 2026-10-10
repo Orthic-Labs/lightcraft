@@ -200,12 +200,19 @@ mod tests {
         let (info, settings) = settings();
         let features = SpatialFeatureVector::from_pipeline(&quadrants(false), &info, &settings).unwrap();
         let expected = |value: f64| (value / 0.18).log2();
+        let expected_chroma = |value: f32| {
+            let lab = oklab_from_2020([value; 3]);
+            f64::from(lab[1]).hypot(f64::from(lab[2]))
+        };
         assert!((features.0[0] - expected(0.04)).abs() < 1e-5);
         assert!((features.0[3] - expected(0.16)).abs() < 1e-5);
         assert!((features.0[6] - expected(0.25)).abs() < 1e-5);
         assert!((features.0[9] - expected(0.64)).abs() < 1e-5);
         assert!(features.0[1].abs() < 1e-5);
-        assert!(features.0[2].abs() < 1e-5);
+        assert!((features.0[2] - expected_chroma(0.04)).abs() < 1e-7);
+        assert!((features.0[5] - expected_chroma(0.16)).abs() < 1e-7);
+        assert!((features.0[8] - expected_chroma(0.25)).abs() < 1e-7);
+        assert!((features.0[11] - expected_chroma(0.64)).abs() < 1e-7);
 
         let varied = Rgb32f::from_fn(8, 8, |x, y| {
             let bases = [0.04, 0.16, 0.25, 0.64];
@@ -259,8 +266,8 @@ mod tests {
         settings.wb.temp = 2000.0;
         settings.wb.tint = 0.0;
         let matrix = crate::local::wb_matrix_for(&info, &settings).expect("custom WB matrix");
-        assert!(matrix[0][0].is_finite() && matrix[0][0] > 1.0, "{matrix:?}");
-        let source = Rgb32f::from_fn(2, 2, |_, _| [f32::MAX, 0.0, 0.0]);
+        assert!(matrix[2][2].is_finite() && matrix[2][2] > 1.0, "{matrix:?}");
+        let source = Rgb32f::from_fn(2, 2, |_, _| [0.0, 0.0, f32::MAX]);
         assert!(matches!(SpatialFeatureVector::from_pipeline(&source, &info, &settings), Err(PersonalAutoError::NonFinite(_))));
     }
 
