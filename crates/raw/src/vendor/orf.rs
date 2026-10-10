@@ -361,6 +361,8 @@ mod tests {
         let bytes = orf(w as u32, h as u32, 16, words);
         assert_eq!(crate::probe(&bytes), Some(RawFormat::Orf));
         let r = crate::decode(&bytes).unwrap();
+        assert_eq!(r.format, RawFormat::Orf);
+        assert!(r.format.is_supported());
         assert_eq!((r.data.clone(), r.bits), (RawData::U16(px.clone()), 12));
         // 12-bit: MSB-first stream, every 32-bit word byte-swapped
         let mut be = Vec::new();
