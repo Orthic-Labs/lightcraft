@@ -1,5 +1,5 @@
 import { createPortal } from 'react-dom';
-import { useCallback, useMemo, useRef, type HTMLAttributes, type KeyboardEventHandler, type ReactNode } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, type HTMLAttributes, type KeyboardEventHandler, type ReactNode } from 'react';
 
 type RetainedFocus = { target: HTMLElement | null; root: boolean };
 
@@ -39,24 +39,52 @@ export function RetainedLayout({ geometryKey, children, className, style, onKeyD
     return element;
   }, []);
   const ownerRef = useRef<HTMLDivElement>(null);
+  const shellRef = useRef<HTMLDivElement | null>(null);
   const focusRef = useRef<RetainedFocus | null>(null);
 
   const attachShell = useCallback((shell: HTMLDivElement | null) => {
     if (!shell || !host) return;
+    shellRef.current = shell;
     moveHost(host, shell);
-    const focus = focusRef.current;
-    focusRef.current = null;
-    if (focus?.root) shell.focus({ preventScroll: true });
-    else if (focus?.target && focus.target.isConnected) focus.target.focus({ preventScroll: true });
     return () => {
+      focusRef.current = null;
       const active = document.activeElement;
       if (active instanceof HTMLElement && shell.contains(active)) {
         focusRef.current = active === shell ? { target: null, root: true } : { target: active, root: false };
       }
+      if (shellRef.current === shell) shellRef.current = null;
       const owner = ownerRef.current ?? shell.parentElement;
       if (owner) moveHost(host, owner);
     };
   }, [host]);
+
+  useLayoutEffect(() => {
+    const focus = focusRef.current;
+    const shell = shellRef.current;
+    if (!focus || !shell) return;
+    const active = document.activeElement;
+    const target = focus.root ? shell : focus.target;
+    if (!target || !target.isConnected) {
+      focusRef.current = null;
+      return;
+    }
+    if (active === target) {
+      focusRef.current = null;
+      return;
+    }
+    const focusWasLost = active === document.body || active === document.documentElement || active === shell || active === focus.target;
+    if (!focusWasLost) {
+      focusRef.current = null;
+      return;
+    }
+    const ownsTarget = focus.root ? target === shell : host?.contains(target);
+    if (!ownsTarget) {
+      focusRef.current = null;
+      return;
+    }
+    target.focus({ preventScroll: true });
+    focusRef.current = null;
+  }, [geometryKey]);
 
   const handleKeyDown: KeyboardEventHandler<HTMLDivElement> | undefined = onKeyDown;
   return (
