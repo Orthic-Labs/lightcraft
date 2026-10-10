@@ -51,6 +51,22 @@ both targets at that revision, with Windows passing and macOS hidden native QA
 failing. No current-revision run exists because GitHub rejects dispatch before
 workflow execution.
 
+Mac candidate job `113631654261` failed its hard foreground guard: sampled names were `LSDisplayName`,
+`owned_frontmost_pids` was empty & PID sampling was unavailable. This is missing proof of hidden operation, not proof
+that an owned process activated. Native IPC/scalability journeys also reported stale hidden WebKit layout. Current
+source retains foreground assertions & does not launch/install another app to work around these failures.
+
+Registry-source audit of `rightkit-qa` 0.2.12 versus 0.2.14 found identical control/process/guard implementations.
+0.2.14 changes ffprobe precedence, hashing provider & dependency edges; it does not repair unavailable frontmost PID
+sampling. Exact 0.2.12 pin is retained. Qualification requires reliable PID evidence & passing layout journeys, not
+relaxing `owned_never_frontmost` when observed owned PID list is empty.
+
+`rightkit-control` 0.1.9/0.1.10/0.1.11 have identical `mac.rs` frontmost readers. Separate `lsappinfo` calls parse an
+exact `pid =` substring for PID & the first quoted token for name; missing PID/inventory evidence fails closed. Name
+`LSDisplayName` is therefore not reliable application identity. QA StopReport does not distinguish unavailable PID,
+inventory failure & missing identity registration. Required SDK repair is robust PID acquisition plus explicit failure
+diagnostics, then published dependency update & exact-artifact native qualification. No published upgrade solves it.
+
 Workflow regeneration was inspected before retaining this correction. Current
 `@rightkit/release` ownership source defines required hosts as `windows` and
 `macos`; its trust-path selector throws `ownership approval unsupported
