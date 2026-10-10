@@ -859,8 +859,8 @@ fn train_model(manifest: &Manifest, manifest_digest: &str) -> Result<Value, Stri
     let status = if weak.is_some() || ember.is_some() { "experimentalTrainedUnqualified" } else { "harness-only" };
     let mut variants = Map::new();
     let no_train_variants = weak.is_none() && ember.is_none();
-    variants.insert(Variant::Weak.key().to_owned(), weak.map_or(Value::Null, |value| value));
-    variants.insert(Variant::Ember.key().to_owned(), ember.map_or(Value::Null, |value| value));
+    variants.insert(Variant::Weak.key().to_owned(), weak.unwrap_or(Value::Null));
+    variants.insert(Variant::Ember.key().to_owned(), ember.unwrap_or(Value::Null));
     let mut eligibility = Map::new();
     if let Some(value) = weak_eligibility {
         eligibility.insert(Variant::Weak.key().to_owned(), value);
@@ -1202,9 +1202,10 @@ fn metric(pairs: &[(f64, f64)]) -> Value {
     baseline_values.sort_by(f64::total_cmp);
     regressor_values.sort_by(f64::total_cmp);
     let middle = pairs.len() / 2;
-    let baseline_median = if pairs.len() % 2 == 0 { (baseline_values[middle - 1] + baseline_values[middle]) / 2.0 } else { baseline_values[middle] };
+    let baseline_median =
+        if pairs.len().is_multiple_of(2) { (baseline_values[middle - 1] + baseline_values[middle]) / 2.0 } else { baseline_values[middle] };
     let regressor_median =
-        if pairs.len() % 2 == 0 { (regressor_values[middle - 1] + regressor_values[middle]) / 2.0 } else { regressor_values[middle] };
+        if pairs.len().is_multiple_of(2) { (regressor_values[middle - 1] + regressor_values[middle]) / 2.0 } else { regressor_values[middle] };
     let improvements = pairs.iter().filter(|pair| pair.1 < pair.0).count();
     let gain = if baseline > 0.0 { Some((baseline - regressor) / baseline) } else { None };
     json!({"distance": "normalizedL1StyleEditDistance", "count": pairs.len(), "baselineMean": baseline, "baselineMedian": baseline_median, "regressorMean": regressor, "regressorMedian": regressor_median, "gain": gain, "pairedImprovementRate": improvements as f64 / pairs.len() as f64})
