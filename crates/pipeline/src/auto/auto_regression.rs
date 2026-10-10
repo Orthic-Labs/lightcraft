@@ -184,12 +184,21 @@ fn ordinary_underexposed_auto_reaches_middle_exposure_in_render() {
     let a = auto_tone(&src, &SourceInfo::default(), &DevelopSettings::default());
     let median = median_after(&src, a);
     let pixels = output_luma(&auto_render(&src));
-    let legacy = output_luma(&render_with(&src, &legacy_settings(&src)));
+    let legacy_settings = legacy_settings(&src);
+    let legacy = output_luma(&render_with(&src, &legacy_settings));
+    let clipped = |v: &[f32]| v.iter().filter(|v| **v > 0.98).count() as f32 / v.len() as f32;
+    // reaches middle grey (the legacy rule left a bias), lifts the mid-tones at least as much
+    // as the legacy rule, and clips no more of the bright wall than it did
+    let mid = |v: &[f32]| v.iter().filter(|v| (0.1..0.98).contains(*v)).sum::<f32>() / v.len() as f32;
     assert!(
-        median > -0.25 && mean(&pixels) > mean(&legacy) + 0.02,
-        "median {median:.2}, mean {:.3}/{:.3}, settings {a:?}",
+        median > -0.25 && a.exposure > legacy_settings.light.exposure + 0.2 && mid(&pixels) >= mid(&legacy) && clipped(&pixels) <= clipped(&legacy),
+        "median {median:.2}, mean {:.3}/{:.3}, mid {:.3}/{:.3}, clipped {:.3}/{:.3}, settings {a:?}",
         mean(&pixels),
-        mean(&legacy)
+        mean(&legacy),
+        mid(&pixels),
+        mid(&legacy),
+        clipped(&pixels),
+        clipped(&legacy)
     );
 }
 
@@ -286,4 +295,48 @@ fn invalid_pixels_never_make_auto_non_finite() {
 fn empty_input_returns_neutral_finite_settings() {
     let a = auto_tone(&Rgb32f::new(0, 0), &SourceInfo::default(), &DevelopSettings::default());
     assert_eq!(a, AutoTone::default());
+}
+
+#[test]
+fn auto_is_a_pure_function_of_its_input() {
+    for src in [low_key_scene(), ordinary_underexposed_scene(), high_key_scene(), backlit_scene()] {
+        let a = auto_tone(&src, &SourceInfo::default(), &DevelopSettings::default());
+        let b = auto_tone(&src, &SourceInfo::default(), &DevelopSettings::default());
+        assert_eq!(a, b);
+        let raw = SourceInfo { raw: true, ..Default::default() };
+        assert_eq!(auto_tone(&src, &raw, &DevelopSettings::default()), auto_tone(&src, &raw, &DevelopSettings::default()));
+    }
+}
+
+#[test]
+fn burst_frames_across_a_key_threshold_get_nearly_the_same_auto() {
+    // Two frames of one burst, 6 % apart in brightness, straddling the low-key boundary
+    // (median −1.35 EV). A branch on that boundary moved exposure by almost a stop between them.
+    let scale = |g: f32| {
+        let mut s = low_key_scene();
+        s.map_in_place(|p| p.map(|v| v * g));
+        s
+    };
+    let (a, b) = (scale(6.9), scale(7.3));
+    let ta = auto_tone(&a, &SourceInfo::default(), &DevelopSettings::default());
+    let tb = auto_tone(&b, &SourceInfo::default(), &DevelopSettings::default());
+    let ma = percentile(&source_ev(&a), 0.5);
+    let mb = percentile(&source_ev(&b), 0.5);
+    assert!(ma < -1.35 && mb > -1.35, "frames should straddle the threshold: {ma:.2} / {mb:.2}");
+    assert!((ta.exposure - tb.exposure).abs() < 0.3, "exposure jumped across a burst: {ta:?} vs {tb:?}");
+    for (x, y) in
+        [(ta.contrast, tb.contrast), (ta.highlights, tb.highlights), (ta.shadows, tb.shadows), (ta.whites, tb.whites), (ta.blacks, tb.blacks)]
+    {
+        assert!((x - y).abs() <= 12.0, "a shaping slider jumped across a burst: {ta:?} vs {tb:?}");
+    }
+}
+
+#[test]
+fn fitted_sliders_track_the_tone_map_of_the_source_kind() {
+    // The fit reads the real tone map: a raw (Reinhard shoulder, highlight headroom) and a
+    // display-referred source (clips at 1.0) get different recovery for the same bright tail.
+    let src = ordinary_underexposed_scene();
+    let raw = auto_tone(&src, &SourceInfo { raw: true, ..Default::default() }, &DevelopSettings::default());
+    let jpeg = auto_tone(&src, &SourceInfo::default(), &DevelopSettings::default());
+    assert!(jpeg.highlights < raw.highlights, "display source needs more recovery: raw {raw:?}, jpeg {jpeg:?}");
 }
