@@ -36,13 +36,13 @@ required photo tables still report errors. Unrelated unsupported schemas are ign
 WITHOUT ROWID or virtual table produces an explicit error, handled as a warning when optional.
 
 Develop settings reuse the existing XMP/preset mapper. Supported sliders, curves and supported
-mask structures remain editable, but this is approximate rendering: camera profiles, Adobe AI
+mask structures remain editable, but this is approximate rendering: camera profiles, reference-editor AI
 models, some masking/retouch fields and process-version algorithms are not reproduced. Unmapped
 fields are reported. When a recovery archive is saved, it retains source settings/history/snapshots
 and original smart-collection rules. Smart collections become regular albums with current
 membership. Archived history and snapshots are source data, not native Ember history yet.
 Lightroom's `-999999` deferred-adjustment sentinel is omitted from both catalog and XMP mappings;
-it is reported, included in any saved archive, and never clamped into a real slider value. Deferred Adobe Auto Tone
+it is reported, included in any saved archive, and never clamped into a real slider value. Deferred automatic tone
 is not evaluated by the importer; Ember's Auto control remains available after migration.
 
 Native desktop inspection/import runs on a cancellable background worker with progress. Only

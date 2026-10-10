@@ -1,6 +1,6 @@
 # Offline denoise qualification
 
-Status, 2026-10-10: procedural CPU baseline measured through generated CI. Production Ember has classical RGB luminance/chroma noise reduction; no learned denoiser is qualified. Adobe's disclosed joint raw demosaic/denoise & current non-destructive workflow are studied separately in [Adobe Denoise research](adobe-denoise-research.md).
+Status, 2026-10-10: procedural CPU baseline measured through generated CI. Production Ember has classical RGB luminance/chroma noise reduction; no learned denoiser is qualified.
 
 ## Procedural baseline
 
@@ -8,7 +8,7 @@ Status, 2026-10-10: procedural CPU baseline measured through generated CI. Produ
 lightcraft-cli ai denoise baseline --hardware M6_CPU --source-revision REVISION --out NEW_REPORT.json --size 128 --repeats 3
 ```
 
-Run through generated RightKit native Actions. `--size` accepts 64..512 & `--repeats` accepts 2..10 warm calls after one first call; defaults are 128 & 3. Hardware/revision labels are supplied metadata, not independently verified machine/source identities. Output is create-new, capped numeric JSON. No input files, personal photos, catalog, model, provider or Adobe assets are accessed.
+Run through generated RightKit native Actions. `--size` accepts 64..512 & `--repeats` accepts 2..10 warm calls after one first call; defaults are 128 & 3. Hardware/revision labels are supplied metadata, not independently verified machine/source identities. Output is create-new, capped numeric JSON. No input files, personal photos, catalog, model, provider or reference-product assets are accessed.
 
 Original procedural linear Rec.2020 patterns cover flat shadows, color patches/gradient, hard step edges, fine texture & intentionally soft edges. Fixed-seed synthetic signal-dependent/read noise supplies repeatable noisy inputs; its constants do not represent a calibrated camera. Identity output & production `pipeline::local::denoise` at amounts 0, 25, 50, 75 & 100 are compared against each clean pattern. Both luminance & color NR receive the amount; remaining detail controls keep defaults. Source/output longest sides match, so preview scaling is not part of this condition.
 
@@ -46,6 +46,6 @@ Fork Actions are restored & now produce baseline receipts on candidate builds. K
 
 Mac host metadata was Apple M1 (Virtual), 3 CPUs & 7,516,196,864 bytes memory; nonzero-NR warm p50 ranged 0.391–0.482 ms & p95 0.392–0.784 ms. Windows metadata was AMD EPYC 7763 64-Core Processor, 4 CPUs & 17,174,360,064 bytes; warm p50 ranged 1.842–2.319 ms & p95 1.955–2.436 ms. Mac & Windows CLI hashes were fbce434888b0892eb8c8cbb5b90a0625d5246d350bf9dc8c404fcaeb7170e2c3 & 30b3e43909d95f0320c92f671e23da40bc114e3180ec05f841c3c2533ea54915.
 
-Cross-platform pixel SHA-256 values are not bit-identical, including noisy/output buffers & one soft-edge clean buffer, so receipts bind each platform independently. Results describe synthetic RGB guided-NR behavior only; they provide no photographic, learned-model, Adobe-parity or Metal evidence.
+Cross-platform pixel SHA-256 values are not bit-identical, including noisy/output buffers & one soft-edge clean buffer, so receipts bind each platform independently. Results describe synthetic RGB guided-NR behavior only; they provide no photographic, learned-model or Metal evidence.
 
 Next compare a rights-cleared RGB candidate against identical procedural & consented photographic conditions.

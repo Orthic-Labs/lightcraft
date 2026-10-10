@@ -15,6 +15,6 @@ New bundle identity registers Ember separately from an installed LightCraft copy
 
 ## Original artwork
 
-`assets/app-icon/ember.svg` is original Orthic Labs flame artwork, rendered reproducibly into macOS/Windows/Linux assets by `packaging/icons.sh`. `packaging/macos/dmg/background.svg` supplies installer artwork. Neither derives from ArtCraft or Adobe product assets. Attribution & licences are recorded in `assets/ATTRIBUTION.md` & `assets/app-icon/LICENSE.txt`.
+`assets/app-icon/ember.svg` is original Orthic Labs flame artwork, rendered reproducibly into macOS/Windows/Linux assets by `packaging/icons.sh`. `packaging/macos/dmg/background.svg` supplies installer artwork. Neither derives from ArtCraft or reference-product assets. Attribution & licences are recorded in `assets/ATTRIBUTION.md` & `assets/app-icon/LICENSE.txt`.
 
 ArtCraft marks are removed. `docs/brand/LICENSE-brand.txt` remains only as upstream legal provenance. Plain-text LightCraft/ArtCraft attribution, copyrights, licence notices & contributor/model credits are preserved.

@@ -42,9 +42,9 @@ Current slider coalescing/cancellation fixes already exist in fork. Upstream's >
 
 ## Auto evidence & Personal Auto impact
 
-Auto tuning commit `8b9a0200` contains six procedural tests, but no reproducible 24-Sony-RAW evaluation manifest, source hashes or reference exports. Its numerical Lightroom comparison is developer-reported. Sony DRO correction `5a61fc5f` is a sibling change that alters source tone after fitting; reported DRO examples already underperform an unedited baseline. Treat calibration as a candidate to evaluate, not a proven universal improvement.
+Auto tuning commit `8b9a0200` contains six procedural tests, but no reproducible 24-Sony-RAW evaluation manifest, source hashes or reference exports. Its numerical comparison is developer-reported. Sony DRO correction `5a61fc5f` is a sibling change that alters source tone after fitting; reported DRO examples already underperform an unedited baseline. Treat calibration as a candidate to evaluate, not a proven universal improvement.
 
-Camera-fit changes `cc7bf0e2`, `c691bcfa`, `24427912`, `7408f11f` & `c21c305e` belong together; DRO must retain its explicitly attributed CC0 input. No Adobe assets belong in Ember. Refit Auto after changing RAW reconstruction, WB, camera looks, process behavior or fitting, then re-extract/retrain Personal Auto. Experimental extraction now binds source pixels, source/settings facts, canonical numeric inputs & renderer identity through baseline receipts. Matching supplied receipts establishes consistency; held-out rendered comparisons remain required before any render-quality claim.
+Camera-fit changes `cc7bf0e2`, `c691bcfa`, `24427912`, `7408f11f` & `c21c305e` belong together; DRO must retain its explicitly attributed CC0 input. No reference-product assets belong in Ember. Refit Auto after changing RAW reconstruction, WB, camera looks, process behavior or fitting, then re-extract/retrain Personal Auto. Experimental extraction now binds source pixels, source/settings facts, canonical numeric inputs & renderer identity through baseline receipts. Matching supplied receipts establishes consistency; held-out rendered comparisons remain required before any render-quality claim.
 
 ## Qualification before desktop adoption
 

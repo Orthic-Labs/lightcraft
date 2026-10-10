@@ -32,7 +32,7 @@ Sizes are exact bytes where source publishes them; MiB uses 2²⁰ bytes. Parame
 
 ### License reading
 
-Code license does not automatically license checkpoint bytes or training data. NIMA, MUSIQ & MANIQA weights need explicit redistribution decisions before any download or packaging. DINOv2 model card states Apache-2.0 for model; pinned sources expose no separate binary notice. Scratch receipt records exact URL, bytes & SHA-256; packaging still needs attribution & redistribution review. No GPL, Adobe or C++ ONNX Runtime source is used here.
+Code license does not automatically license checkpoint bytes or training data. NIMA, MUSIQ & MANIQA weights need explicit redistribution decisions before any download or packaging. DINOv2 model card states Apache-2.0 for model; pinned sources expose no separate binary notice. Scratch receipt records exact URL, bytes & SHA-256; packaging still needs attribution & redistribution review. No GPL, reference-product or C++ ONNX Runtime source is used here.
 
 ### Metrics boundary
 

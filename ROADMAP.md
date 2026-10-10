@@ -1,6 +1,6 @@
 # Ember roadmap
 
-Milestones toward full Adobe Lightroom parity (cloud Lightroom first, then every Lightroom Classic module), with wall-clock
+Milestones toward full Lightroom parity (cloud Lightroom first, then every Lightroom Classic module), with wall-clock
 estimates for continuous (24/7) agent-driven development with 4–6 parallel agents. Estimates are calibrated on the sibling
 projects (DrawCraft reached its first four milestones in ≈ 4½ h) and are revised as milestones land.
 
@@ -114,7 +114,7 @@ parity` prints this line on every run, so it stays current):
 The 2026-10-05 count includes three new 🟡 rows that make quality gaps visible (camera colour calibration, verified
 camera coverage, render fidelity), which is why P0 dipped slightly.
 
-✅ counts 1, 🟡 ½, ⬜ 0; out-of-scope rows (cloud sharing, Adobe accounts…) are left out.
+✅ counts 1, 🟡 ½, ⬜ 0; out-of-scope rows (cloud sharing, vendor accounts…) are left out.
 
 **By remaining effort** — rows are not equal: a shortcut and the whole Book module are one row each, and what is
 left is the heavy part (AI, video, Classic output modules, undocumented raw codecs). Remaining work in **Opus agent-hours**
@@ -160,13 +160,13 @@ The milestone estimates in the table above were made before work started and are
 
 - **AI features** (subject/sky/people masks, generative remove) need model weights with licences we can ship; classical
   fallbacks first. No permissively licensed sky-segmentation or raw-denoise model was found — we may need to train our own.
-- **Camera colour and lens data** is a data problem: we never use Adobe's matrices, DCPs or LCPs. DNG-embedded data first,
+- **Camera colour and lens data** is a data problem: we never use reference-editor matrices, DCPs or LCPs. DNG-embedded data first,
   then our own calibration; long-tail camera/lens coverage grows over time.
 - **Raw-format sources:** decided 2026-10-05: decoders are written from *prose* format descriptions (even ones
   published alongside GPL code); decoder source is never read. Still open: freedom-to-operate review for local
   Laplacian filters, PatchMatch and HEVC (HEIC).
-- **Look parity** with Adobe's default rendering is tuned by eye today; the planned fidelity suite (LR-BEHAV-RENDER-FIDELITY)
-  turns it into measured comparisons against local-only Lightroom references.
+- **Look rendering** is tuned by eye today; the planned fidelity suite (LR-BEHAV-RENDER-FIDELITY)
+  turns it into measured output against local reference fixtures.
 
 ## Raw format coverage and known gaps
 
@@ -192,7 +192,7 @@ Not decoded yet — preview only (no permissively licensed description; black-bo
 **Camera colour matrices:** ARW, NEF, RW2, RAF, CR3, CR2 and PEF files can use guarded, separate chromaticity and tone estimates from their own embedded JPEG (see `docs/camera-preview-colour.md`); this is a per-file camera-look estimate with relative WB, not measured calibration or absolute-Kelvin WB. Other non-DNG raws and rejected fits use the documented neutral fallback (camera RGB ≈ linear sRGB, flagged
 `matrix_is_fallback`) with the file's as-shot white-balance multipliers. Clean sources to evaluate next: manufacturer
 matrices stored in the files themselves (Olympus ImageProcessing `ColorMatrix`, Pentax equivalents; Panasonic RW2 files carry none) and our
-own chart-based calibration (M11.4). Adobe matrices are never used.
+own chart-based calibration (M11.4). Reference-editor matrices are never used.
 
 ## Lightroom Classic catalog migration
 
@@ -202,12 +202,12 @@ collections/sets, virtual copies and supported develop settings migrate into Emb
 are preserved by default, reimport identities are persistent, and source settings/history/snapshots are
 archived before catalog mutation. Missing originals remain available for relinking.
 
-Rendering is approximate: unsupported Adobe profiles/AI/process settings are reported and archived;
+Rendering is approximate: unsupported reference-editor profiles/AI/process settings are reported and archived;
 history/snapshots remain source data, and smart collections import current membership. The Lightroom
 database is read-only; Ember owns subsequent edits. See `docs/lightroom-catalog-import.md`.
 
 ## Log
-- 2026-09-30: roadmap created; M0 in progress; research docs (Lightroom reference, Rust imaging ecosystem) complete.
+- 2026-09-30: roadmap created; M0 in progress.
 - 2026-09-30 (later): app running with the full Lightroom-style UI; pipeline v0; DNG/CR2/ARW; README showcase. ≈ 8 h elapsed.
 - 2026-10-02: parity estimate added (xtask parity prints weighted completion); milestone statuses refreshed.
 - 2026-10-08: Fujifilm camera colour: guarded JPEG matching and relative WB, plus bundled X-H2S/X-T4 profiles from 201/545 photos. On 150 withheld files the pooled profiles improve mean ΔE slightly over per-file fitting (X-H2S 1.70 → 1.62, X-T4 2.43 → 2.34); dark X-H2S samples 8.74 → 2.25. Measured calibration remains open.

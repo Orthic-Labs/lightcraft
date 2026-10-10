@@ -151,5 +151,5 @@ Run all three variants offline in shadow mode against immutable manifest. Releas
 only after thresholds above pass twice from clean manifests, including camera-held-out results;
 otherwise retain current deterministicAuto. Initial rollout, if later approved, is opt-in,
 confidence-gated, reversible per photo, & suggestion-only until further review. No automatic
-catalog mutation, provider call, Adobe-app-bundle read, or model-supply claim is part of this
+catalog mutation, provider call, reference-editor app-bundle read, or model-supply claim is part of this
 evaluation.

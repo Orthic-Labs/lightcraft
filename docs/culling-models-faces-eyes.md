@@ -57,7 +57,7 @@ evaluation exists yet.
 ### License reading rule
 
 Inference code, model weights & training data are separate artifacts. A permissive repository license does not cure
-research-only weights, absent weight terms, absent checksums or unknown dataset rights. No GPL/LGPL/AGPL or Adobe
+research-only weights, absent weight terms, absent checksums or unknown dataset rights. No GPL/LGPL/AGPL or reference-product
 source/assets are included in this review.
 
 ## Bounded pure-Rust prototype

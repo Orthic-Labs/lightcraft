@@ -21,7 +21,7 @@ Stripes decode in parallel using the existing Rayon dependency. Offsets, sizes, 
 
 ## Verification
 
-Complete sensor arrays were compared sample by sample with an external decoder used only as a black-box oracle (rawpy 0.27.1). No decoder source, Adobe data, camera matrices or profiles were used. This tool is not a product or test dependency.
+Complete sensor arrays were compared sample by sample with an external decoder used only as a black-box oracle (rawpy 0.27.1). No decoder source, reference-product data, camera matrices or profiles were used. This tool is not a product or test dependency.
 
 | Coverage | Files |
 |---|---|

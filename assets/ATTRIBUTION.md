@@ -1,7 +1,7 @@
 # Asset attribution
 
-Every asset shipped in this repository is listed here (see the asset rules in `AGENTS.md`). No asset may come from
-Adobe products. Add an entry in the same commit as the asset.
+Every asset shipped in this repository is listed here (see the asset rules in `AGENTS.md`). Reference-product
+assets are excluded. Add an entry in the same commit as the asset.
 `cargo xtask assets` (part of `cargo xtask ci`) fails if any image, icon, font, sound, video, raw file or colour profile
 in the repository is not matched by a path pattern in the first column (`*` = any characters except `/`; a trailing `/`
 covers a whole directory), or if a licence file referenced in the Licence column is missing.
@@ -10,9 +10,9 @@ covers a whole directory), or if a licence file referenced in the Licence column
 |---|---|---|---|---|---|---|
 | `assets/fonts/Inter-*.ttf` (Regular, Medium, SemiBold) | Inter | Rasmus Andersson | https://github.com/rsms/inter | SIL Open Font License 1.1 (`assets/fonts/OFL-Inter.txt`) | 2026-09-30 | none |
 | `assets/app-icon/` (Ember SVG & derived PNG/ICNS/ICO files) | Ember flame icon | Orthic Labs | original work; `assets/app-icon/ember.svg` | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) | 2026-10-09 | supersampled PNG/ICO/ICNS renders via `packaging/render-icons.py` |
-| `assets/camera-profiles/*.json` | Camera colour profiles (matrix + hue/saturation/value table), built into LightCraft | ILCE-7M4: Harald Hoyer | original work: fitted by `lightcraft-cli calibrate` to the contributor's own raw photos and their in-camera JPEGs (597 ILCE-7M4 photos, 2026); aggregate colour statistics only, no image content; no Adobe or third-party profile data | MIT OR Apache-2.0 | 2026-10-07 | none |
+| `assets/camera-profiles/*.json` | Camera colour profiles (matrix + hue/saturation/value table), built into LightCraft | ILCE-7M4: Harald Hoyer | original work: fitted by `lightcraft-cli calibrate` to the contributor's own raw photos and their in-camera JPEGs (597 ILCE-7M4 photos, 2026); aggregate colour statistics only, no image content or third-party profile data | MIT OR Apache-2.0 | 2026-10-07 | none |
 | `packaging/macos/dmg/` (SVG, TIFF & layout) | Ember macOS installer artwork | Orthic Labs; layout generator originally @XusBadia | original background using original Ember icon & Inter; generator adapted from upstream | MIT OR Apache-2.0; Inter SIL OFL 1.1 (`assets/fonts/OFL-Inter.txt`) | 2026-10-09 | replaced background & volume/app names; rasterization uses repository Inter fonts |
-| `assets/camera-profiles/X-H2S.json`, `assets/camera-profiles/X-T4.json` | Fujifilm camera colour profiles (matrix + hue/saturation/value table), built into LightCraft | LightCraft contributors; source photographs supplied by Sebastian Pfluegelmeier | original work: fitted by `lightcraft-cli calibrate` to 201 X-H2S and 545 X-T4 RAFs and their in-camera JPEGs; aggregate colour statistics only, no image content; no Adobe or third-party profile data | MIT OR Apache-2.0 | 2026-10-08 | none |
+| `assets/camera-profiles/X-H2S.json`, `assets/camera-profiles/X-T4.json` | Fujifilm camera colour profiles (matrix + hue/saturation/value table), built into LightCraft | LightCraft contributors; source photographs supplied by Sebastian Pfluegelmeier | original work: fitted by `lightcraft-cli calibrate` to 201 X-H2S and 545 X-T4 RAFs and their in-camera JPEGs; aggregate colour statistics only, no image content or third-party profile data | MIT OR Apache-2.0 | 2026-10-08 | none |
 | `crates/scenes/` (generated images) | Procedural demo photographs | LightCraft contributors | original work (generated at runtime, no source imagery) | MIT OR Apache-2.0 | 2026-09-30 | n/a |
 | `apps/lightcraft-desktop/web/src/icons.tsx` | React UI icons drawn as SVG paths in code | LightCraft contributors | original work | MIT OR Apache-2.0 | 2026-10-08 | none |
 | `crates/ui-egui/src/icons.rs` | UI icons drawn as vector paths in code | LightCraft contributors | original work | MIT OR Apache-2.0 | 2026-09-30 | n/a |
@@ -24,8 +24,8 @@ covers a whole directory), or if a licence file referenced in the Licence column
 | craft-fonts: optional build input, not files in this repository | BIZ UDPGothic (Regular, Bold), BIZ UDMincho Regular, Shippori Mincho Regular | Morisawa Inc. / The BIZ UDGothic and BIZ UDMincho Project Authors; The Shippori Mincho Project Authors (per craft-fonts' attribution) | https://github.com/storytold/craft-fonts/blob/main/ATTRIBUTION.md | SIL Open Font License 1.1 (each font's OFL.txt in craft-fonts; release packages ship it as OFL-<family>.txt) | 2026-10-06 | none; embedded only in builds made with `CRAFT_FONTS_DIR` (all official releases); the web (wasm32) build embeds BIZ UDPGothic Regular only |
 
 Notes
-- Fonts authored or published by Adobe (Source Sans/Serif/Code, Source Han, …) are not used, even though some are
-  OFL-licensed: the asset rule excludes anything from Adobe. Source Sans 3 was removed on 2026-09-30 and replaced by Inter.
+- Source Sans/Serif/Code & Source Han fonts are excluded under the asset rule, even when OFL-licensed.
+  Source Sans 3 was removed on 2026-09-30 and replaced by Inter.
 - Japanese fonts (BIZ UDPGothic, BIZ UDMincho, Shippori Mincho) are not in this repository. They live in
   [storytold/craft-fonts](https://github.com/storytold/craft-fonts), with their licences and attribution in its
   `ATTRIBUTION.md`, and are embedded only in builds made with the optional `CRAFT_FONTS_DIR` build input (all official

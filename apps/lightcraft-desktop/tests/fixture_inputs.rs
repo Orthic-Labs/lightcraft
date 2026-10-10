@@ -154,7 +154,7 @@ fn procedural_png_seeded(width: u32, height: u32, seed: u32) -> Result<Vec<u8>, 
     Ok(encoded)
 }
 
-/// Build a minimal native SQLite database containing two Adobe images (master + virtual copy),
+/// Build a minimal native SQLite database containing two catalog images (master + virtual copy),
 /// one nested collection, and membership rows. Paths are absolute so import exercises relinking.
 pub fn synthetic_lightroom_catalog(root: &Path, file_name: &str) -> Result<Vec<u8>, String> {
     if file_name.is_empty() || Path::new(file_name).components().count() != 1 {

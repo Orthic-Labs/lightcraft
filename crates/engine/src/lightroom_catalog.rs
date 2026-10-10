@@ -1,6 +1,6 @@
 //! Direct, read-only Lightroom Classic catalog import. SQLite pages are read in Rust;
 //! Lightroom, Python and a C SQLite runtime are not needed. Original paths stay in place.
-//! Raw settings are archived before mutation; mapped edits are approximations, not Adobe renders.
+//! Raw settings are archived before mutation; mapped edits approximate reference rendering.
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{

@@ -205,5 +205,5 @@ with a blend mode other than Normal or with a mask are reported, not applied. Bi
 or `.zip` bundles — as creative profiles: they appear in the profile browser under their folder's (or zip's) name and
 take the Amount slider (0–200 %) like the built-in looks. The LUT is applied to the finished, display-encoded colour
 (trilinear; `DOMAIN_MIN` / `DOMAIN_MAX` honoured; 1D LUTs are not supported); photos with a LUT profile render on the
-CPU. A library on disk keeps a copy of each file in its `Profiles/` folder. Adobe's own profile formats (`.dcp`, XMP
+CPU. A library on disk keeps a copy of each file in its `Profiles/` folder. Reference-editor profile formats (`.dcp`, XMP
 camera/creative profiles with embedded tables) are deliberately not read.

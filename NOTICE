@@ -55,7 +55,6 @@ docs/models/mediapipe-face-landmarker-v1-qualification.json.
 The metadata inspector uses the public TensorFlow Lite schema at revision
 e3388c0b93738d8d1a59211ffe2d0643da907291 (Apache-2.0):
 https://github.com/tensorflow/tflite-micro/blob/e3388c0b93738d8d1a59211ffe2d0643da907291/tensorflow/lite/schema/schema.fbs
-No Adobe implementation, model or asset is used.
 
 MediaPipe image preprocessing, detector decoding, weighted NMS, face-crop projection,
 landmark subset & blendshape labels in crates/segment/src/mediapipe_detector.rs,

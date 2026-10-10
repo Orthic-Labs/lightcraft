@@ -22,7 +22,7 @@ Previously `SourceRef::load()` discarded the decoder's `SourceInfo`, and render 
 
 Vendor RGB WB multipliers alone do **not** identify an absolute illuminant without camera calibration. The generic model inferred approximately 6829 K / −127 tint for one Sony sample; changing only temperature retained that spurious tint and caused a pink cast. Uncalibrated ARWs, NEFs, RW2s and RAFs keep the file's vendor WB at decode and expose **relative** WB controls around the as-shot look. 6500/0 is the internal neutral reference of that relative scale, not a claim about the capture's measured Kelvin temperature. Presets, picker/auto and manual controls use this reference consistently. Switching from As Shot to Custom first resolves both controls; changing one cannot inherit stale catalog tint. Reset restores the current as-shot reference. Old As Shot numbers in a catalog do not mark an otherwise unchanged photo as edited; Custom WB remains an edit. Measured/absolute-Kelvin WB remains future camera-calibration work.
 
-Sony's proprietary `ColorMatrix` is not assumed to be a DNG XYZ-to-camera matrix. No Adobe profile/matrix or GPL decoder/calibration source is used. The product remains pure Rust.
+Sony's proprietary `ColorMatrix` is not assumed to be a DNG XYZ-to-camera matrix. No reference-editor profile/matrix or GPL decoder/calibration source is used. The product remains pure Rust.
 
 ## Validation and scope
 
@@ -83,7 +83,7 @@ Nikon maker-note `CropArea` (0x0045) supplies the default `[left, top, width, he
 
 An embedded JPEG with neither ICC nor EXIF metadata uses Nikon maker-note `ColorSpace` (0x001e: 1 = sRGB, 2 = Adobe RGB). This fallback is applied before transfer decoding and resizing, and used by quick previews, preview-only RAW and the existing camera-look reference decode. A JPEG's own metadata takes precedence. No fitting algorithm, training split, highlight reconstruction or white-balance control changes are included. Render cache version 12 invalidates older previews.
 
-Synthetic tests cover crop bounds/CFA preservation, colour-space tags, fallback transfer decoding and metadata precedence. A private Nikon Z 8 sample reports an 8256 × 5504 default crop from an 8280 × 5520 sensor. No private sample or Adobe asset is included.
+Synthetic tests cover crop bounds/CFA preservation, colour-space tags, fallback transfer decoding and metadata precedence. A private Nikon Z 8 sample reports an 8256 × 5504 default crop from an 8280 × 5520 sensor. No private sample or reference-product asset is included.
 
 ### Canon CR2 and Pentax PEF
 
