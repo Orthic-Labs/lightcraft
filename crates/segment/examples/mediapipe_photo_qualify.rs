@@ -919,12 +919,12 @@ mod native {
         if next_token(bytes, &mut cursor)? != b"P6" {
             return Err("PPM must use binary P6".into());
         }
-        let width = parse_positive_usize(&next_token(bytes, &mut cursor)?, "width")?;
-        let height = parse_positive_usize(&next_token(bytes, &mut cursor)?, "height")?;
+        let width = parse_positive_usize(next_token(bytes, &mut cursor)?, "width")?;
+        let height = parse_positive_usize(next_token(bytes, &mut cursor)?, "height")?;
         if width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE {
             return Err(format!("PPM dimensions must be <= {MAX_IMAGE_SIDE}"));
         }
-        let maxval = parse_positive_usize(&next_token(bytes, &mut cursor)?, "maxval")?;
+        let maxval = parse_positive_usize(next_token(bytes, &mut cursor)?, "maxval")?;
         if maxval != 255 {
             return Err("PPM maxval must be 255".into());
         }

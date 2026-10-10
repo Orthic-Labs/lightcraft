@@ -460,9 +460,9 @@ fn parse_ppm(bytes: &[u8]) -> Result<Ppm, String> {
     if magic != b"P6" {
         return Err("PPM must use binary P6".into());
     }
-    let width = parse_positive_usize(&next_token(bytes, &mut cursor)?, "width")?;
-    let height = parse_positive_usize(&next_token(bytes, &mut cursor)?, "height")?;
-    let maxval = parse_positive_usize(&next_token(bytes, &mut cursor)?, "maxval")?;
+    let width = parse_positive_usize(next_token(bytes, &mut cursor)?, "width")?;
+    let height = parse_positive_usize(next_token(bytes, &mut cursor)?, "height")?;
+    let maxval = parse_positive_usize(next_token(bytes, &mut cursor)?, "maxval")?;
     if maxval != 255 {
         return Err("PPM maxval must be 255".into());
     }

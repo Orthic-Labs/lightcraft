@@ -671,7 +671,9 @@ mod native {
         }
         let data = ppm
             .rgb
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|pixel| {
                 [
                     srgb_to_linear(f32::from(pixel[0]) / 255.0),
