@@ -682,10 +682,136 @@ fn diagnose_native_viewport_bounce(control: &rightkit_qa::control::Control, scen
     }
 }
 
+fn diagnose_stage_child_invalidation(control: &rightkit_qa::control::Control, scenario: &rightkit_qa::harness::Scenario) -> Option<bool> {
+    const MAX_EVIDENCE_BYTES: usize = 64 * 1024;
+    static PROBE_NONCE: AtomicU64 = AtomicU64::new(0);
+    if scenario.name() != "ipc" {
+        return None;
+    }
+    let nonce = PROBE_NONCE.fetch_add(1, Ordering::Relaxed);
+    let key = format!("__lcStageChildInvalidationProbe_{nonce}");
+    let owner = format!("stage-child-invalidation:{}:{nonce}", scenario.name());
+    let setup = format!(
+        r#"return (() => {{
+            const key = {key:?};
+            const owner = {owner:?};
+            if (Object.prototype.hasOwnProperty.call(window, key)) return {{ owned: false, owner, error: 'probe state collision' }};
+            const selector = '.lc-stage-layout.is-inspector-collapsed';
+            const state = {{ owner, selector, target: null, probe: null, replacement: null, stage: null, inspector: null, samples: [], setupError: null, restoreErrors: [], live: true, timer: null }};
+            const safeError = (error) => String(error && error.stack ? error.stack : error).slice(0, 512);
+            const geometry = (node) => {{
+                if (!node) return null;
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return {{
+                    rect: {{ x: rect.x, y: rect.y, width: rect.width, height: rect.height, right: rect.right, bottom: rect.bottom }},
+                    inline: String(node.getAttribute('style') || '').slice(0, 512),
+                    computed: {{ columns: style.gridTemplateColumns, rows: style.gridTemplateRows, width: style.width, height: style.height, display: style.display, position: style.position, visibility: style.visibility }},
+                }};
+            }};
+            const nodeInfo = (node, parent, identity) => {{
+                if (!node) return {{ present: false }};
+                return {{ present: true, connected: Boolean(node.isConnected), sameParent: Boolean(parent && node.parentElement === parent), identity, className: String(node.className || '').slice(0, 256), geometry: geometry(node) }};
+            }};
+            const probeInfo = (node, parent, identity) => {{
+                if (!node) return {{ present: false }};
+                const style = getComputedStyle(node);
+                return {{ present: true, connected: Boolean(node.isConnected), sameParent: Boolean(parent && node.parentElement === parent), identity, ariaHidden: node.getAttribute('aria-hidden'), position: style.position, width: style.width, height: style.height }};
+            }};
+            state.sample = (phase) => {{
+                const target = state.target;
+                state.samples.push({{
+                    phase,
+                    viewport: {{ width: innerWidth, height: innerHeight, hidden: document.hidden, visibility: document.visibilityState }},
+                    target: target ? {{ selector: target.selector, geometry: geometry(target.original), parent: geometry(target.parent) }} : null,
+                    stage: nodeInfo(state.stage, target && target.original, 'stage'),
+                    inspector: nodeInfo(state.inspector, target && target.original, 'inspector'),
+                    probe: probeInfo(state.probe, target && target.original, 'inserted'),
+                    replacement: probeInfo(state.replacement, target && target.original, 'replacement'),
+                }});
+            }};
+            state.restore = () => {{
+                const target = state.target;
+                if (!target || !target.original || !target.original.isConnected) return;
+                try {{
+                    if (state.replacement && state.replacement.isConnected && state.replacement.parentElement === target.original) target.original.removeChild(state.replacement);
+                    if (state.probe && state.probe.isConnected && state.probe.parentElement === target.original) target.original.removeChild(state.probe);
+                }} catch (error) {{
+                    state.restoreErrors.push({{ error: safeError(error) }});
+                }}
+            }};
+            window[key] = state;
+            try {{
+                const original = document.querySelector(selector);
+                state.target = {{ selector, original, parent: original ? original.parentElement : null }};
+                state.stage = original ? Array.from(original.children).find((child) => child.classList.contains('stage-workspace')) : null;
+                state.inspector = original ? Array.from(original.children).find((child) => child.classList.contains('lc-inspector')) : null;
+                state.sample('before');
+                if (!original || !state.target.parent || !original.isConnected || original.parentElement !== state.target.parent) throw new Error('original node is disconnected or parent changed');
+                const probe = document.createElement('span');
+                probe.setAttribute('aria-hidden', 'true');
+                probe.setAttribute('data-lc-layout-probe', owner);
+                probe.style.cssText = 'position:absolute;inset:0 auto auto 0;width:0;height:0;min-width:0;min-height:0;padding:0;margin:0;border:0;pointer-events:none;visibility:hidden;';
+                original.appendChild(probe);
+                state.probe = probe;
+                state.sample('after-child-insert');
+                const replacement = probe.cloneNode(false);
+                original.replaceChild(replacement, probe);
+                state.replacement = replacement;
+                state.sample('after-child-replacement-immediate');
+                state.timer = setTimeout(() => {{ if (state.live) state.sample('after-child-replacement-64ms'); }}, 64);
+            }} catch (error) {{
+                state.setupError = safeError(error);
+            }}
+            return {{ owned: true, owner: state.owner, selector, setupError: state.setupError, samples: state.samples }};
+        }})();"#,
+        key = key,
+        owner = owner,
+    );
+    let setup_result = match control.eval(&setup) {
+        Ok(value) => value,
+        Err(error) => json!({"error": error.to_string().chars().take(512).collect::<String>()}),
+    };
+    sleep(Duration::from_millis(80));
+    let after_64ms = match control.eval(&format!(
+        "return (() => {{ const key = {key:?}; const owner = {owner:?}; const state = window[key]; if (!state) return {{owned: false, owner, error: 'probe state missing'}}; if (state.owner !== owner) return {{owned: false, owner, error: 'probe state ownership mismatch'}}; return {{owned: true, owner: state.owner, setupError: state.setupError, samples: state.samples, restoreErrors: state.restoreErrors}}; }})();",
+        key = key,
+        owner = owner,
+    )) {
+        Ok(value) => value,
+        Err(error) => json!({"error": error.to_string().chars().take(512).collect::<String>()}),
+    };
+    let cleanup = match control.eval(&format!(
+        "return (() => {{ const key = {key:?}; const owner = {owner:?}; const state = window[key]; if (!state) return {{owned: false, restored: false, owner, error: 'probe state missing'}}; if (state.owner !== owner) return {{owned: false, restored: false, owner, error: 'probe state ownership mismatch'}}; let error = null; try {{ if (state.timer) clearTimeout(state.timer); }} catch (timerError) {{ error = String(timerError && timerError.stack ? timerError.stack : timerError).slice(0, 512); }} finally {{ state.live = false; try {{ state.restore(); }} catch (restoreError) {{ error = String(restoreError && restoreError.stack ? restoreError.stack : restoreError).slice(0, 512); }} }} const target = state.target; const before = state.samples.find((sample) => sample.phase === 'before')?.target?.geometry; const after = target && target.original ? (() => {{ const rect = target.original.getBoundingClientRect(); const style = getComputedStyle(target.original); return {{ rect: {{ x: rect.x, y: rect.y, width: rect.width, height: rect.height }}, computed: {{ columns: style.gridTemplateColumns, rows: style.gridTemplateRows }} }}; }})() : null; const parentChanged = Boolean(before && after && (before.computed.columns !== after.computed.columns || before.computed.rows !== after.computed.rows || Math.abs(before.rect.x - after.rect.x) > 0.5 || Math.abs(before.rect.y - after.rect.y) > 0.5 || Math.abs(before.rect.width - after.rect.width) > 0.5 || Math.abs(before.rect.height - after.rect.height) > 0.5)); const restoredTarget = {{connected: Boolean(target && target.original && target.original.isConnected), sameParent: Boolean(target && target.original && target.parent && target.original.parentElement === target.parent), stagePreserved: Boolean(state.stage && state.stage.isConnected && state.stage.parentElement === target.original), inspectorPreserved: Boolean(state.inspector && state.inspector.isConnected && state.inspector.parentElement === target.original)}}; const result = {{owned: true, owner, parentChanged, restored: restoredTarget.connected && restoredTarget.sameParent && restoredTarget.stagePreserved && restoredTarget.inspectorPreserved, restoredTarget, restoreErrors: state.restoreErrors, error}}; if (window[key] === state) delete window[key]; return result; }})();",
+        key = key,
+        owner = owner,
+    )) {
+        Ok(value) => value,
+        Err(error) => json!({"error": error.to_string().chars().take(512).collect::<String>()}),
+    };
+    let parent_changed = cleanup["parentChanged"].as_bool();
+    let evidence = json!({"schema": 1, "probe": "stage-child-invalidation", "journey": scenario.name(), "setup": setup_result, "after64ms": after_64ms, "cleanup": cleanup});
+    let encoded = match serde_json::to_vec_pretty(&evidence) {
+        Ok(bytes) if bytes.len() <= MAX_EVIDENCE_BYTES => bytes,
+        Ok(bytes) => serde_json::to_vec(&json!({"schema": 1, "probe": "stage-child-invalidation", "journey": scenario.name(), "truncated": true, "encodedBytes": bytes.len(), "maxBytes": MAX_EVIDENCE_BYTES})).unwrap_or_default(),
+        Err(error) => serde_json::to_vec(&json!({"schema": 1, "probe": "stage-child-invalidation", "journey": scenario.name(), "error": error.to_string().chars().take(512).collect::<String>()})).unwrap_or_default(),
+    };
+    eprintln!("[qa] stage child invalidation diagnostics={}", String::from_utf8_lossy(&encoded));
+    let path = scenario.dir().join("stage-child-invalidation-layout.json");
+    if fs::write(&path, &encoded).is_ok() {
+        scenario.keep("stage-child-invalidation-layout.json", &path);
+    }
+    parent_changed
+}
+
 // Failure-only macOS probe for stale layout state on an existing DOM node. Each
 // selector gets an isolated replacement in its original parent & sibling slot;
 // no offscreen clone is used as a viewport comparison.
-fn diagnose_same_parent_layout(control: &rightkit_qa::control::Control, scenario: &rightkit_qa::harness::Scenario) {
+fn diagnose_same_parent_layout(
+    control: &rightkit_qa::control::Control,
+    scenario: &rightkit_qa::harness::Scenario,
+    prior_probe_changed_parent: Option<bool>,
+) {
     const MAX_EVIDENCE_BYTES: usize = 64 * 1024;
     static PROBE_NONCE: AtomicU64 = AtomicU64::new(0);
     let selectors = match scenario.name() {
@@ -800,7 +926,7 @@ fn diagnose_same_parent_layout(control: &rightkit_qa::control::Control, scenario
         };
         trials.push(json!({"selector": selector, "setup": setup_result, "after64ms": after_64ms, "cleanup": cleanup}));
     }
-    let evidence = json!({"schema": 1, "probe": "same-parent-dom-replacement", "journey": scenario.name(), "trials": trials});
+    let evidence = json!({"schema": 1, "probe": "same-parent-dom-replacement", "journey": scenario.name(), "priorProbeChangedParent": prior_probe_changed_parent, "trials": trials});
     let pretty = match serde_json::to_vec_pretty(&evidence) {
         Ok(bytes) => bytes,
         Err(error) => serde_json::to_vec(
@@ -1309,7 +1435,8 @@ fn with_control<T>(
             && let (Some(width), Some(height)) = (viewport["width"].as_u64(), viewport["height"].as_u64())
             && let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height))
         {
-            diagnose_same_parent_layout(&control, scenario);
+            let prior_probe_changed_parent = diagnose_stage_child_invalidation(&control, scenario);
+            diagnose_same_parent_layout(&control, scenario, prior_probe_changed_parent);
             diagnose_native_viewport_bounce(&control, scenario, width, height);
         }
     }
