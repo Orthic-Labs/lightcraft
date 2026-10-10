@@ -868,10 +868,6 @@ fn binding_hash(revision: u64, reject_below: Option<f32>, pick_best: bool, rows:
     h.finish().to_string()
 }
 
-fn proposal_value(s: &Session, rows: &[CullRow], reject_below: Option<f32>, pick_best: bool) -> Value {
-    proposal_value_revision(s.catalog.revision, rows, reject_below, pick_best)
-}
-
 fn proposal_value_revision(revision: u64, rows: &[CullRow], reject_below: Option<f32>, pick_best: bool) -> Value {
     let photos: Vec<Value> = rows.iter().map(|row| row_json(row, reject_below, pick_best)).collect();
     json!({
