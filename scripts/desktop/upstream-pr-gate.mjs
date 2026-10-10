@@ -66,6 +66,15 @@ async function main() {
     if (git(['status', '--porcelain'], worktree) !== '') fail('source worktree is not clean');
 
     const cwd = worktree;
+    console.log('[upstream PR 434] install wasm32-unknown-unknown target');
+    const wasmTarget = spawnSync('rustup', ['target', 'add', 'wasm32-unknown-unknown'], { cwd, env: process.env, stdio: 'inherit', windowsHide: true });
+    if (wasmTarget.error || wasmTarget.status !== 0) {
+      const detail = wasmTarget.error?.message || String(wasmTarget.status ?? wasmTarget.signal ?? 'unknown');
+      const status = `failed (${detail})`;
+      statuses.push({ label: 'wasm32-unknown-unknown target setup', status });
+      fail(`wasm32-unknown-unknown target setup failed: ${detail}`);
+    }
+    statuses.push({ label: 'wasm32-unknown-unknown target setup', status: 'passed' });
     cargo('engine XMP tests', ['test', '--locked', '-p', 'lightcraft-engine', 'tests_xmp'], cwd);
     cargo('engine import tests', ['test', '--locked', '-p', 'lightcraft-engine', 'tests_import'], cwd);
     cargo('UI locale/build script check', ['check', '--locked', '-p', 'lightcraft-ui-egui'], cwd);
