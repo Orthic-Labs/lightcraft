@@ -2142,6 +2142,23 @@ fn native_hidden_control_journeys() {
                         let baseline_slice = control
                             .command("lc_view_slice", &json!({"generation": baseline["viewGeneration"], "offset": 0, "limit": 4}))
                             .expect("cull review baseline slice must reply");
+                        let expected_selected_names = baseline_slice["photos"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter(|photo| photo["id"].as_u64().is_some_and(|id| ids.contains(&id)))
+                            .filter_map(|photo| photo["fileName"].as_str())
+                            .collect::<Vec<_>>();
+                        assert_eq!(expected_selected_names.len(), ids.len(), "cull review readiness must identify every selected photo");
+                        let expected_selected_names_json = serde_json::to_string(&expected_selected_names)
+                            .expect("cull review readiness names must serialize");
+                        wait_for_dom(
+                            control,
+                            &format!(
+                                "return (() => {{ const title = document.querySelector('.lc-library-title')?.textContent || ''; const selected = [...document.querySelectorAll('.lc-photo-cell[aria-selected=\\\"true\\\"] .lc-photo-name')].map((node) => node.textContent?.trim() || '').sort(); const expected = {expected_selected_names_json}; return title.includes('{count} selected') && JSON.stringify(selected) === JSON.stringify([...expected].sort()); }})();",
+                                count = ids.len(),
+                            ),
+                        );
 
                         click_dom(control, ".rk-search--trigger", "cull review command palette must open");
                         wait_for_dom(control, "return document.querySelector('.rk-palette') !== null;");
@@ -2221,6 +2238,13 @@ fn native_hidden_control_journeys() {
                         }
                         click_dom(control, "[data-command=\"dialog.cull\"]", "cull review cancel dialog must open");
                         wait_for_dom(control, "return document.querySelector('.lc-cull-review-dialog') !== null;");
+                        let expected_review_rows = ids.len();
+                        wait_for_dom(
+                            control,
+                            &format!(
+                                "return document.querySelector('.lc-cull-review-progress') === null && document.querySelectorAll('.lc-cull-review-row').length === {expected_review_rows};"
+                            ),
+                        );
                         click_dom(control, ".lc-cull-review-footer .lc-cull-review-button-secondary", "cull review Cancel must close without mutation");
                         wait_for_dom(control, "return document.querySelector('.lc-cull-review-dialog') === null;");
                         let cancelled = snapshot(control);
