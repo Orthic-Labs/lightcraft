@@ -71,10 +71,23 @@ impl SceneKey {
     }
 }
 
-/// Compute auto tone values for `src` under the current white balance (ignores current tone values).
-pub fn auto_tone(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings) -> AutoTone {
+/// The scene as Auto sees it: the 512 px proxy's finite scene EVs (sorted) and Oklab chroma.
+pub struct ScenePopulation {
+    /// `log2(Y / 0.18)` of every finite, non-black proxy pixel, ascending.
+    pub ev: Vec<f32>,
+    pub median: f32,
+    pub p05: f32,
+    pub p95: f32,
+    pub p995: f32,
+    /// 90th-percentile Oklab chroma.
+    pub chroma_p90: f32,
+}
+
+/// Measure `src` under `s`'s white balance (tone settings ignored). `None` for an empty or
+/// entirely invalid image.
+pub fn scene_population(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings) -> Option<ScenePopulation> {
     if src.width == 0 || src.height == 0 || src.data.is_empty() {
-        return AutoTone::default();
+        return None;
     }
     let mut img = lightcraft_raster::resample::fit(src, 512, 512, lightcraft_raster::resample::Filter::Box);
     let mut base = DevelopSettings { wb: s.wb, ..DevelopSettings::default() };
@@ -99,12 +112,19 @@ pub fn auto_tone(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings) -> AutoTo
         }
     }
     if ev.is_empty() {
-        return AutoTone::default();
+        return None;
     }
     ev.sort_by(|a, b| a.total_cmp(b));
     chroma.sort_by(|a, b| a.total_cmp(b));
-    let median = percentile(&ev, 0.5);
-    let (p05, p95, p995) = (percentile(&ev, 0.05), percentile(&ev, 0.95), percentile(&ev, 0.995));
+    let (median, p05, p95, p995) = (percentile(&ev, 0.5), percentile(&ev, 0.05), percentile(&ev, 0.95), percentile(&ev, 0.995));
+    let chroma_p90 = percentile(&chroma, 0.9);
+    Some(ScenePopulation { ev, median, p05, p95, p995, chroma_p90 })
+}
+
+/// Compute auto tone values for `src` under the current white balance (ignores current tone values).
+pub fn auto_tone(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings) -> AutoTone {
+    let Some(pop) = scene_population(src, info, s) else { return AutoTone::default() };
+    let ScenePopulation { ev, median, p05, p95, p995, chroma_p90 } = pop;
     let key = SceneKey::of(median, p05, p95, p995);
 
     let target = -0.9 * key.low + 0.65 * key.high;
@@ -119,7 +139,6 @@ pub fn auto_tone(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings) -> AutoTo
 
     let shape = fit::fit(&ev, exposure as f32, key, info);
 
-    let chroma_p90 = percentile(&chroma, 0.9);
     let colour_headroom = ((0.16 - chroma_p90) / 0.16).clamp(0.0, 1.0);
     let vibrance = (14.0 * colour_headroom).round();
     let saturation = (3.0 - 8.0 * (1.0 - colour_headroom)).round();
@@ -172,20 +191,22 @@ pub mod fit {
     /// Auto's slider ranges: highlights only recover, shadows only lift (as users expect of Auto).
     const BOUNDS: [(f32, f32); 5] = [(-20.0, 30.0), (-90.0, 0.0), (0.0, 70.0), (-30.0, 40.0), (-35.0, 20.0)];
 
-    #[derive(Clone, Copy)]
-    struct Targets {
+    /// What the fit aims the rendered histogram at (all on the gamma-2.2 encoded scale). Auto
+    /// derives them from the scene key; a look target ([`crate::look`]) supplies measured ones.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Targets {
         /// Encoded (sRGB-like) luminance of the 99.5th percentile.
-        top: f32,
+        pub top: f32,
         /// Encoded luminance of the 1st percentile.
-        bottom: f32,
+        pub bottom: f32,
         /// Encoded spread between the 5th and 95th percentiles.
-        spread: f32,
+        pub spread: f32,
         /// Encoded median.
-        median: f32,
+        pub median: f32,
         /// Share of the frame allowed at or over white.
-        clip: f32,
-        /// Weights of the four terms above (clip is always fully weighted).
-        w: [f32; 4],
+        pub clip: f32,
+        /// Weights of the four terms above (clip and headroom are always weighted).
+        pub w: [f32; 4],
     }
 
     fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
@@ -193,12 +214,13 @@ pub mod fit {
         t * t * (3.0 - 2.0 * t)
     }
 
-    fn encode(o: f32) -> f32 {
-        // the perceptual scale targets live on (sRGB-like, exact enough for histogram goals)
+    /// The perceptual scale targets live on (gamma 2.2; exact enough for histogram goals).
+    pub fn encode(o: f32) -> f32 {
         o.clamp(0.0, 1.0).powf(1.0 / 2.2)
     }
 
-    fn tone_map(info: &SourceInfo, contrast: f64, whites: f64, blacks: f64) -> ToneMap {
+    /// The tone map `finish` uses for this source kind.
+    pub fn tone_map(info: &SourceInfo, contrast: f64, whites: f64, blacks: f64) -> ToneMap {
         if let Some(curve) = info.camera_tone.as_ref().filter(|_| info.raw) {
             ToneMap::camera(curve, contrast, whites, blacks)
         } else if info.raw {
@@ -301,25 +323,40 @@ pub mod fit {
         (0..n).step_by(stride).filter_map(|i| ev_sorted.get(i)).map(|e| e + exposure).collect()
     }
 
-    pub fn fit(ev_sorted: &[f32], exposure: f32, key: SceneKey, info: &SourceInfo) -> Shape {
-        if ev_sorted.is_empty() {
-            return Shape::default();
-        }
+    /// Auto's targets for a scene of this key. The median target is the scene's own rendered
+    /// median under neutral shaping: where exposure put it, the fit leaves it.
+    pub fn auto_targets(ev_sorted: &[f32], exposure: f32, key: SceneKey, info: &SourceInfo) -> Targets {
         let ev = sample(ev_sorted, exposure);
         let neutral = tone_map(info, 0.0, 0.0, 0.0);
         let p0 = stats(&ev, [0.0; 5], &neutral).p;
-        // Where the key puts the median, the fit leaves it: exposure decided that.
         let keyed = key.low.max(key.high);
-        let t = Targets {
+        Targets {
             top: 0.95 - 0.12 * key.low,
             bottom: 0.05 + 0.08 * key.high,
             spread: 0.62 - 0.18 * keyed - 0.1 * key.backlit,
             median: p0[2],
             clip: 0.003 + 0.03 * key.high,
             w: [1.0 - 0.6 * key.low, 1.0 - 0.6 * key.high, 0.25 * (1.0 - 0.5 * keyed - 0.4 * key.backlit), 2.0],
-        };
+        }
+    }
+
+    pub fn fit(ev_sorted: &[f32], exposure: f32, key: SceneKey, info: &SourceInfo) -> Shape {
+        if ev_sorted.is_empty() {
+            return Shape::default();
+        }
+        let t = auto_targets(ev_sorted, exposure, key, info);
+        fit_with(ev_sorted, exposure, &t, info)
+    }
+
+    /// Fit the shaping sliders of `ev_sorted` (scene EVs before exposure) toward `t`.
+    pub fn fit_with(ev_sorted: &[f32], exposure: f32, t: &Targets, info: &SourceInfo) -> Shape {
+        if ev_sorted.is_empty() || !exposure.is_finite() {
+            return Shape::default();
+        }
+        let ev = sample(ev_sorted, exposure);
+        let t = &Targets { w: t.w.map(|w| if w.is_finite() { w.max(0.0) } else { 0.0 }), ..*t };
         let mut v = [0f32; 5];
-        let mut best = cost(&ev, v, info, &t);
+        let mut best = cost(&ev, v, info, t);
         for step in STEPS {
             // fixed order: the clipping sliders first, then the range, then contrast
             for i in [1usize, 2, 3, 4, 0] {
@@ -333,7 +370,7 @@ pub mod fit {
                             break;
                         }
                         *x = next;
-                        let c = cost(&ev, trial, info, &t);
+                        let c = cost(&ev, trial, info, t);
                         if c < best - 1e-9 {
                             best = c;
                             v = trial;

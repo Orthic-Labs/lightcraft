@@ -326,6 +326,44 @@ pub fn specs() -> Vec<CommandSpec> {
             Ok(json!({"estimate": estimate, "luminance": nr.luminance, "color": nr.color, "iso": iso, "raw": raw}))
         }),
         cmd!(
+            "develop.applyLook",
+            "Apply Look Target",
+            [],
+            None,
+            "{look?: {schema, samples, luminance, clip, chroma}, path?: string, dryRun?: bool}",
+            has_active,
+            |s, p| {
+                // A look target (`lightcraft-cli look extract`) is the rendered statistics of
+                // sample photos; Auto refits the eight values so this photo lands on them.
+                let c = "develop.applyLook";
+                let look: lightcraft_pipeline::look::LookTarget = match (p.get("look"), str_param(p, "path")) {
+                    (Some(v), _) => serde_json::from_value(v.clone()).map_err(|e| bad(c, format!("look: {e}")))?,
+                    (None, Some(path)) => {
+                        let meta = std::fs::metadata(path).map_err(|e| bad(c, format!("{path}: {e}")))?;
+                        if !meta.is_file() || meta.len() > 1 << 20 {
+                            return Err(bad(c, format!("{path}: not a look target file (a regular file under 1 MiB)")));
+                        }
+                        let text = std::fs::read_to_string(path).map_err(|e| bad(c, format!("{path}: {e}")))?;
+                        serde_json::from_str(&text).map_err(|e| bad(c, format!("{path}: {e}")))?
+                    }
+                    (None, None) => return Err(bad(c, "missing `look` (a look target) or `path` (its JSON file)")),
+                };
+                look.validate().map_err(|e| bad(c, e))?;
+                let id = active(s, c)?;
+                let src = s.source_now(id, SourceLevel::Thumb).map_err(|e| bad(c, e))?;
+                let info = s.source_info(id);
+                let d = s.develop_of(id).unwrap_or_default();
+                let a = lightcraft_pipeline::look::apply(&src, &info, &d, &look).map_err(|e| bad(c, e))?;
+                if !bool_or(p, "dryRun", false) {
+                    edit(s, c, "Apply Look", |d| {
+                        *d = lightcraft_pipeline::look::settings_with(d, a);
+                        Ok(())
+                    })?;
+                }
+                Ok(json!({"values": a, "look": look}))
+            }
+        ),
+        cmd!(
             "develop.wb",
             "White Balance",
             [],

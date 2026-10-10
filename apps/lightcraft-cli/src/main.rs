@@ -55,6 +55,11 @@ USAGE:
         --connect [ADDR]  drive the running app (`lightcraft --control 7980`; default 127.0.0.1:7980)
         --script FILE|-   also run JSON lines {\"command\": id, \"params\": {…}} (or {\"method\": …})
         --keep-going      continue after a failed command
+  lightcraft-cli look extract SAMPLE… -o look.json [--force]
+      A look target: the rendered statistics (tone percentiles, headroom, colourfulness) that
+      finished sample photos (JPEG/PNG/TIFF exports) have in common. Apply it to any photo with
+      `develop.applyLook path=look.json` (via `run`, MCP or the control channel): Auto refits the
+      eight tone/colour values so the photo lands on the same statistics. See docs/look-targets.md.
   lightcraft-cli mcp [OPTIONS] [FILES/FOLDERS…]
       MCP server (JSON-RPC 2.0 over stdio). Headless by default: an in-process session with the
       given files imported. Options:
@@ -180,6 +185,7 @@ fn main() -> ExitCode {
         Some("ai") if args.get(1).map(String::as_str) == Some("denoise") => denoise_eval::run(&args[1..]),
         Some("ai") => photo_ai::run(&args[1..]),
         Some("cull") => cull_eval::run(&args[1..]),
+        Some("look") => look(&args[1..]),
         Some("calibrate") => calibrate(&args[1..]),
         Some("--version" | "-V" | "version") => {
             println!("lightcraft-cli {}", env!("CARGO_PKG_VERSION"));
@@ -525,6 +531,52 @@ fn parse_steps(tokens: &[String]) -> Result<Vec<Step>, String> {
 fn run_step(b: &mut dyn Backend, s: &Step) -> Result<Value, String> {
     let direct = s.id.starts_with("ui.") || s.id.starts_with("engine.") || s.id == "app.quit";
     if direct { b.call(&s.id, s.params.clone()) } else { b.call("engine.execute", json!({"command": s.id, "params": s.params})) }
+}
+
+/// `look extract SAMPLE… -o look.json`: a look target from rendered sample files.
+fn look(args: &[String]) -> Result<(), String> {
+    if args.first().map(String::as_str) != Some("extract") {
+        return Err("usage: lightcraft-cli look extract SAMPLE… -o look.json [--force]".into());
+    }
+    let mut samples = Vec::new();
+    let mut out = None;
+    let mut force = false;
+    let mut i = 1;
+    while i < args.len() {
+        match args.get(i).map(String::as_str) {
+            Some("-o" | "--out" | "--output") => {
+                i += 1;
+                out = Some(args.get(i).cloned().ok_or("-o needs a path")?);
+            }
+            Some("--force") => force = true,
+            Some(a) if a.starts_with('-') => return Err(format!("unknown option {a}")),
+            Some(a) => samples.push(a.to_string()),
+            None => break,
+        }
+        i += 1;
+    }
+    let out = out.ok_or("look extract: missing -o look.json")?;
+    if samples.is_empty() {
+        return Err("look extract: give at least one rendered sample (JPEG, PNG, TIFF…)".into());
+    }
+    if samples.len() > 256 {
+        return Err("look extract: at most 256 samples".into());
+    }
+    if !force && std::path::Path::new(&out).exists() {
+        return Err(format!("{out}: exists (pass --force to overwrite)"));
+    }
+    let mut decoded = Vec::with_capacity(samples.len());
+    for path in &samples {
+        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        let d = lightcraft_codecs::decode(&bytes, lightcraft_codecs::DecodeOptions::fit(1024, 1024))
+            .map_err(|e| format!("{path}: {e} (samples are rendered files, not raws)"))?;
+        decoded.push(d.to_working());
+    }
+    let look = lightcraft_pipeline::look::extract_linear(&decoded).ok_or("look extract: no usable sample (empty images?)")?;
+    let text = serde_json::to_string_pretty(&look).map_err(|e| e.to_string())?;
+    std::fs::write(&out, text).map_err(|e| format!("{out}: {e}"))?;
+    println!("{}", serde_json::json!({"out": out, "samples": look.samples, "luminance": look.luminance, "clip": look.clip, "chroma": look.chroma}));
+    Ok(())
 }
 
 fn run(args: &[String]) -> Result<(), String> {

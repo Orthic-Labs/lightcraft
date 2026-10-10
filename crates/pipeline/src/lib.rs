@@ -30,6 +30,7 @@ pub mod dust;
 pub mod finish;
 pub mod geometry;
 pub mod local;
+pub mod look;
 pub mod lut;
 pub mod masks;
 pub mod noise;

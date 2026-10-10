@@ -12,10 +12,14 @@
 
 Why closed-loop: the previous rules mapped percentiles straight to slider values & assumed each slider's effect was linear & independent. Tone-curve tuning silently detuned Auto, & a display-referred JPEG (clips at 1.0) got the same recovery as a raw with a Reinhard shoulder. The fit reads the tone map, so Auto follows the pipeline (regression `fitted_sliders_track_the_tone_map_of_the_source_kind`).
 
+## Pieces other features reuse
+
+`auto::scene_population` (the proxy's sorted scene EVs, percentiles & chroma), `SceneKey`, `auto::fit::Targets` / `auto_targets` / `fit_with`, `encode` & `tone_map` are public: look targets ([`look-targets.md`](look-targets.md)) feed measured statistics into the same fit; Personal Auto adds a learned residual on top of the result.
+
 ## Contract for offline work
 
 `auto::REVISION` names the rules; Personal Auto receipts bind to it & reject stale baselines. Changing any constant above is a new revision.
 
 ## Next
 
-Face / centre weighting of the exposure target (YuNet is in `crates/segment`), raw clipped-channel share capping recovery, shades-of-grey Auto WB, scene priors from DINOv2 embeddings blended by probability, & a look-matching mode where the fit's targets are extracted from sample photos instead of the constants above. Evaluation: `docs/personal-auto-evaluation.md` (shoot-disjoint preference against this baseline).
+Face / centre weighting of the exposure target (YuNet is in `crates/segment`), raw clipped-channel share capping recovery, shades-of-grey Auto WB, scene priors from DINOv2 embeddings blended by probability, & spatial / face-weighted look targets. Evaluation: `docs/personal-auto-evaluation.md` (shoot-disjoint preference against this baseline).

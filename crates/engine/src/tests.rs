@@ -547,6 +547,32 @@ fn auto_noise_reduction_measures_then_applies_in_one_undo_step() {
 }
 
 #[test]
+fn apply_look_refits_the_eight_values_toward_sample_statistics() {
+    use lightcraft_raster::Rgba8;
+    let mut s = demo();
+    // a bright, flat "look": a mid-grey sample with a little headroom
+    let sample = Rgba8::from_fn(64, 64, |x, _| [150 + (x as u8 / 2), 150 + (x as u8 / 2), 140 + (x as u8 / 2), 255]);
+    let look = lightcraft_pipeline::look::extract(&[sample]).unwrap();
+    let before = active_dev(&s);
+    let r = s.execute("develop.applyLook", &json!({"look": look, "dryRun": true})).unwrap();
+    assert!(r["values"]["exposure"].as_f64().unwrap().is_finite(), "{r}");
+    assert_eq!(active_dev(&s).light, before.light, "a dry run edits nothing");
+    let applied = s.execute("develop.applyLook", &json!({"look": look})).unwrap();
+    assert_eq!(applied["values"], r["values"], "repeat stable");
+    let d = active_dev(&s);
+    assert_eq!(d.light.exposure, r["values"]["exposure"].as_f64().unwrap());
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(active_dev(&s).light, before.light, "one undo step");
+    // hostile targets are refused before any edit
+    let mut bad = serde_json::to_value(&look).unwrap();
+    bad["luminance"] = json!([0.9, 0.5, 0.1, 0.0, 0.0]);
+    assert!(s.execute("develop.applyLook", &json!({"look": bad})).is_err());
+    assert!(s.execute("develop.applyLook", &json!({"path": "/nonexistent/look.json"})).is_err());
+    assert!(s.execute("develop.applyLook", &json!({})).is_err());
+    assert_eq!(active_dev(&s).light, before.light);
+}
+
+#[test]
 fn auto_bw_mix_separates_colours() {
     let mut s = demo();
     s.execute("develop.autoBwMix", &json!({})).unwrap();

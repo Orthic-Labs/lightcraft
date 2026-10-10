@@ -372,7 +372,8 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 | LR-PRE-CREATE | Create preset | P0 | ✅ | `cmd:dialog.createPreset`, `cmd:preset.create` (`groups`) | name, group and a checklist of settings groups (crop, masks, remove, red eye off by default; All / None) |
 | LR-PRE-MANAGE | Manage presets | P1 | ✅ | `cmd:preset.delete`, `cmd:preset.favorite`, `cmd:preset.import`, `cmd:preset.export`, `cmd:preset.rename`, `cmd:preset.update`, `cmd:preset.move` | rename, update with current settings, move to a group (existing or new); no hiding of groups |
 | LR-PRE-AMOUNT | Preset amount | P1 | ✅ | `cmd:preset.apply` (`amount` 0–200) | |
-| LR-PRE-ADAPTIVE | Adaptive presets | P2 | ⬜ | | |
+| LR-PRE-ADAPTIVE | Adaptive presets | P2 | ⬜ | | Lightroom's adaptive presets are AI-mask presets (LR-MASK-SUBJECT…); Ember's adaptive *tone* preset is the look target below |
+| LR-PRE-LOOKTARGET | Look targets (Ember) | P1 | ✅ | `cmd:develop.applyLook`, `crates/pipeline/src/look.rs`, `apps/lightcraft-cli/src/main.rs` | `lightcraft-cli look extract SAMPLES… -o look.json` measures what finished sample renders have in common (tone percentiles, clip share, Oklab chroma; median across samples); `develop.applyLook` refits a photo's eight Auto values toward those statistics, exposure settled against the real render, one undo step, `dryRun` ([`docs/look-targets.md`](look-targets.md)); no hue / split-tone / curve transfer, no batch `ids` yet |
 | LR-PRE-PREMIUM | Built-in presets (own) | P2 | ✅ | `crates/engine/src/presets.rs` | 41 own-authored presets in 10 groups (Color, Film, B&W incl. toners, Portrait, Landscape, Urban, Food, Seasons, Vintage, Style) |
 | LR-PRE-RECOMMENDED | Community recommendations | OOS | 🚫 | | |
 | LR-PRE-ONIMPORT | Apply during import | P2 | ✅ | `cmd:library.import` (`preset`) | chosen in the import review; raw / per-camera defaults in Settings |
