@@ -858,6 +858,7 @@ fn train_model(manifest: &Manifest, manifest_digest: &str) -> Result<Value, Stri
     };
     let status = if weak.is_some() || ember.is_some() { "experimentalTrainedUnqualified" } else { "harness-only" };
     let mut variants = Map::new();
+    let no_train_variants = weak.is_none() && ember.is_none();
     variants.insert(Variant::Weak.key().to_owned(), weak.map_or(Value::Null, |value| value));
     variants.insert(Variant::Ember.key().to_owned(), ember.map_or(Value::Null, |value| value));
     let mut eligibility = Map::new();
@@ -895,7 +896,7 @@ fn train_model(manifest: &Manifest, manifest_digest: &str) -> Result<Value, Stri
         "trainingEligibility": eligibility,
         "trainingLabelReceipts": receipts,
         "baselineContract": baseline_contract(manifest),
-        "harnessOnlyReason": if weak.is_none() && ember.is_none() { json!("no variant had eligible train labels") } else { Value::Null },
+        "harnessOnlyReason": if no_train_variants { json!("no variant had eligible train labels") } else { Value::Null },
         "qualificationStatus": "unqualified_no_promotion",
         "training": {"shootCount": manifest.shoots.iter().filter(|shoot| shoot.split == "train").count(), "inputPhotoCount": train_photos.len(), "labelledPhotoCount": labelled, "controlEligible": control_eligible, "excludedPhotoCount": excluded, "manifestSha256": manifest_digest},
         "provenance": {"baseline": "deterministicbaseline supplied in explicit manifest", "weakLabelColdStart": "per-photo provenance supplied in manifest", "emberGroundTruth": "accepted-human-edit provenance supplied in manifest", "provenanceCompleteness": "numericHarnessOnly"},
