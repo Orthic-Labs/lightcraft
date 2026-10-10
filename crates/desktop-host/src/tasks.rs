@@ -1560,17 +1560,21 @@ mod tests {
         let mut tasks = Tasks::new();
         let mut session = Session::with_demo();
         let before = session.catalog.to_snapshot();
-        let expected_total = session.visible_cloned().len().saturating_add(1).max(1);
-        let started = tasks.start_cull_suggest(&mut session, &json!({"rejectBelow": 100.0, "pickBest": true}));
+        let ids: Vec<_> = session.visible_cloned().into_iter().take(1).collect();
+        assert_eq!(ids.len(), 1, "demo fixture provides one real culling source");
+        let expected_total = ids.len() + 1;
+        let started = tasks
+            .start_cull_suggest(&mut session, &json!({"ids": ids.iter().map(|id| id.0).collect::<Vec<_>>(), "rejectBelow": 100.0, "pickBest": true}));
         assert!(started.is_ok(), "cull suggestion should start: {started:?}");
         let Ok(started) = started else { return };
-        let Some(task_id) = started.get("taskId").and_then(Value::as_str) else { return };
+        let task_id = started.get("taskId").and_then(Value::as_str).expect("cull task id");
         assert_eq!(started.get("total").and_then(Value::as_u64), Some(expected_total as u64));
         assert!(tasks.statuses().iter().any(|job| job.id == task_id && job.kind == "cull"));
         let terminal = wait_for_terminal(&mut tasks, &mut session, task_id, Duration::from_secs(10), "cull suggestion");
         assert!(!tasks.running(), "cull worker must reach terminal state");
         assert_eq!(terminal.state, "done");
-        assert!(terminal.result.as_ref().and_then(|value| value.get("proposal")).is_some(), "terminal result carries proposal");
+        let proposal = terminal.result.as_ref().and_then(|value| value.get("proposal")).expect("terminal result carries proposal");
+        assert_eq!(proposal["photos"].as_array().map(Vec::len), Some(ids.len()), "proposal covers bounded input ids");
         assert_eq!(session.catalog.to_snapshot(), before, "suggestion does not mutate catalog");
     }
 
@@ -1624,8 +1628,13 @@ mod tests {
     fn cull_apply_remeasures_then_commits_one_undoable_batch() {
         let mut tasks = Tasks::new();
         let mut session = Session::with_demo();
-        let suggestion = session.execute("photo.cullSuggest", &json!({"rejectBelow": 100.0, "pickBest": true})).expect("cull proposal");
+        let ids: Vec<_> = session.visible_cloned().into_iter().take(1).collect();
+        assert_eq!(ids.len(), 1, "demo fixture provides one real culling source");
+        let suggestion = session
+            .execute("photo.cullSuggest", &json!({"ids": ids.iter().map(|id| id.0).collect::<Vec<_>>(), "rejectBelow": 100.0, "pickBest": true}))
+            .expect("cull proposal");
         let proposal = suggestion.get("proposal").cloned().expect("nested cull proposal");
+        assert_eq!(proposal["photos"].as_array().map(Vec::len), Some(ids.len()));
         let accepted = proposal
             .get("photos")
             .and_then(Value::as_array)
@@ -1644,8 +1653,9 @@ mod tests {
         let started = tasks.start_cull_apply(&mut session, &json!({"proposal": proposal, "accept": [accepted]}));
         assert!(started.is_ok(), "cull apply should start: {started:?}");
         let Ok(started) = started else { return };
-        let Some(task_id) = started.get("taskId").and_then(Value::as_str) else { return };
+        let task_id = started.get("taskId").and_then(Value::as_str).expect("cull apply task id");
         assert_eq!(started.get("kind").and_then(Value::as_str), Some("cullApply"));
+        assert_eq!(started.get("total").and_then(Value::as_u64), Some(2), "one photo plus terminal publication");
         let terminal = wait_for_terminal(&mut tasks, &mut session, task_id, Duration::from_secs(10), "cull apply");
         assert_eq!(terminal.state, "done");
         assert_eq!(terminal.result.as_ref().and_then(|value| value.get("accepted")).and_then(Value::as_u64), Some(1));
