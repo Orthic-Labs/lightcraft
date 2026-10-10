@@ -5,6 +5,7 @@
 
 use lightcraft_catalog::{Analysis, Flag, Op, PhotoId};
 use serde_json::{Value, json};
+use web_time::Instant;
 
 use super::{CommandSpec, always, cmd};
 use crate::{Result, Session};
@@ -14,6 +15,7 @@ const BURST_GAP: i64 = 10;
 /// Signature similarity for "the same scene".
 const SAME: f32 = 0.93;
 const PROPOSAL_VERSION: u64 = 1;
+const TIMING_SCHEMA: &str = "lightcraft.cull-timing.v1";
 
 fn secs(iso: &str) -> Option<i64> {
     let iso = iso.trim();
@@ -137,6 +139,58 @@ pub struct CullJobResult {
     pub value: Value,
 }
 
+#[derive(Clone, Copy)]
+enum TimingStatus {
+    Ok,
+    DecodeFailed,
+    AnalysisFailed,
+    SourceChanged,
+}
+
+impl TimingStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::DecodeFailed => "decodeFailed",
+            Self::AnalysisFailed => "analysisFailed",
+            Self::SourceChanged => "sourceChanged",
+        }
+    }
+}
+
+fn elapsed_ms(started: Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1000.0
+}
+
+fn photo_timing(id: PhotoId, decode_ms: Option<f64>, analysis_ms: Option<f64>, total_ms: f64, status: TimingStatus) -> Value {
+    json!({
+        "id": id.0,
+        "decodeMs": decode_ms,
+        "analysisMs": analysis_ms,
+        "totalMs": total_ms,
+        "status": status.as_str(),
+    })
+}
+
+fn timing_report(per_photo: Vec<Value>, grouping_ms: f64, job_total_ms: f64) -> Value {
+    json!({
+        "schema": TIMING_SCHEMA,
+        "classicalOnly": true,
+        "sourcePolicy": "uncached-origin-thumbnail",
+        "scope": "measurement-and-planning",
+        "excludes": ["timingReceiptSerialization", "proposalSerialization", "proposalBinding", "dispatch", "import"],
+        "perPhoto": per_photo,
+        "groupingMs": grouping_ms,
+        "jobTotalMs": job_total_ms,
+        "stages": {
+            "decode": {"status": "measured"},
+            "analysis": {"status": "measured"},
+            "crops": {"status": "notApplicable"},
+            "inference": {"status": "notApplicable"},
+        },
+    })
+}
+
 /// Detached apply plan. Run [`Self::job`] off-thread, then pass whole plan & result to
 /// [`Session::finish_cull_apply`] for final validation & one undoable commit.
 pub struct CullApplyJob {
@@ -174,7 +228,8 @@ impl CullJob {
         Ok(Self { catalog_revision, reject_below, pick_best, photos })
     }
 
-    fn measure_rows(&self, progress: &CullProgressFn<'_>) -> std::result::Result<(Vec<CullRow>, Vec<Value>), String> {
+    fn measure_rows(&self, progress: &CullProgressFn<'_>) -> std::result::Result<(Vec<CullRow>, Vec<Value>, Value), String> {
+        let job_started = Instant::now();
         if !progress(0.0, "Reading photos") {
             return Err("cancelled".into());
         }
@@ -182,23 +237,45 @@ impl CullJob {
         let mut rows = Vec::new();
         let mut measurements = Vec::new();
         let mut failed = Vec::new();
+        let mut per_photo = Vec::with_capacity(self.photos.len());
         for (index, photo) in self.photos.iter().enumerate() {
             if !progress(index as f32 / total, "Reading photos") {
                 return Err("cancelled".into());
             }
-            let measured = photo
-                .source_ref
-                .load()
-                .map_err(|error| error.to_string())
-                .and_then(|source| lightcraft_pipeline::cull::measure_checked(&source).map_err(|error| error.to_string()).map(|m| (source, m)));
+            let photo_started = Instant::now();
+            let decode_started = Instant::now();
+            let source = match photo.source_ref.load() {
+                Ok(source) => source,
+                Err(error) => {
+                    let decode_ms = elapsed_ms(decode_started);
+                    let total_ms = elapsed_ms(photo_started);
+                    per_photo.push(photo_timing(photo.id, Some(decode_ms), None, total_ms, TimingStatus::DecodeFailed));
+                    failed.push(json!([photo.id.0, error]));
+                    if !progress((index + 1) as f32 / total, "Measuring photos") {
+                        return Err("cancelled".into());
+                    }
+                    continue;
+                }
+            };
+            let decode_ms = elapsed_ms(decode_started);
+            let analysis_started = Instant::now();
+            let measured = lightcraft_pipeline::cull::measure_checked(&source);
+            let analysis_ms = elapsed_ms(analysis_started);
             match measured {
-                Ok((_source, measured)) => {
+                Ok(measured) => {
                     if let Some(path) = photo.source_path.as_deref()
                         && source_identity_for(&photo.source_key, Some(path)) != photo.source
                     {
+                        let total_ms = elapsed_ms(photo_started);
+                        per_photo.push(photo_timing(photo.id, Some(decode_ms), Some(analysis_ms), total_ms, TimingStatus::SourceChanged));
                         failed.push(json!([photo.id.0, "source changed while measuring"]));
+                        if !progress((index + 1) as f32 / total, "Measuring photos") {
+                            return Err("cancelled".into());
+                        }
                         continue;
                     }
+                    let total_ms = elapsed_ms(photo_started);
+                    per_photo.push(photo_timing(photo.id, Some(decode_ms), Some(analysis_ms), total_ms, TimingStatus::Ok));
                     measurements.push(lightcraft_pipeline::cull::report::Measurement {
                         id: photo.id.0,
                         captured_secs: photo.captured_secs,
@@ -220,7 +297,11 @@ impl CullJob {
                         reason_codes: Vec::new(),
                     });
                 }
-                Err(error) => failed.push(json!([photo.id.0, error])),
+                Err(error) => {
+                    let total_ms = elapsed_ms(photo_started);
+                    per_photo.push(photo_timing(photo.id, Some(decode_ms), Some(analysis_ms), total_ms, TimingStatus::AnalysisFailed));
+                    failed.push(json!([photo.id.0, error.to_string()]));
+                }
             }
             if !progress((index + 1) as f32 / total, "Measuring photos") {
                 return Err("cancelled".into());
@@ -232,7 +313,9 @@ impl CullJob {
             reject_below: self.reject_below,
             pick_best: self.pick_best,
         };
+        let grouping_started = Instant::now();
         let report = lightcraft_pipeline::cull::report::plan(&measurements, &policy).map_err(|error| error.to_string())?;
+        let grouping_ms = elapsed_ms(grouping_started);
         let report_by_id: std::collections::HashMap<u64, &lightcraft_pipeline::cull::report::PhotoReport> =
             report.photos.iter().map(|photo| (photo.id, photo)).collect();
         for row in &mut rows {
@@ -244,14 +327,14 @@ impl CullJob {
                 row.reason_codes = measured.reason_codes.clone();
             }
         }
-        Ok((rows, failed))
+        Ok((rows, failed, timing_report(per_photo, grouping_ms, elapsed_ms(job_started))))
     }
 
     pub fn run(&self, progress: &CullProgressFn<'_>) -> std::result::Result<CullJobResult, String> {
-        let (rows, failed) = self.measure_rows(progress)?;
+        let (rows, failed, measurement_timing) = self.measure_rows(progress)?;
         Ok(CullJobResult {
             catalog_revision: self.catalog_revision,
-            value: proposal_result_revision(self.catalog_revision, &rows, failed, self.reject_below, self.pick_best),
+            value: proposal_result_revision(self.catalog_revision, &rows, failed, self.reject_below, self.pick_best, measurement_timing),
         })
     }
 }
@@ -274,9 +357,87 @@ fn f32_value(value: &Value, field: &str, min: f32, max: f32) -> Result<f32> {
     Ok(value)
 }
 
+fn timing_ms(value: &Value, field: &str, nullable: bool) -> Result<Option<f64>> {
+    if value.is_null() {
+        return nullable.then_some(None).ok_or_else(|| super::bad("photo.cullSuggest", format!("worker timing {field} is missing")));
+    }
+    let value = value
+        .as_f64()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .ok_or_else(|| super::bad("photo.cullSuggest", format!("worker timing {field} is invalid")))?;
+    Ok(Some(value))
+}
+
+fn validate_measurement_timing(job: &CullJob, value: &Value) -> Result<()> {
+    const C: &str = "photo.cullSuggest";
+    let timing = exact_object(
+        value,
+        &["schema", "classicalOnly", "sourcePolicy", "scope", "excludes", "perPhoto", "groupingMs", "jobTotalMs", "stages"],
+        "worker measurement timing",
+    )?;
+    if timing["schema"].as_str() != Some(TIMING_SCHEMA)
+        || timing["classicalOnly"].as_bool() != Some(true)
+        || timing["sourcePolicy"].as_str() != Some("uncached-origin-thumbnail")
+        || timing["scope"].as_str() != Some("measurement-and-planning")
+    {
+        return Err(super::bad(C, "worker measurement timing metadata is invalid"));
+    }
+    let excludes = timing["excludes"].as_array().ok_or_else(|| super::bad(C, "worker measurement timing exclusions are invalid"))?;
+    let expected_excludes = ["timingReceiptSerialization", "proposalSerialization", "proposalBinding", "dispatch", "import"];
+    if excludes.len() != expected_excludes.len() || excludes.iter().zip(expected_excludes).any(|(actual, expected)| actual.as_str() != Some(expected))
+    {
+        return Err(super::bad(C, "worker measurement timing exclusions are invalid"));
+    }
+    timing_ms(&timing["groupingMs"], "groupingMs", false)?;
+    timing_ms(&timing["jobTotalMs"], "jobTotalMs", false)?;
+    let stages = exact_object(&timing["stages"], &["decode", "analysis", "crops", "inference"], "worker measurement timing stages")?;
+    for stage in ["decode", "analysis"] {
+        let stage = exact_object(&stages[stage], &["status"], "worker measurement timing stage")?;
+        if stage["status"].as_str() != Some("measured") {
+            return Err(super::bad(C, "worker measurement timing stage is invalid"));
+        }
+    }
+    for stage in ["crops", "inference"] {
+        let stage = exact_object(&stages[stage], &["status"], "worker measurement timing stage")?;
+        if stage["status"].as_str() != Some("notApplicable") {
+            return Err(super::bad(C, "worker measurement timing absent stage is invalid"));
+        }
+    }
+    let per_photo = timing["perPhoto"].as_array().ok_or_else(|| super::bad(C, "worker per-photo timing is invalid"))?;
+    if per_photo.len() != job.photos.len() {
+        return Err(super::bad(C, "worker per-photo timing coverage is incomplete"));
+    }
+    let expected: std::collections::HashSet<PhotoId> = job.photos.iter().map(|photo| photo.id).collect();
+    let mut seen = std::collections::HashSet::with_capacity(per_photo.len());
+    for value in per_photo {
+        let photo = exact_object(value, &["id", "decodeMs", "analysisMs", "totalMs", "status"], "worker per-photo timing")?;
+        let id = photo["id"].as_u64().map(PhotoId).ok_or_else(|| super::bad(C, "worker per-photo timing id is invalid"))?;
+        if !expected.contains(&id) || !seen.insert(id) {
+            return Err(super::bad(C, "worker per-photo timing id is invalid"));
+        }
+        let decode = timing_ms(&photo["decodeMs"], "decodeMs", true)?;
+        let analysis = timing_ms(&photo["analysisMs"], "analysisMs", true)?;
+        let total = timing_ms(&photo["totalMs"], "totalMs", false)?.ok_or_else(|| super::bad(C, "worker per-photo total timing is missing"))?;
+        if decode.is_some_and(|value| total < value) || analysis.is_some_and(|value| total < value) {
+            return Err(super::bad(C, "worker per-photo total timing is shorter than a measured stage"));
+        }
+        match photo["status"].as_str() {
+            Some("ok") | Some("sourceChanged") if decode.is_some() && analysis.is_some() => {}
+            Some("decodeFailed") if decode.is_some() && analysis.is_none() => {}
+            Some("analysisFailed") if decode.is_some() && analysis.is_some() => {}
+            _ => return Err(super::bad(C, "worker per-photo timing status is invalid")),
+        }
+    }
+    if seen.len() != expected.len() {
+        return Err(super::bad(C, "worker per-photo timing coverage is incomplete"));
+    }
+    Ok(())
+}
+
 fn validate_worker_result(job: &CullJob, value: Value) -> Result<()> {
     const C: &str = "photo.cullSuggest";
-    let result = exact_object(&value, &["photos", "groups", "rejected", "picked", "failed", "proposal"], "worker result")?;
+    let result = exact_object(&value, &["photos", "groups", "rejected", "picked", "failed", "proposal", "measurementTiming"], "worker result")?;
+    validate_measurement_timing(job, result.get("measurementTiming").ok_or_else(|| super::bad(C, "worker measurement timing is missing"))?)?;
     let proposal_value = result.get("proposal").ok_or_else(|| super::bad(C, "worker proposal is missing"))?;
     let proposal = exact_object(proposal_value, &["version", "catalogRevision", "policy", "photos", "binding"], "worker proposal")?;
     let version = proposal["version"].as_u64().ok_or_else(|| super::bad(C, "worker proposal version is invalid"))?;
@@ -635,7 +796,7 @@ impl Session {
     }
 }
 
-fn measure(s: &mut Session, ids: &[PhotoId], cmd: &str, reject_below: Option<f32>, pick_best: bool) -> Result<(Vec<CullRow>, Vec<Value>)> {
+fn measure(s: &mut Session, ids: &[PhotoId], cmd: &str, reject_below: Option<f32>, pick_best: bool) -> Result<(Vec<CullRow>, Vec<Value>, Value)> {
     let job = prepare_cull_job(s, ids, reject_below, pick_best, cmd)?;
     job.measure_rows(&|_, _| true).map_err(|message| super::bad(cmd, message))
 }
@@ -722,23 +883,45 @@ fn proposal_value_revision(revision: u64, rows: &[CullRow], reject_below: Option
     })
 }
 
-fn proposal_result(s: &Session, rows: &[CullRow], failed: Vec<Value>, reject_below: Option<f32>, pick_best: bool) -> Value {
-    proposal_result_revision(s.catalog.revision, rows, failed, reject_below, pick_best)
+fn proposal_result(
+    s: &Session,
+    rows: &[CullRow],
+    failed: Vec<Value>,
+    reject_below: Option<f32>,
+    pick_best: bool,
+    measurement_timing: Value,
+) -> Value {
+    proposal_result_revision(s.catalog.revision, rows, failed, reject_below, pick_best, measurement_timing)
 }
 
-fn proposal_result_revision(revision: u64, rows: &[CullRow], failed: Vec<Value>, reject_below: Option<f32>, pick_best: bool) -> Value {
+fn proposal_result_revision(
+    revision: u64,
+    rows: &[CullRow],
+    failed: Vec<Value>,
+    reject_below: Option<f32>,
+    pick_best: bool,
+    measurement_timing: Value,
+) -> Value {
     let photos: Vec<Value> = rows.iter().map(|row| row_json(row, reject_below, pick_best)).collect();
     let rejected = rows.iter().filter(|row| proposed_flag(row, reject_below, pick_best) == Some(Flag::Reject)).count();
     let picked = rows.iter().filter(|row| proposed_flag(row, reject_below, pick_best) == Some(Flag::Pick)).count();
     let groups = rows.iter().filter_map(|row| row.group).collect::<std::collections::HashSet<_>>().len();
-    json!({"photos": photos, "groups": groups, "rejected": rejected, "picked": picked, "failed": failed, "proposal": proposal_value_revision(revision, rows, reject_below, pick_best)})
+    json!({
+        "photos": photos,
+        "groups": groups,
+        "rejected": rejected,
+        "picked": picked,
+        "failed": failed,
+        "proposal": proposal_value_revision(revision, rows, reject_below, pick_best),
+        "measurementTiming": measurement_timing,
+    })
 }
 
 fn cull_suggest(s: &mut Session, p: &Value) -> Result<Value> {
     let (reject_below, pick_best) = strict_policy(p, "photo.cullSuggest")?;
     let ids = strict_ids(s, p, "photo.cullSuggest")?;
-    let (rows, failed) = measure(s, &ids, "photo.cullSuggest", reject_below, pick_best)?;
-    Ok(proposal_result(s, &rows, failed, reject_below, pick_best))
+    let (rows, failed, measurement_timing) = measure(s, &ids, "photo.cullSuggest", reject_below, pick_best)?;
+    Ok(proposal_result(s, &rows, failed, reject_below, pick_best, measurement_timing))
 }
 
 fn cull_apply(s: &mut Session, p: &Value) -> Result<Value> {
@@ -755,8 +938,8 @@ fn analyze(s: &mut Session, p: &Value) -> Result<Value> {
     if dry_run {
         let (reject_below, pick_best) = strict_policy(p, "photo.analyze")?;
         let ids = strict_ids(s, p, "photo.analyze")?;
-        let (rows, failed) = measure(s, &ids, "photo.analyze", reject_below, pick_best)?;
-        return Ok(proposal_result(s, &rows, failed, reject_below, pick_best));
+        let (rows, failed, measurement_timing) = measure(s, &ids, "photo.analyze", reject_below, pick_best)?;
+        return Ok(proposal_result(s, &rows, failed, reject_below, pick_best, measurement_timing));
     }
     let ids = strict_ids(s, p, "photo.analyze")?;
     let (reject_below, pick_best) = strict_policy(p, "photo.analyze")?;
@@ -939,10 +1122,96 @@ mod tests {
             uncertainty: lightcraft_pipeline::cull::report::Uncertainty::Low,
             reason_codes: vec![lightcraft_pipeline::cull::report::ReasonCode::BelowRejectThreshold],
         };
-        let value = proposal_result_revision(job.catalog_revision, &[row], Vec::new(), Some(50.0), false);
+        let timing = timing_report(vec![photo_timing(id, Some(1.0), Some(2.0), 3.0, TimingStatus::Ok)], 0.5, 4.0);
+        let value = proposal_result_revision(job.catalog_revision, &[row], Vec::new(), Some(50.0), false, timing);
         assert_eq!(value["proposal"]["photos"][0]["sharpness"].as_f64().map(|v| v as f32), Some(sharpness));
         assert_eq!(value["proposal"]["photos"][0]["proposedFlag"], "reject");
         let result = CullJobResult { catalog_revision: job.catalog_revision, value };
         validate_worker_result(&job, result.value).unwrap();
+    }
+
+    #[test]
+    fn measurement_timing_covers_each_photo_with_finite_values_and_absent_stages() {
+        let mut session = Session::with_demo();
+        let ids = session.visible_cloned()[..2].to_vec();
+        let job = session.plan_cull_job(&ids, None, true).unwrap();
+        let result = job.run(&|_, _| true).unwrap();
+        let timing = &result.value["measurementTiming"];
+        assert_eq!(timing["schema"], TIMING_SCHEMA);
+        assert_eq!(timing["classicalOnly"], true);
+        assert_eq!(timing["sourcePolicy"], "uncached-origin-thumbnail");
+        assert_eq!(timing["scope"], "measurement-and-planning");
+        assert_eq!(
+            timing["excludes"],
+            serde_json::json!(["timingReceiptSerialization", "proposalSerialization", "proposalBinding", "dispatch", "import"])
+        );
+        assert_eq!(timing["perPhoto"].as_array().map(Vec::len), Some(ids.len()));
+        assert!(timing["groupingMs"].as_f64().is_some_and(f64::is_finite));
+        assert!(timing["jobTotalMs"].as_f64().is_some_and(f64::is_finite));
+        for photo in timing["perPhoto"].as_array().unwrap() {
+            let total = photo["totalMs"].as_f64().filter(|value| value.is_finite()).unwrap();
+            let decode = photo["decodeMs"].as_f64().filter(|value| value.is_finite()).unwrap();
+            let analysis = photo["analysisMs"].as_f64().filter(|value| value.is_finite()).unwrap();
+            assert!(total >= decode);
+            assert!(total >= analysis);
+        }
+        assert_eq!(timing["stages"]["crops"]["status"], "notApplicable");
+        assert_eq!(timing["stages"]["inference"]["status"], "notApplicable");
+    }
+
+    #[test]
+    fn measurement_timing_does_not_change_proposal_binding() {
+        let mut session = Session::with_demo();
+        let id = session.visible_cloned()[0];
+        let job = session.plan_cull_job(&[id], Some(50.0), false).unwrap();
+        let snapshot = &job.photos[0];
+        let row = CullRow {
+            id,
+            file_name: snapshot.file_name.clone(),
+            sharpness: 49.96,
+            clipped: 0.0,
+            source: snapshot.source.clone(),
+            flag: snapshot.flag,
+            group: None,
+            best: false,
+            decision: lightcraft_pipeline::cull::report::Decision::Reject,
+            uncertainty: lightcraft_pipeline::cull::report::Uncertainty::Low,
+            reason_codes: vec![lightcraft_pipeline::cull::report::ReasonCode::BelowRejectThreshold],
+        };
+        let first = proposal_result_revision(
+            job.catalog_revision,
+            std::slice::from_ref(&row),
+            Vec::new(),
+            Some(50.0),
+            false,
+            timing_report(vec![photo_timing(id, Some(1.0), Some(2.0), 3.0, TimingStatus::Ok)], 0.5, 4.0),
+        );
+        let second = proposal_result_revision(
+            job.catalog_revision,
+            std::slice::from_ref(&row),
+            Vec::new(),
+            Some(50.0),
+            false,
+            timing_report(vec![photo_timing(id, Some(9.0), Some(8.0), 17.0, TimingStatus::Ok)], 7.0, 18.0),
+        );
+        assert_eq!(first["proposal"]["binding"], second["proposal"]["binding"]);
+    }
+
+    #[test]
+    fn decode_failure_retains_timing_without_an_analysis_sample() {
+        let mut session = Session::with_demo();
+        let id = session.visible_cloned()[0];
+        let mut job = session.plan_cull_job(&[id], None, false).unwrap();
+        job.photos[0].source_ref =
+            crate::media::SourceRef::File { path: "synthetic-missing-source".into(), max_edge: 512, loader: None, fallback: None };
+        let result = job.run(&|_, _| true).unwrap();
+        let photo = &result.value["measurementTiming"]["perPhoto"][0];
+        assert_eq!(photo["id"], id.0);
+        assert_eq!(photo["status"], "decodeFailed");
+        assert!(photo["analysisMs"].is_null());
+        assert!(photo["totalMs"].as_f64().unwrap() >= photo["decodeMs"].as_f64().unwrap());
+        assert_eq!(result.value["failed"].as_array().unwrap().len(), 1);
+        assert!(result.value["proposal"]["photos"].as_array().unwrap().is_empty());
+        validate_measurement_timing(&job, &result.value["measurementTiming"]).unwrap();
     }
 }

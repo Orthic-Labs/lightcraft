@@ -22,6 +22,7 @@
 
 mod alloc_release;
 mod cull_eval;
+mod cull_timing;
 mod denoise_eval;
 mod personal_auto_eval;
 mod personal_auto_extract;

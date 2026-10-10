@@ -51,6 +51,12 @@ lightcraft-cli cull score --predictions baseline.json --labels LABELS.json --spl
 
 Baseline imports only explicit manifest files into disposable in-memory session; import/decode time is included. Freeze threshold on training shoots. Scorer reports reject precision/recall, false/unknown rejects, decision coverage, abstention & acceptable burst-winner agreement/coverage. Synthetic fixtures verify contracts; they cannot qualify photographic quality. No consented annotations or real path manifest were found in checkout.
 
+Engine timing source separates per-photo origin decode/thumbnail preparation, classical analysis & burst planning.
+Missing learned crop/inference stages are explicitly `notApplicable`. Timing metadata is excluded from proposal
+binding. CLI baseline validates timing receipts & emits per-photo p50/p95 plus planning totals; status remains
+`stage-only`, with hardware/build/timestamps/cache metadata absent. Scorer rejects multiple winners inside one labeled burst, malformed labels & split disagreement; acceptable
+winner sets never supply missing keep labels. Regression source remains unrun while fork Actions is suspended.
+
 Evidence protocols:
 
 - [Culling labels, metrics & timing](culling-evaluation.md)

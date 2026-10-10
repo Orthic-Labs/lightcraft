@@ -17,6 +17,7 @@ const MAX_SHOOTS: usize = 100_000;
 const MAX_FRAMES: usize = 1_000_000;
 const MAX_ID: usize = 256;
 const MAX_FILES: usize = 10_000;
+const MAX_LABEL_DEPTH: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Label {
@@ -46,6 +47,7 @@ struct Shoot {
     frames: BTreeMap<String, Frame>,
     acceptable: BTreeSet<String>,
     reject: BTreeSet<String>,
+    explicit_unknown: BTreeSet<String>,
     winners: BTreeSet<String>,
     bursts: BTreeMap<String, Burst>,
     elapsed_ms: Option<f64>,
@@ -65,6 +67,7 @@ struct Dataset {
     flat_decisions: BTreeMap<String, Decision>,
     flat_winners: BTreeSet<String>,
     flat_winner_bursts: BTreeMap<String, String>,
+    flat_split: Option<String>,
     flat_elapsed_ms: Option<f64>,
 }
 
@@ -233,6 +236,7 @@ fn run_baseline(args: &[String]) -> Result<(), String> {
         engine_reports.push(json!({"shootId": &shoot.id, "report": measured}));
     }
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let stage_summary = crate::cull_timing::summarize(&engine_reports, manifest.files.len())?;
     let report = json!({
         "version": REPORT_VERSION,
         "schema": REPORT_SCHEMA,
@@ -241,7 +245,7 @@ fn run_baseline(args: &[String]) -> Result<(), String> {
         "libraryMutated": false,
         "policy": {"rejectBelow": reject_below, "pickBest": true},
         "inputFileCount": manifest.files.len(),
-        "timing": {"elapsedMs": elapsed_ms, "includesImportAndDecode": true, "status": "elapsed-only"},
+        "timing": {"elapsedMs": elapsed_ms, "includesImportAndDecode": true, "status": "stage-only", "stageSummary": stage_summary},
         "shoots": shoot_values,
         "engineReports": engine_reports,
         "elapsedMs": elapsed_ms,
@@ -352,7 +356,11 @@ fn validate_label_manifest_header(value: &Value) -> Result<(), String> {
 
 fn parse_flat_predictions(value: &Value) -> Result<Dataset, String> {
     let object = value.as_object().ok_or("predictions root must be an object")?;
-    validate_split(text(object, &["split", "partition"]).as_deref())?;
+    if object.get("bursts").is_some() {
+        return Err("root-level bursts are unsupported; nest bursts under their shoot".into());
+    }
+    let split = text(object, &["split", "partition"]);
+    validate_split(split.as_deref())?;
     let rows = object.get("predictions").and_then(Value::as_array).ok_or("predictions must be an array")?;
     if rows.len() > MAX_FRAMES {
         return Err("input exceeds frame count cap".into());
@@ -369,7 +377,11 @@ fn parse_flat_predictions(value: &Value) -> Result<Dataset, String> {
             decision_from_value(item.get("decision").or_else(|| item.get("status")).or_else(|| item.get("label"))).unwrap_or(Decision::Abstain);
         dataset.flat_decisions.insert(id, decision);
     }
-    if let Some(winners) = object.get("winner_predictions").and_then(Value::as_array) {
+    if let Some(winners) = object.get("winner_predictions") {
+        let winners = winners.as_array().ok_or("winner_predictions must be an array")?;
+        if winners.len() > MAX_FRAMES {
+            return Err("winner_predictions exceeds frame count cap".into());
+        }
         for row in winners {
             let item = row.as_object().ok_or("winner prediction must be an object")?;
             let id = text(item, &["selected_winner_id", "selectedWinnerId", "winnerId", "photo_id"])
@@ -389,6 +401,7 @@ fn parse_flat_predictions(value: &Value) -> Result<Dataset, String> {
             }
         }
     }
+    dataset.flat_split = split;
     dataset.flat_elapsed_ms = number(object, &["elapsedMs", "elapsed_ms", "latencyMs", "durationMs"])?;
     Ok(dataset)
 }
@@ -439,12 +452,15 @@ fn parse_shoot(value: &Value, kind: InputKind, index: usize) -> Result<Shoot, St
     }
     let mut shoot = Shoot { id, split, ..Shoot::default() };
     for (frame_index, raw) in raw_frames.iter().enumerate() {
-        let (frame_id, frame_label, frame_decision, burst, winner_marker) = parse_frame(raw, kind, frame_index)?;
+        let (frame_id, frame_label, frame_unknown, frame_decision, burst, winner_marker) = parse_frame(raw, kind, frame_index)?;
         if shoot.frames.contains_key(&frame_id) {
             return Err("duplicate frame ID within shoot".into());
         }
         if kind == InputKind::Predictions && winner_marker {
             shoot.winners.insert(frame_id.clone());
+        }
+        if frame_unknown {
+            shoot.explicit_unknown.insert(frame_id.clone());
         }
         shoot.frames.insert(frame_id.clone(), Frame { id: frame_id, label: frame_label, decision: frame_decision, burst });
     }
@@ -499,23 +515,19 @@ fn parse_shoot(value: &Value, kind: InputKind, index: usize) -> Result<Shoot, St
     Ok(shoot)
 }
 
-fn parse_frame(value: &Value, kind: InputKind, index: usize) -> Result<(String, Option<Label>, Option<Decision>, Option<String>, bool), String> {
+fn parse_frame(
+    value: &Value,
+    kind: InputKind,
+    index: usize,
+) -> Result<(String, Option<Label>, bool, Option<Decision>, Option<String>, bool), String> {
     if let Some(id) = value.as_str() {
         valid_id(id, "frame ID")?;
-        return Ok((id.to_owned(), None, None, None, false));
+        return Ok((id.to_owned(), None, false, None, None, false));
     }
     let object = value.as_object().ok_or_else(|| format!("frame {index} must be a string or object"))?;
     let id = text(object, &["id", "frameId", "frame_id", "photoId", "photo_id"]).ok_or("frame is missing id")?;
     valid_id(&id, "frame ID")?;
-    let label = if kind == InputKind::Labels {
-        label_from_value(
-            object.get("label").or_else(|| object.get("decision")).or_else(|| object.get("status")).or_else(|| object.get("ground_truth")),
-        )
-        .or_else(|| bool_label(object, &["acceptable", "accepted", "keep", "picked"], Label::Keep))
-        .or_else(|| bool_label(object, &["reject", "rejected"], Label::Reject))
-    } else {
-        None
-    };
+    let (label, explicit_unknown) = if kind == InputKind::Labels { explicit_label(object)? } else { (None, false) };
     let decision = if kind == InputKind::Predictions {
         decision_from_value(object.get("decision").or_else(|| object.get("status")).or_else(|| object.get("label")))
             .or_else(|| bool_decision(object, &["accepted", "acceptable", "keep", "picked"], Decision::Keep))
@@ -526,11 +538,12 @@ fn parse_frame(value: &Value, kind: InputKind, index: usize) -> Result<(String, 
     let burst = value_text(object, &["burstId", "burst_id", "group"]);
     let winner_marker = kind == InputKind::Predictions
         && winner_marker_value(object.get("decision").or_else(|| object.get("status")).or_else(|| object.get("label")));
-    Ok((id, label, decision, burst, winner_marker))
+    Ok((id, label, explicit_unknown, decision, burst, winner_marker))
 }
 
 fn parse_shoot_bursts(object: &serde_json::Map<String, Value>, shoot: &mut Shoot) -> Result<(), String> {
-    let Some(raw_bursts) = object.get("bursts").and_then(Value::as_array) else { return Ok(()) };
+    let Some(raw_bursts) = object.get("bursts") else { return Ok(()) };
+    let Some(raw_bursts) = raw_bursts.as_array() else { return Err("shoot bursts must be an array".into()) };
     for raw in raw_bursts {
         let burst_object = raw.as_object().ok_or("burst must be an object")?;
         let id = text(burst_object, &["burstId", "burst_id", "id"]).ok_or("burst is missing burst_id")?;
@@ -573,7 +586,9 @@ fn parse_shoot_bursts(object: &serde_json::Map<String, Value>, shoot: &mut Shoot
         } else {
             BTreeSet::new()
         };
-        shoot.acceptable.extend(acceptable.iter().cloned());
+        if acceptable.iter().any(|winner| shoot.reject.contains(winner)) {
+            return Err("acceptable winner has reject label".into());
+        }
         shoot.bursts.insert(id.clone(), Burst { id, members, acceptable });
     }
     Ok(())
@@ -609,16 +624,96 @@ fn ids_from_keys(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Resu
     Ok(ids)
 }
 
-fn label_from_value(value: Option<&Value>) -> Option<Label> {
-    match value {
-        Some(Value::String(v))
-            if matches!(v.to_ascii_lowercase().as_str(), "keep" | "accept" | "accepted" | "pick" | "picked" | "winner" | "selected") =>
-        {
-            Some(Label::Keep)
+fn explicit_label(object: &serde_json::Map<String, Value>) -> Result<(Option<Label>, bool), String> {
+    let mut seen = false;
+    let mut label = None;
+    for key in ["ground_truth", "groundTruth", "label", "decision", "status"] {
+        let Some(value) = object.get(key) else { continue };
+        let parsed = label_value(value).map_err(|_| format!("{key} has invalid label"))?;
+        if seen && label != parsed {
+            return Err("conflicting labels for frame".into());
         }
-        Some(Value::String(v)) if matches!(v.to_ascii_lowercase().as_str(), "reject" | "rejected" | "discard") => Some(Label::Reject),
-        Some(Value::Object(v)) => label_from_value(v.get("label").or_else(|| v.get("decision")).or_else(|| v.get("status"))),
-        _ => None,
+        seen = true;
+        label = parsed;
+    }
+    for (key, bool_label_value, bool_label_kind) in [
+        ("acceptable", Label::Keep, "keep"),
+        ("accepted", Label::Keep, "keep"),
+        ("keep", Label::Keep, "keep"),
+        ("picked", Label::Keep, "keep"),
+        ("reject", Label::Reject, "reject"),
+        ("rejected", Label::Reject, "reject"),
+    ] {
+        let Some(value) = object.get(key) else { continue };
+        let Some(value) = value.as_bool() else { return Err(format!("{key} must be boolean")) };
+        if !value {
+            continue;
+        }
+        if seen && label != Some(bool_label_value) {
+            return Err(format!("{key} conflicts with {bool_label_kind} label"));
+        }
+        seen = true;
+        label = Some(bool_label_value);
+    }
+    Ok((label, seen && label.is_none()))
+}
+
+fn label_value(value: &Value) -> Result<Option<Label>, ()> {
+    enum Task<'a> {
+        Visit(&'a Value, usize),
+        Combine { values: Vec<&'a Value>, next: usize, labels: Vec<Option<Label>>, depth: usize },
+    }
+
+    let mut tasks = vec![Task::Visit(value, 0)];
+    let mut result = None;
+    while let Some(task) = tasks.pop() {
+        match task {
+            Task::Visit(value, depth) => {
+                if depth > MAX_LABEL_DEPTH {
+                    result = Some(Err(()));
+                    continue;
+                }
+                match value {
+                    Value::String(value) => {
+                        result = Some(match value.trim().to_ascii_lowercase().as_str() {
+                            "keep" | "accept" | "accepted" | "pick" | "picked" | "winner" | "selected" => Ok(Some(Label::Keep)),
+                            "reject" | "rejected" | "discard" => Ok(Some(Label::Reject)),
+                            "unknown" | "abstain" | "review" | "unlabeled" => Ok(None),
+                            _ => Err(()),
+                        });
+                    }
+                    Value::Object(value) => {
+                        let values: Vec<&Value> =
+                            ["ground_truth", "groundTruth", "label", "decision", "status"].iter().filter_map(|key| value.get(*key)).collect();
+                        let Some(first) = values.first().copied() else {
+                            result = Some(Err(()));
+                            continue;
+                        };
+                        tasks.push(Task::Combine { values, next: 0, labels: Vec::new(), depth });
+                        tasks.push(Task::Visit(first, depth.saturating_add(1)));
+                    }
+                    _ => result = Some(Err(())),
+                }
+            }
+            Task::Combine { values, next, mut labels, depth } => {
+                let Some(Ok(label)) = result.take() else {
+                    result = Some(Err(()));
+                    continue;
+                };
+                labels.push(label);
+                let next_index = next.saturating_add(1);
+                let Some(next_value) = values.get(next_index).copied() else {
+                    result = Some(if labels.iter().all(|candidate| *candidate == label) { Ok(label) } else { Err(()) });
+                    continue;
+                };
+                tasks.push(Task::Combine { values, next: next_index, labels, depth });
+                tasks.push(Task::Visit(next_value, depth.saturating_add(1)));
+            }
+        }
+    }
+    match result {
+        Some(value) => value,
+        None => Err(()),
     }
 }
 
@@ -644,10 +739,6 @@ fn winner_marker_value(value: Option<&Value>) -> bool {
         Some(Value::Object(v)) => winner_marker_value(v.get("decision").or_else(|| v.get("label")).or_else(|| v.get("status"))),
         _ => false,
     }
-}
-
-fn bool_label(object: &serde_json::Map<String, Value>, keys: &[&str], label: Label) -> Option<Label> {
-    keys.iter().find_map(|key| object.get(*key).and_then(Value::as_bool).filter(|value| *value).map(|_| label))
 }
 
 fn bool_decision(object: &serde_json::Map<String, Value>, keys: &[&str], decision: Decision) -> Option<Decision> {
@@ -696,6 +787,9 @@ fn validate_membership(shoot: &Shoot) -> Result<(), String> {
     if shoot.acceptable.iter().any(|id| shoot.reject.contains(id)) {
         return Err("frame has conflicting explicit labels".into());
     }
+    if shoot.explicit_unknown.iter().any(|id| shoot.acceptable.contains(id) || shoot.reject.contains(id)) {
+        return Err("explicit unknown conflicts with another label".into());
+    }
     Ok(())
 }
 
@@ -725,51 +819,28 @@ fn validate_bursts(root: &Value, dataset: &Dataset) -> Result<(), String> {
             }
         }
     }
-    if let Some(bursts) = root.get("bursts").and_then(Value::as_array) {
-        let mut member_owner = BTreeMap::new();
-        let mut burst_ids = BTreeSet::new();
-        for burst in bursts {
-            let object = burst.as_object().ok_or("burst must be an object")?;
-            let burst_id = text(object, &["burstId", "burst_id", "id"]).ok_or("burst is missing burstId")?;
-            valid_id(&burst_id, "burst ID")?;
-            if !burst_ids.insert(burst_id.clone()) {
-                return Err("duplicate burst ID".into());
-            }
-            let values = object
-                .get("frameIds")
-                .or_else(|| object.get("photo_ids"))
-                .or_else(|| object.get("photoIds"))
-                .or_else(|| object.get("frames"))
-                .and_then(Value::as_array)
-                .ok_or("burst is missing frameIds")?;
-            let mut local = BTreeSet::new();
-            for value in values {
-                let frame_id = value.as_str().or_else(|| value.get("id").and_then(Value::as_str)).ok_or("burst contains invalid frame ID")?;
-                if !local.insert(frame_id.to_owned()) {
-                    return Err("duplicate frame ID in burst".into());
-                }
-                if member_owner.insert(frame_id.to_owned(), burst_id.clone()).is_some() {
-                    return Err("frame belongs to multiple bursts".into());
-                }
-                if !dataset.shoots.values().any(|shoot| shoot.frames.contains_key(frame_id)) {
-                    return Err("burst references frame outside shoots".into());
-                }
-            }
-        }
+    if root.get("bursts").is_some() {
+        return Err("root-level bursts are unsupported; nest bursts under their shoot".into());
     }
     Ok(())
 }
 
 fn validate_splits(root: &Value, dataset: &Dataset) -> Result<(), String> {
     let Some(object) = root.as_object() else { return Ok(()) };
-    let train = id_set(object.get("trainShootIds"))?;
-    let eval = id_set(object.get("evalShootIds").or_else(|| object.get("testShootIds")))?;
-    if train.intersection(&eval).next().is_some() {
-        return Err("train/eval shoot leakage".into());
-    }
-    for shoot_id in train.iter().chain(eval.iter()) {
-        if !dataset.shoots.contains_key(shoot_id) {
-            return Err("split references unknown shootId".into());
+    let mut owners = BTreeMap::new();
+    for (key, expected_split) in
+        [("trainShootIds", "train"), ("validationShootIds", "validation"), ("devShootIds", "dev"), ("evalShootIds", "eval"), ("testShootIds", "test")]
+    {
+        for shoot_id in id_set(object.get(key))? {
+            if owners.insert(shoot_id.clone(), expected_split).is_some() {
+                return Err("split metadata leakage".into());
+            }
+            let Some(shoot) = dataset.shoots.get(&shoot_id) else {
+                return Err("split references unknown shootId".into());
+            };
+            if shoot.split.as_deref() != Some(expected_split) {
+                return Err("split metadata disagrees with shoot split".into());
+            }
         }
     }
     let mut frame_splits: BTreeMap<String, String> = BTreeMap::new();
@@ -779,7 +850,7 @@ fn validate_splits(root: &Value, dataset: &Dataset) -> Result<(), String> {
                 for id in shoot.frames.keys() {
                     if let Some(previous) = frame_splits.insert(id.clone(), split.clone()) {
                         if previous != *split {
-                            return Err("frame appears in multiple train/eval shoots".into());
+                            return Err("frame appears in multiple split shoots".into());
                         }
                     }
                 }
@@ -803,6 +874,52 @@ fn id_set(value: Option<&Value>) -> Result<BTreeSet<String>, String> {
     Ok(result)
 }
 
+fn validate_prediction_splits(predictions: &Dataset, labels: &Dataset, split: Option<&str>) -> Result<(), String> {
+    if let Some(prediction_split) = predictions.flat_split.as_deref() {
+        if split.is_some_and(|wanted| wanted != prediction_split) {
+            return Err("flat prediction split does not match requested split".into());
+        }
+        for id in predictions.flat_decisions.keys().chain(predictions.flat_winners.iter()) {
+            let Some(label_shoot) = labels.shoots.values().find(|shoot| shoot.frames.contains_key(id)) else {
+                return Err("prediction references photo outside labeled shoots".into());
+            };
+            if label_shoot.split.as_deref() != Some(prediction_split) {
+                return Err("flat prediction split disagrees with labeled shoot split".into());
+            }
+        }
+    }
+    for prediction in predictions.shoots.values() {
+        let Some(label) = labels.shoots.get(&prediction.id) else {
+            return Err("prediction references unknown shootId".into());
+        };
+        if prediction.split != label.split {
+            return Err("prediction split disagrees with labeled shoot split".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_winner_cardinality(predictions: &Dataset, labels: &Dataset, split: Option<&str>) -> Result<(), String> {
+    for label in labels.shoots.values() {
+        if split.is_some_and(|wanted| label.split.as_deref() != Some(wanted)) {
+            continue;
+        }
+        let prediction = predictions.shoots.get(&label.id);
+        for burst in label.bursts.values() {
+            let selected = prediction
+                .into_iter()
+                .flat_map(|shoot| shoot.winners.iter())
+                .chain(predictions.flat_winners.iter())
+                .filter(|id| burst.members.contains(*id))
+                .count();
+            if selected > 1 {
+                return Err("multiple selected winners in label burst".into());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn score(predictions: &Dataset, labels: &Dataset, split: Option<&str>) -> Result<Value, String> {
     for prediction in predictions.shoots.values() {
         let Some(label) = labels.shoots.get(&prediction.id) else { return Err("prediction references unknown shootId".into()) };
@@ -818,6 +935,8 @@ fn score(predictions: &Dataset, labels: &Dataset, split: Option<&str>) -> Result
     {
         return Err("prediction references photo outside labeled shoots".into());
     }
+    validate_prediction_splits(predictions, labels, split)?;
+    validate_winner_cardinality(predictions, labels, split)?;
     for (winner, burst_id) in &predictions.flat_winner_bursts {
         let Some(burst) = labels.shoots.values().find_map(|shoot| shoot.bursts.get(burst_id)) else {
             return Err("winner prediction references unknown burst".into());
@@ -931,8 +1050,17 @@ fn score(predictions: &Dataset, labels: &Dataset, split: Option<&str>) -> Result
             elapsed.push(value);
         }
     }
-    if labels.shoots.values().all(|shoot| predictions.shoots.get(&shoot.id).is_none()) {
-        total_prediction_frames = predictions.flat_decisions.len();
+    if predictions.shoots.is_empty() {
+        total_prediction_frames = predictions
+            .flat_decisions
+            .keys()
+            .filter(|id| {
+                labels
+                    .shoots
+                    .values()
+                    .any(|shoot| shoot.frames.contains_key(*id) && split.is_none_or(|wanted| shoot.split.as_deref() == Some(wanted)))
+            })
+            .count();
         if let Some(value) = predictions.flat_elapsed_ms {
             elapsed.push(value);
         }
@@ -985,7 +1113,7 @@ fn score(predictions: &Dataset, labels: &Dataset, split: Option<&str>) -> Result
         },
         "coverage": {
             "shoots": {"selected": selected, "labeled": labeled_shoots, "ratio": ratio(labeled_shoots, selected)},
-            "frames": {"labeled": labeled_frames, "evaluated": evaluated_frames, "predictedRows": total_prediction_frames, "ratio": ratio(evaluated_frames, labeled_frames)}
+            "frames": {"total": all_photos, "labeled": labeled_frames, "evaluated": evaluated_frames, "predictedRows": total_prediction_frames, "ratio": ratio(total_prediction_frames, all_photos)}
         },
         "limits": {"maxInputBytes": MAX_BYTES, "maxShoots": MAX_SHOOTS, "maxFrames": MAX_FRAMES},
         "labelPolicy": "explicit labels only; unpicked frames are excluded unless explicitly rejected"
@@ -1019,7 +1147,11 @@ fn unique_keep_count(labels: &Dataset, split: Option<&str>) -> usize {
         .shoots
         .values()
         .filter(|shoot| split.is_none_or(|wanted| shoot.split.as_deref() == Some(wanted)))
-        .map(|shoot| shoot.frames.iter().filter(|(id, frame)| frame.label == Some(Label::Keep) || shoot.acceptable.contains(*id)).count())
+        .map(|shoot| {
+            let mut keep_ids = shoot.acceptable.clone();
+            keep_ids.extend(shoot.frames.iter().filter_map(|(id, frame)| (frame.label == Some(Label::Keep)).then_some(id.clone())));
+            keep_ids.len()
+        })
         .sum()
 }
 
@@ -1188,6 +1320,16 @@ mod tests {
     }
 
     #[test]
+    fn malformed_present_winner_predictions_are_rejected() {
+        for malformed in [Value::Null, json!({}), json!("winner"), json!(true)] {
+            let predictions = json!({"predictions":[],"winner_predictions":malformed});
+            assert!(parse_flat_predictions(&predictions).is_err());
+        }
+        assert!(parse_flat_predictions(&json!({"predictions":[],"winner_predictions":[]})).is_ok());
+        assert!(parse_flat_predictions(&json!({"predictions":[]})).is_ok());
+    }
+
+    #[test]
     fn rejected_keep_is_missed_rejection_and_burst_coverage_accepts_any_member() {
         let labels = json!({"shoots":[{"shootId":"s","split":"eval","frames":[
             {"id":"r1","label":"reject"},{"id":"r2","label":"reject"},
@@ -1228,6 +1370,142 @@ mod tests {
             {"burst_id":"burst","selected_winner_id":"b"}
         ]});
         assert!(parse_flat_predictions(&flat).is_err());
+    }
+
+    #[test]
+    fn unscoped_multiple_winners_are_rejected_after_matching_label_burst() {
+        let labels = json!({"shoots":[{"shoot_id":"s","split":"test","photos":[
+            {"photo_id":"a","ground_truth":"keep"},{"photo_id":"b","ground_truth":"keep"}
+        ],"bursts":[{"burst_id":"burst","photo_ids":["a","b"],"acceptable_winners":["a","b"]}]}]});
+        let predictions = json!({"split":"test","predictions":[],"winner_predictions":[
+            {"selected_winner_id":"a"},{"selected_winner_id":"b"}
+        ]});
+        assert!(score(&parse_flat_predictions(&predictions).unwrap(), &parse_dataset(&labels, InputKind::Labels).unwrap(), Some("test")).is_err());
+    }
+
+    #[test]
+    fn acceptable_winner_does_not_promote_unknown_frame_to_keep() {
+        let labels = json!({"shoots":[{"shoot_id":"s","split":"test","photos":[
+            {"photo_id":"u","ground_truth":"unknown","burst_id":"burst"}
+        ],"bursts":[{"burst_id":"burst","photo_ids":["u"],"acceptable_winners":["u"]}]}]});
+        let predictions = json!({"split":"test","predictions":[
+            {"photo_id":"u","decision":"reject"}
+        ],"winner_predictions":[{"burst_id":"burst","selected_winner_id":"u"}]});
+        let report =
+            score(&parse_flat_predictions(&predictions).unwrap(), &parse_dataset(&labels, InputKind::Labels).unwrap(), Some("test")).unwrap();
+        assert_eq!(report["metrics"]["unknownRejectCount"], json!(1));
+        assert_eq!(report["metrics"]["falseRejectCount"], json!(0));
+        assert_eq!(report["coverage"]["frames"]["labeled"], json!(0));
+    }
+
+    #[test]
+    fn invalid_ground_truth_is_rejected_but_explicit_unknown_is_valid() {
+        let invalid = json!({"shoots":[{"shoot_id":"s","split":"test","photos":[
+            {"photo_id":"a","ground_truth":"maybe"}
+        ]}]});
+        assert!(parse_dataset(&invalid, InputKind::Labels).is_err());
+
+        let unknown = json!({"shoots":[{"shoot_id":"s","split":"test","photos":[
+            {"photo_id":"a","ground_truth":"unknown"}
+        ]}]});
+        assert!(parse_dataset(&unknown, InputKind::Labels).is_ok());
+    }
+
+    #[test]
+    fn prediction_split_must_match_labels_and_requested_split() {
+        let labels = json!({"shoots":[{"shoot_id":"s","split":"test","photos":["a"]}]});
+        let flat = json!({"split":"train","predictions":[{"photo_id":"a","decision":"keep"}]});
+        assert!(score(&parse_flat_predictions(&flat).unwrap(), &parse_dataset(&labels, InputKind::Labels).unwrap(), Some("test")).is_err());
+
+        let shoot = json!({"shoots":[{"shoot_id":"s","split":"train","frames":[{"id":"a","decision":"keep"}]}]});
+        assert!(
+            score(&parse_dataset(&shoot, InputKind::Predictions).unwrap(), &parse_dataset(&labels, InputKind::Labels).unwrap(), Some("test"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn split_metadata_checks_all_partitions() {
+        let labels = json!({"trainShootIds":["s"],"validationShootIds":["s"],"shoots":[
+            {"shoot_id":"s","split":"train","frames":["a"]}
+        ]});
+        assert!(parse_dataset(&labels, InputKind::Labels).is_err());
+    }
+
+    #[test]
+    fn frame_coverage_ratio_counts_selected_split_predictions() {
+        let labels = json!({"shoots":[
+            {"shoot_id":"train","split":"train","frames":[{"id":"a","ground_truth":"keep"}]},
+            {"shoot_id":"test","split":"test","frames":[{"id":"b","ground_truth":"keep"}]}
+        ]});
+        let no_predictions = json!({"split":"test","predictions":[]});
+        let report =
+            score(&parse_flat_predictions(&no_predictions).unwrap(), &parse_dataset(&labels, InputKind::Labels).unwrap(), Some("test")).unwrap();
+        assert_eq!(report["coverage"]["frames"]["predictedRows"], json!(0));
+        assert_eq!(report["coverage"]["frames"]["ratio"], json!(0.0));
+
+        let test_prediction = json!({"split":"test","predictions":[{"photo_id":"b","decision":"keep"}]});
+        let report =
+            score(&parse_flat_predictions(&test_prediction).unwrap(), &parse_dataset(&labels, InputKind::Labels).unwrap(), Some("test")).unwrap();
+        assert_eq!(report["coverage"]["frames"]["predictedRows"], json!(1));
+
+        let mixed_prediction = json!({"predictions":[
+            {"photo_id":"a","decision":"keep"},{"photo_id":"b","decision":"keep"}
+        ]});
+        let report =
+            score(&parse_flat_predictions(&mixed_prediction).unwrap(), &parse_dataset(&labels, InputKind::Labels).unwrap(), Some("test")).unwrap();
+        assert_eq!(report["coverage"]["frames"]["predictedRows"], json!(1));
+    }
+
+    #[test]
+    fn malformed_or_conflicting_boolean_labels_are_rejected() {
+        let malformed = json!({"shoots":[{"shoot_id":"s","split":"test","frames":[
+            {"id":"a","keep":"yes"}
+        ]}]});
+        assert!(parse_dataset(&malformed, InputKind::Labels).is_err());
+
+        let conflicting = json!({"shoots":[{"shoot_id":"s","split":"test","frames":[
+            {"id":"a","ground_truth":"unknown","keep":true}
+        ]}]});
+        assert!(parse_dataset(&conflicting, InputKind::Labels).is_err());
+
+        let opposing = json!({"shoots":[{"shoot_id":"s","split":"test","frames":[
+            {"id":"a","keep":true,"reject":true}
+        ]}]});
+        assert!(parse_dataset(&opposing, InputKind::Labels).is_err());
+
+        let unknown_winner = json!({"shoots":[{"shoot_id":"s","split":"test","frames":[
+            {"id":"a","ground_truth":"unknown"}
+        ],"acceptableWinnerIds":["a"]}]});
+        assert!(parse_dataset(&unknown_winner, InputKind::Labels).is_err());
+    }
+
+    #[test]
+    fn nested_label_values_have_a_depth_limit() {
+        let mut nested = json!("unknown");
+        for _ in 0..=MAX_LABEL_DEPTH {
+            nested = json!({"label": nested});
+        }
+        let labels = json!({"shoots":[{"shoot_id":"s","split":"test","frames":[
+            {"id":"a","ground_truth":nested}
+        ]}]});
+        assert!(parse_dataset(&labels, InputKind::Labels).is_err());
+
+        let conflicting = json!({"shoots":[{"shoot_id":"s","split":"test","frames":[
+            {"id":"a","ground_truth":{"label":"keep","decision":"reject"}}
+        ]}]});
+        assert!(parse_dataset(&conflicting, InputKind::Labels).is_err());
+    }
+
+    #[test]
+    fn any_root_bursts_value_is_rejected() {
+        let labels = json!({"bursts":null,"shoots":[
+            {"shoot_id":"s","split":"test","frames":["a"]}
+        ]});
+        assert!(parse_dataset(&labels, InputKind::Labels).is_err());
+
+        let predictions = json!({"split":"test","bursts":null,"predictions":[]});
+        assert!(parse_flat_predictions(&predictions).is_err());
     }
 
     #[test]

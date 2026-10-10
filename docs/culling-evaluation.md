@@ -101,8 +101,10 @@ With `--out`, stdout only acknowledges report path; JSON report remains in named
 
 Baseline report has same `version` & `schema`, `mode: "baseline"`, `source: "ephemeral-session"`,
 `libraryMutated: false`, `policy` (`rejectBelow`, `pickBest`), `inputFileCount`, `timing`, `shoots`, `engineReports`,
-`elapsedMs` & `limits`. Its `timing.elapsedMs` currently covers import & decode plus culling; it does not supply named
-hardware or separate decode/crops/inference stages.
+`elapsedMs` & `limits`. `timing.elapsedMs` covers import & decode plus culling. `timing.stageSummary` validates engine
+receipts & reports per-photo decode/analysis/measurement-total nearest-rank p50/p95, summed planning time & measured
+job totals. Failed, duplicate, nonfinite or missing samples fail summary construction. Status remains `stage-only`;
+hardware, build, timestamps & cache-run metadata stay explicitly missing.
 
 ## Metrics
 
@@ -116,6 +118,7 @@ known-label denominators.
 | False rejects | Count of `predicted reject ∩ ground-truth keep`; also report rate over ground-truth keeps |
 | Unknown reject count | Count of `predicted reject ∩ ground-truth unknown`; never fold into false rejects |
 | Decision coverage | Known-label photos with `keep` or `reject` prediction / known-label photos |
+| Frame coverage | Prediction rows in selected split / all photos in selected split; denominator is `coverage.frames.total` |
 | Abstention | `unknown` predictions / all photos, plus unknown predictions on known labels |
 | Winner agreement | Bursts with `selected_winner_id ∈ acceptable_winners` / bursts with non-empty acceptable set |
 | Winner coverage | Bursts with selected winner / bursts with non-empty acceptable set |
@@ -123,15 +126,30 @@ known-label denominators.
 For `selected_winner_id`, a listed acceptable winner is sufficient; do not require one canonical frame. Bursts without
 an adjudicated winner are reported as unadjudicated & excluded from winner agreement/coverage denominators.
 
+An acceptable burst winner is a ranking label only: it does not turn an explicitly unknown photo into `keep`.
+At most one predicted winner may belong to any labeled burst, including winners supplied without a burst ID.
+Invalid or conflicting photo labels, prediction/label split disagreement & overlapping partition metadata are errors.
+Root-level `bursts` are unsupported; place each burst under its owning shoot.
+
 ## Timing record
 
 Each cold & warm run over exactly 2,000 RAW files must include `started_at`, `finished_at`, `hardware` (machine,
 CPU, GPU, RAM, storage, OS), `build_revision`, `cache_state`, sample count & stage timings for `decode`, `crops`,
 `inference` & `total` (p50/p95 milliseconds). Cold means fresh process with no warmed decode/crop/inference cache;
 warm means same process after one documented priming pass. Use same file order & config for both. Missing timestamp,
-hardware identity, stage timing or sample count makes timing status `incomplete`, never success. Current CLI baseline
-only emits one elapsed duration, so supplementary runner records are required for this gate. No timing claim is made
-until a 2,000-RAW corpus exists.
+hardware identity, stage timing or sample count makes timing status `incomplete`, never success. Supplementary runner
+records remain required for this gate. No timing claim is made until a 2,000-RAW corpus exists.
+
+Engine results include `measurementTiming` with schema `lightcraft.cull-timing.v1`. Each attempted photo records
+`decodeMs`, nullable `analysisMs`, `totalMs` & `status` (`ok`, `decodeFailed`, `analysisFailed`, `sourceChanged`).
+`decodeMs` covers origin loading, decoding & thumbnail preparation; `analysisMs` covers classical measurements.
+`groupingMs` covers burst planning. `jobTotalMs` covers measurement/planning & progress callbacks, excluding proposal
+serialization, binding & dispatch. Crop extraction & learned inference are `notApplicable`, never invented zero timings.
+Cancellation returns an error rather than a completed partial timing receipt.
+
+Source policy is `uncached-origin-thumbnail`: measurements bypass Ember's decoded-image cache. A fresh process does
+not prove cold filesystem cache. A later pass in the same process may warm OS/process state, while decoded-image cache
+remains bypassed. Timing stays outside nested proposal & never changes its acceptance binding.
 
 ## Frozen gates
 
