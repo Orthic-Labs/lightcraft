@@ -546,7 +546,7 @@ fn remove_catalog_crop(partial: &mut Value) {
 }
 
 fn catalog_crop(partial: &mut Value, orientation: Orientation, stored_aspect: Option<f64>) -> Option<&'static str> {
-    let Some(geometry) = partial.pointer_mut("/crop/geometry").and_then(Value::as_object_mut) else { return None };
+    let geometry = partial.pointer_mut("/crop/geometry").and_then(Value::as_object_mut)?;
     let edge = |key: &str| geometry.get("rect").and_then(|rect| rect.get(key)).and_then(Value::as_f64);
     let (Some(x0), Some(y0), Some(x1), Some(y1)) = (edge("x0"), edge("y0"), edge("x1"), edge("y1")) else { return None };
     if [x0, y0, x1, y1].iter().any(|value| !value.is_finite() || !(0.0..=1.0).contains(value)) || x0 >= x1 || y0 >= y1 {
