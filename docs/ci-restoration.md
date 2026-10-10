@@ -30,6 +30,28 @@ SDK owner will handle repair, native feature-matrix qualification & managed
 publication. Ember will consume qualified published versions, then rerun
 exact-revision hidden native QA with existing hard foreground guard intact.
 
+## Restored native evidence, 2026-10-10
+
+[Candidate run 38055623316](https://github.com/Orthic-Labs/lightcraft/actions/runs/38055623316)
+built source `93678dd1b9977d6ee509679be164fe2ec3b44113` successfully on
+macOS/arm64 & Windows/x86_64. Both builds validated & retained procedural
+CPU denoise receipts before hidden native QA. Extracted evidence matches
+stage-summary SHA-256 entries: 48 Mac files & 43 Windows files.
+
+Windows passed 14 of 15 hidden journeys. Culling Apply failed synchronously;
+dialog showed a generic stale-photo message, so exact validation rejection
+remains unresolved. Mac repeated unavailable foreground PID/name evidence
+across all journeys; 12 journey bodies passed, while culling Apply, inspector
+collapse & virtual-grid geometry failed. Native qualification remains failed.
+
+Mac same-parent probes held viewport, parent & sibling slot constant. Fresh
+stage layout restored collapsed columns from `690px 8px 336px` to
+`990px 0px 44px`; fresh grid spacer restored computed height from `24354px`
+to its inline `79810px`. Both results persisted at 64 ms. Direct inline style
+changes & viewport bounce did not restore geometry. Ember follow-up preserves
+stateful workspaces while testing isolated DOM replacement; SDK foreground
+repair remains with its assigned owner.
+
 ## Suspension history
 
 Checked 2026-10-10 against `Orthic-Labs/lightcraft` at main revision
