@@ -249,7 +249,7 @@ impl YuNet {
                     let scale = self.float_initializer(scale_name)?;
                     let data = scale.data.as_slice();
                     if data.len() != 4
-                        || data.get(0) != Some(&1.0)
+                        || data.first() != Some(&1.0)
                         || data.get(1) != Some(&1.0)
                         || !data.get(2).is_some_and(|v| *v >= 1.0 && v.fract() == 0.0)
                         || data.get(2) != data.get(3)
@@ -665,17 +665,25 @@ fn parse_string(bytes: &[u8], label: &str) -> Result<String> {
 }
 
 fn parse_raw_f32(bytes: &[u8]) -> Result<Vec<f32>> {
-    if bytes.len() % 4 != 0 || bytes.len() / 4 > MAX_TENSOR_ELEMENTS {
+    if !bytes.len().is_multiple_of(4) {
         return Err(Error::Model("invalid FLOAT raw_data length".into()));
     }
-    bytes.chunks_exact(4).map(|chunk| Ok(f32::from_le_bytes(chunk.try_into().map_err(|_| Error::Model("invalid FLOAT raw_data".into()))?))).collect()
+    let (chunks, _) = bytes.as_chunks::<4>();
+    if chunks.len() > MAX_TENSOR_ELEMENTS {
+        return Err(Error::Model("invalid FLOAT raw_data length".into()));
+    }
+    chunks.iter().map(|chunk| Ok(f32::from_le_bytes(*chunk))).collect()
 }
 
 fn parse_raw_i64(bytes: &[u8]) -> Result<Vec<i64>> {
-    if bytes.len() % 8 != 0 || bytes.len() / 8 > MAX_TENSOR_ELEMENTS {
+    if !bytes.len().is_multiple_of(8) {
         return Err(Error::Model("invalid INT64 raw_data length".into()));
     }
-    bytes.chunks_exact(8).map(|chunk| Ok(i64::from_le_bytes(chunk.try_into().map_err(|_| Error::Model("invalid INT64 raw_data".into()))?))).collect()
+    let (chunks, _) = bytes.as_chunks::<8>();
+    if chunks.len() > MAX_TENSOR_ELEMENTS {
+        return Err(Error::Model("invalid INT64 raw_data length".into()));
+    }
+    chunks.iter().map(|chunk| Ok(i64::from_le_bytes(*chunk))).collect()
 }
 
 fn parse_packed_f32(bytes: &[u8]) -> Result<Vec<f32>> {

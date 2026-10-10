@@ -149,12 +149,14 @@ fn materialize_value(value: ValueData, tensor: &TensorSpec, device: &Device) -> 
 fn decode_value(tensor: &TensorSpec, raw: &[u8]) -> Result<ValueData> {
     match tensor.dtype {
         StorageType::Float32 => {
-            let values = raw
-                .chunks_exact(4)
-                .map(|chunk| {
-                    let bytes =
-                        <[u8; 4]>::try_from(chunk).map_err(|_| Error::Model(format!("MediaPipe tensor {} has incomplete F32 value", tensor.name)))?;
-                    let value = f32::from_le_bytes(bytes);
+            let (chunks, remainder) = raw.as_chunks::<4>();
+            if !remainder.is_empty() {
+                return Err(Error::Model(format!("MediaPipe tensor {} has incomplete F32 value", tensor.name)));
+            }
+            let values = chunks
+                .iter()
+                .map(|bytes| {
+                    let value = f32::from_le_bytes(*bytes);
                     if !value.is_finite() {
                         return Err(Error::Model(format!("MediaPipe tensor {} contains non-finite F32", tensor.name)));
                     }
@@ -164,26 +166,19 @@ fn decode_value(tensor: &TensorSpec, raw: &[u8]) -> Result<ValueData> {
             Ok(ValueData::Float(Arc::from(values.into_boxed_slice())))
         }
         StorageType::Float16 => {
-            let values = raw
-                .chunks_exact(2)
-                .map(|chunk| {
-                    let bytes =
-                        <[u8; 2]>::try_from(chunk).map_err(|_| Error::Model(format!("MediaPipe tensor {} has incomplete F16 value", tensor.name)))?;
-                    let value = half_to_f32(u16::from_le_bytes(bytes))?;
-                    Ok(value)
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let (chunks, remainder) = raw.as_chunks::<2>();
+            if !remainder.is_empty() {
+                return Err(Error::Model(format!("MediaPipe tensor {} has incomplete F16 value", tensor.name)));
+            }
+            let values = chunks.iter().map(|bytes| half_to_f32(u16::from_le_bytes(*bytes))).collect::<Result<Vec<_>>>()?;
             Ok(ValueData::Float(Arc::from(values.into_boxed_slice())))
         }
         StorageType::Int32 => {
-            let values = raw
-                .chunks_exact(4)
-                .map(|chunk| {
-                    let bytes =
-                        <[u8; 4]>::try_from(chunk).map_err(|_| Error::Model(format!("MediaPipe tensor {} has incomplete I32 value", tensor.name)))?;
-                    Ok(i32::from_le_bytes(bytes))
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let (chunks, remainder) = raw.as_chunks::<4>();
+            if !remainder.is_empty() {
+                return Err(Error::Model(format!("MediaPipe tensor {} has incomplete I32 value", tensor.name)));
+            }
+            let values = chunks.iter().map(|bytes| i32::from_le_bytes(*bytes)).collect::<Vec<_>>();
             Ok(ValueData::Int(Arc::from(values.into_boxed_slice())))
         }
     }
@@ -294,11 +289,7 @@ fn validate_graph_tensors(graph: &GraphSpec, bytes: &[u8]) -> Result<()> {
     let mut ranges: Vec<(usize, usize, StorageType, &str)> = Vec::new();
     let mut names = HashSet::with_capacity(graph.tensors.len());
     for tensor in graph.tensors {
-        if tensor.name.is_empty()
-            || !names.insert(tensor.name)
-            || tensor.shape.len() > MAX_RANK
-            || tensor.shape.iter().any(|dimension| *dimension == 0)
-        {
+        if tensor.name.is_empty() || !names.insert(tensor.name) || tensor.shape.len() > MAX_RANK || tensor.shape.contains(&0) {
             return Err(Error::Model(format!("MediaPipe graph {} has malformed tensor {}", graph.name, tensor.name)));
         }
         let elements = tensor

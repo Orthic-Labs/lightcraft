@@ -253,7 +253,7 @@ mod tests {
         ];
         for channel in 0..3 {
             let value = channels
-                .get(0)
+                .first()
                 .and_then(|batch| batch.get(channel))
                 .and_then(|plane| plane.first())
                 .and_then(|row| row.first())
@@ -278,7 +278,7 @@ mod tests {
         ];
         for (channel, expected) in expected.into_iter().enumerate() {
             let value = values
-                .get(0)
+                .first()
                 .and_then(|batch| batch.get(channel))
                 .and_then(|plane| plane.first())
                 .and_then(|row| row.first())
@@ -349,8 +349,8 @@ mod tests {
         }
         let tensor = preprocess_rgb8(&rgb, 8, 4, DinoInputSize::Small224, &Device::Cpu)?;
         let values = tensor.to_vec4::<f32>()?;
-        let red = values.get(0).and_then(|batch| batch.get(0)).ok_or_else(|| Error::Model("missing red plane".into()))?;
-        let left = red.get(112).and_then(|row| row.get(0)).copied().ok_or_else(|| Error::Model("missing left crop sample".into()))?;
+        let red = values.first().and_then(|batch| batch.first()).ok_or_else(|| Error::Model("missing red plane".into()))?;
+        let left = red.get(112).and_then(|row| row.first()).copied().ok_or_else(|| Error::Model("missing left crop sample".into()))?;
         let center = red.get(112).and_then(|row| row.get(112)).copied().ok_or_else(|| Error::Model("missing center crop sample".into()))?;
         let right = red.get(112).and_then(|row| row.get(223)).copied().ok_or_else(|| Error::Model("missing right crop sample".into()))?;
         assert!(left < center && center < right);
@@ -375,8 +375,8 @@ mod tests {
         let tensor = preprocess_rgb8(&rgb, side, side, DinoInputSize::Small224, &Device::Cpu)?;
         let values = tensor.to_vec4::<f32>()?;
         let red = values
-            .get(0)
-            .and_then(|batch| batch.get(0))
+            .first()
+            .and_then(|batch| batch.first())
             .and_then(|plane| plane.get(112))
             .and_then(|row| row.get(112))
             .copied()

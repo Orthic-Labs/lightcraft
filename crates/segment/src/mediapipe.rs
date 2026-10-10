@@ -77,10 +77,10 @@ fn execute_graph(graph: &LoadedGraph, input: &Tensor) -> Result<Vec<Tensor>> {
     )?;
     finite(input)?;
     for constant in graph.constants.iter().flatten() {
-        if let Value::Float(tensor) = constant {
-            if !tensor.device().same_device(input.device()) {
-                return Err(Error::Model("MediaPipe input & loaded constants must share device".into()));
-            }
+        if let Value::Float(tensor) = constant
+            && !tensor.device().same_device(input.device())
+        {
+            return Err(Error::Model("MediaPipe input & loaded constants must share device".into()));
         }
     }
 
@@ -127,16 +127,18 @@ fn execute_graph(graph: &LoadedGraph, input: &Tensor) -> Result<Vec<Tensor>> {
         for index in node.inputs {
             let count = uses.get_mut(*index).ok_or_else(|| Error::Model("MediaPipe tensor use index is invalid".into()))?;
             *count = count.checked_sub(1).ok_or_else(|| Error::Model("MediaPipe tensor use count underflow".into()))?;
-            if *count == 0 && !retain.get(*index).copied().unwrap_or(false) {
-                if let Some(slot) = values.get_mut(*index) {
-                    *slot = None;
-                }
-            }
-        }
-        if uses.get(node.output).copied() == Some(0) && !retain.get(node.output).copied().unwrap_or(false) {
-            if let Some(slot) = values.get_mut(node.output) {
+            if *count == 0
+                && !retain.get(*index).copied().unwrap_or(false)
+                && let Some(slot) = values.get_mut(*index)
+            {
                 *slot = None;
             }
+        }
+        if uses.get(node.output).copied() == Some(0)
+            && !retain.get(node.output).copied().unwrap_or(false)
+            && let Some(slot) = values.get_mut(node.output)
+        {
+            *slot = None;
         }
     }
 
@@ -215,7 +217,7 @@ fn scratch_reservation(graph: &LoadedGraph, node: &Node, device: &Device) -> Res
         } else {
             output
                 .shape
-                .get(0)
+                .first()
                 .copied()
                 .and_then(|n| output.shape.get(1).and_then(|h| n.checked_mul(*h)))
                 .and_then(|n| output.shape.get(2).and_then(|w| n.checked_mul(*w)))

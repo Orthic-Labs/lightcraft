@@ -26,7 +26,7 @@ pub const MODEL_SHA256: &str = crate::dinov2_inventory::MODEL_SHA256;
 const TENSOR_COUNT: usize = 175;
 
 fn inventory() -> &'static [TensorSpec] {
-    &crate::dinov2_inventory::TENSOR_SPECS
+    crate::dinov2_inventory::TENSOR_SPECS
 }
 
 /// Load a pinned DINOv2 artifact from a path with one bounded read.
@@ -55,17 +55,11 @@ pub fn load_verified_bytes(bytes: Vec<u8>, device: &Device) -> Result<DinoV2> {
     for spec in inventory() {
         let end = spec.offset.checked_add(spec.byte_len).ok_or_else(|| Error::Model(format!("DINOv2 tensor {} range overflow", spec.name)))?;
         let raw = bytes.get(spec.offset..end).ok_or_else(|| Error::Model(format!("DINOv2 tensor {} range is outside artifact", spec.name)))?;
-        let values = raw
-            .chunks_exact(4)
-            .map(|chunk| {
-                let &[a, b, c, d] = chunk else {
-                    // `chunks_exact(4)` is checked by descriptor validation. Keep this branch
-                    // fallible so a future change cannot turn malformed bytes into a panic.
-                    return Err(Error::Model(format!("DINOv2 tensor {} has an incomplete F32 value", spec.name)));
-                };
-                Ok(f32::from_le_bytes([a, b, c, d]))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let (chunks, remainder) = raw.as_chunks::<4>();
+        if !remainder.is_empty() {
+            return Err(Error::Model(format!("DINOv2 tensor {} has an incomplete F32 value", spec.name)));
+        }
+        let values = chunks.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect::<Vec<_>>();
         let tensor = Tensor::from_vec(values, spec.shape, device)?;
         tensors.insert(spec.name.to_owned(), tensor);
     }
@@ -96,11 +90,12 @@ fn validate_finite_ranges(specs: &[TensorSpec], bytes: &[u8]) -> Result<()> {
     for spec in specs {
         let end = spec.offset.checked_add(spec.byte_len).ok_or_else(|| Error::Model(format!("DINOv2 tensor {} range overflow", spec.name)))?;
         let raw = bytes.get(spec.offset..end).ok_or_else(|| Error::Model(format!("DINOv2 tensor {} range is outside artifact", spec.name)))?;
-        for chunk in raw.chunks_exact(4) {
-            let &[a, b, c, d] = chunk else {
-                return Err(Error::Model(format!("DINOv2 tensor {} has an incomplete F32 value", spec.name)));
-            };
-            if !f32::from_le_bytes([a, b, c, d]).is_finite() {
+        let (chunks, remainder) = raw.as_chunks::<4>();
+        if !remainder.is_empty() {
+            return Err(Error::Model(format!("DINOv2 tensor {} has an incomplete F32 value", spec.name)));
+        }
+        for chunk in chunks {
+            if !f32::from_le_bytes(*chunk).is_finite() {
                 return Err(Error::Model(format!("DINOv2 tensor {} contains a non-finite F32", spec.name)));
             }
         }
@@ -121,7 +116,7 @@ fn validate_spec_layout_inner(specs: &[TensorSpec], artifact_len: usize, enforce
         if spec.name.is_empty() || !names.insert(spec.name) {
             return Err(Error::Model(format!("DINOv2 inventory has a duplicate or empty tensor name {:?}", spec.name)));
         }
-        if spec.shape.is_empty() || spec.shape.iter().any(|dimension| *dimension == 0) {
+        if spec.shape.is_empty() || spec.shape.contains(&0) {
             return Err(Error::Model(format!("DINOv2 tensor {} has an empty shape", spec.name)));
         }
         let elements = spec

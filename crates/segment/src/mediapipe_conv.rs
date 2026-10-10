@@ -202,7 +202,7 @@ fn float_tensor<'a>(value: &'a Value, role: &str) -> crate::Result<&'a Tensor> {
 
 fn shape4(tensor: &Tensor, role: &str) -> crate::Result<[usize; 4]> {
     let dims = tensor.dims();
-    if dims.len() != 4 || dims.iter().any(|dimension| *dimension == 0) {
+    if dims.len() != 4 || dims.contains(&0) {
         return Err(crate::Error::Model(format!("MediaPipe {role} tensor must be non-empty rank 4, got {dims:?}")));
     }
     Ok([dims[0], dims[1], dims[2], dims[3]])

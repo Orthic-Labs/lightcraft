@@ -192,7 +192,9 @@ pub fn project_landmarks(raw: &[f32], prepared: &PreparedImage) -> Result<Vec<[f
     if raw.len() != expected {
         return Err(Error::Model(format!("MediaPipe landmark output length {}, expected {expected}", raw.len())));
     }
-    raw.chunks_exact(3)
+    raw.as_chunks::<3>()
+        .0
+        .iter()
         .map(|triple| prepared.project_xyz([triple[0] / LANDMARK_SIDE as f32, triple[1] / LANDMARK_SIDE as f32, triple[2] / LANDMARK_SIDE as f32]))
         .collect()
 }

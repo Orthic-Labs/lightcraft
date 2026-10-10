@@ -23,7 +23,7 @@ pub(crate) fn execute(op: &Op, inputs: &[Value], expected: &TensorSpec) -> Resul
         Op::Prelu => prelu(inputs)?,
         Op::Neg => unary(inputs, "neg", Tensor::neg)?,
         Op::Sqrt => unary(inputs, "sqrt", Tensor::sqrt)?,
-        Op::Rsqrt => unary(inputs, "rsqrt", |tensor| Ok(tensor.sqrt()?.recip()?))?,
+        Op::Rsqrt => unary(inputs, "rsqrt", |tensor| tensor.sqrt()?.recip())?,
         Op::SquaredDifference => binary(inputs, "squared-difference", |lhs, rhs| lhs.broadcast_sub(rhs)?.sqr(), Activation::None)?,
         Op::Dequantize => dequantize(inputs)?,
         Op::Pad => pad(inputs, expected)?,
@@ -128,7 +128,7 @@ fn prelu(inputs: &[Value]) -> Result<Tensor> {
 
 fn dequantize(inputs: &[Value]) -> Result<Tensor> {
     // Artifact loader has already converted Float16 constants to Float32.
-    single_float(inputs, "dequantize").map(Tensor::clone)
+    single_float(inputs, "dequantize").cloned()
 }
 
 fn pad(inputs: &[Value], expected: &TensorSpec) -> Result<Tensor> {
@@ -147,7 +147,11 @@ fn pad(inputs: &[Value], expected: &TensorSpec) -> Result<Tensor> {
     }
     let mut output_shape = Vec::with_capacity(rank);
     let mut pads = Vec::with_capacity(rank);
-    for (dim, pair) in padding.chunks_exact(2).enumerate() {
+    let (pairs, remainder) = padding.as_chunks::<2>();
+    if !remainder.is_empty() {
+        return model("MediaPipe pad requires Int32 [rank, 2] paddings");
+    }
+    for (dim, pair) in pairs.iter().enumerate() {
         let left = usize::try_from(pair[0]).map_err(|_| Error::Model("MediaPipe pad has negative padding".into()))?;
         let right = usize::try_from(pair[1]).map_err(|_| Error::Model("MediaPipe pad has negative padding".into()))?;
         let size = input.dims().get(dim).copied().ok_or_else(|| Error::Model("MediaPipe pad dimension is out of range".into()))?;
@@ -236,7 +240,7 @@ fn concat(inputs: &[Value], axis: i32, activation: Activation) -> Result<Tensor>
             return model("MediaPipe concat has incompatible input shapes");
         }
     }
-    Ok(activate(&Tensor::cat(&tensors, axis)?, activation)?)
+    activate(&Tensor::cat(&tensors, axis)?, activation)
 }
 
 fn reduce(inputs: &[Value], keep_dims: bool, sum: bool) -> Result<Tensor> {
