@@ -969,7 +969,7 @@ fn prepare_primary_preferences(path: &Path) -> Option<String> {
     if path.exists() {
         return None;
     }
-    let Some(legacy) = services::legacy_preferences_paths().into_iter().find(|legacy| legacy.try_exists().unwrap_or(true)) else { return None };
+    let legacy = services::legacy_preferences_paths().into_iter().find(|legacy| legacy.try_exists().unwrap_or(true))?;
     match services::migrate_preferences(&legacy, path) {
         Ok(true) => log::info!("migrated legacy LightCraft preferences from {}", legacy.display()),
         Ok(false) => {}
