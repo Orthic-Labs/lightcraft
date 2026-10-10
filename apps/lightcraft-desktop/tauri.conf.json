@@ -42,6 +42,12 @@
       "../../assets/app-icon/ember.icns",
       "../../assets/app-icon/ember.ico"
     ],
+    "resources": {
+      "../../NOTICE": "NOTICE",
+      "../../LICENSE-MIT": "LICENSE-MIT",
+      "../../LICENSE-APACHE": "LICENSE-APACHE",
+      "../../docs/licenses/pytorch-bicubic-LICENSE.txt": "docs/licenses/pytorch-bicubic-LICENSE.txt"
+    },
     "copyright": "LightCraft contributors",
     "category": "Photography",
     "shortDescription": "Photo library & non-destructive RAW developer",

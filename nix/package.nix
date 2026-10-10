@@ -163,6 +163,8 @@ rustPlatform.buildRustPackage {
     install -Dm644 -t "$doc" \
       README.md LICENSE-MIT LICENSE-APACHE NOTICE \
       assets/ATTRIBUTION.md assets/fonts/OFL-Inter.txt
+    install -Dm644 docs/licenses/pytorch-bicubic-LICENSE.txt \
+      "$doc/docs/licenses/pytorch-bicubic-LICENSE.txt"
   ''
   + lib.optionalString (craft-fonts != null) ''
     for lic in ${toString craft-fonts}/fonts/*/OFL.txt; do

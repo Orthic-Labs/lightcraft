@@ -66,6 +66,10 @@ for (const name of ['ATTRIBUTION.md', 'LICENSE-APACHE', 'LICENSE-MIT']) {
   const source = name === 'ATTRIBUTION.md' ? path.join(repoRoot, 'assets', name) : path.join(repoRoot, name);
   cpSync(source, path.join(licenses, name));
 }
+cpSync(path.join(repoRoot, 'NOTICE'), path.join(licenses, 'NOTICE'));
+const pytorchLicense = path.join(licenses, 'docs', 'licenses', 'pytorch-bicubic-LICENSE.txt');
+mkdirSync(path.dirname(pytorchLicense), { recursive: true });
+cpSync(path.join(repoRoot, 'docs', 'licenses', 'pytorch-bicubic-LICENSE.txt'), pytorchLicense);
 for (const dir of readdirSync(fonts, { withFileTypes: true }).filter(entry => entry.isDirectory())) {
   const fontDir = path.join(fonts, dir.name);
   const ofls = readdirSync(fontDir).filter(name => /OFL|LICENSE/i.test(name));

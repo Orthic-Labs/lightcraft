@@ -13,6 +13,16 @@
     "mac_metal": "UNMEASURED",
     "windows_cpu": "UNMEASURED"
   },
+  "implementation_status": {
+    "candle_core": "SOURCE_PRESENT_STATIC_ONLY",
+    "position_tables": "CACHED_224_AND_518",
+    "cosine": "FINITE_NONZERO_F32_384D_F64_ACCUMULATION",
+    "artifact_loader": "ABSENT",
+    "preprocessing": "ABSENT_CORE_ACCEPTS_NORMALIZED_INPUT",
+    "evaluator_cli_wiring": "ABSENT",
+    "constructor_name": "DinoV2::from_var_builder",
+    "constructor_identity_check": "CALLER_RESPONSIBILITY_NOT_ENFORCED_BY_CONSTRUCTOR"
+  },
   "candidate": {
     "family": "DINOv2",
     "variant": "dinov2_vits14",
@@ -94,7 +104,8 @@
       "224x224 using exact pinned classification evaluation transform",
       "518x518 as separate condition with transform frozen and recorded before comparison"
     ],
-    "crop_warning": "224 and 518 are separate preprocessing conditions, not equivalent inputs; center crops can remove faces, blink evidence or intentional blur context"
+    "crop_warning": "224 and 518 are separate preprocessing conditions, not equivalent inputs; center crops can remove faces, blink evidence or intentional blur context",
+    "implementation_boundary": "crates/segment/src/dinov2.rs accepts only already normalized F32 [1,3,224,224] or [1,3,518,518] tensors; resize, crop, channel normalization, artifact loading and CLI wiring are absent"
   },
   "model_contract": {
     "parameters_reported": "21M",
@@ -141,13 +152,13 @@
     "new_dependencies_required": false,
     "reuse": [
       "Candle Tensor, Device, Module and LayerNorm operations",
-      "existing segment safetensors VarBuilder and verified-weight plumbing",
-      "existing Metal feature path on macOS and CPU fallback path"
+      "existing Candle 0.9.2 dependency versions and existing Metal/CPU feature paths only",
+      "DINOv2 source core in crates/segment/src/dinov2.rs with caller-supplied VarBuilder tensors"
     ],
-    "checkpoint_boundary": "official artifact is PyTorch .pth; existing segment loader expects safetensors, so conversion and tensor-name/shape audit are qualification work; this record only inspected container and pickle opcodes statically",
+    "checkpoint_boundary": "official artifact is PyTorch .pth; no artifact loader or conversion exists. Candle 0.9.2 path-based VarBuilder::from_pth reopens its path per tensor, so evaluator use requires an immutable verified-byte conversion/loader before tensors reach the core; this record only inspected container and pickle opcodes statically",
     "conversion_status": "UNQUALIFIED_NOT_RUN",
     "conversion_plan": [
-      "Use an offline converter against pinned source metadata; never execute pickle globals or load an unverified artifact",
+      "Build a bounded immutable-byte loader/converter against pinned source metadata; never execute pickle globals or load an unverified artifact",
       "Map 175 FloatStorage-backed state keys to Candle VarBuilder names while preserving float32 dtype and recorded shapes",
       "Emit safetensors plus manifest containing source URL, source revision, byte count, artifact SHA-256, data.pkl SHA-256 and key count",
       "Compare reference tensors and CLS outputs for 224 and 518 preprocessing separately before evaluator use"
@@ -186,12 +197,11 @@
   "minimal_implementation_task": {
     "scope": "offline evaluator only; no catalog, pipeline or dependency edits",
     "steps": [
-      "Add a separate DINOv2-S/14 module beside, not inside, SAM3 ViT code using existing Candle 0.9.2 dependencies",
-      "load only a SHA-256-verified converted artifact through existing weight plumbing",
-      "implement exact patch embedding, class token, position interpolation and 12 standard blocks from pinned source",
+      "Add safe immutable-byte verified conversion/loader for the pinned official artifact without runtime dependency changes",
+      "call existing DINOv2 Candle core with already normalized 224 and 518 tensors; keep preprocessing outside core and record it separately",
       "emit final-normalized 384-D CLS embedding and cosine pair scores for 224 and 518 conditions",
       "compare against existing 8x8 luma signature on held-out bursts; expose score and uncertainty as review evidence only"
     ],
-    "acceptance": "reference parity, artifact hash, license record and platform measurements are recorded before any consideration of shipping; current record has only source pin, size, SHA-256 and static container inspection"
+    "acceptance": "reference parity, artifact hash, license record and platform measurements are recorded before any consideration of shipping; current record has source pin, size, SHA-256, static container inspection and uncompiled Candle core/regression source"
   }
 }

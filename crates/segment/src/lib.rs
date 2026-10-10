@@ -31,6 +31,10 @@ mod clip;
 #[cfg(not(target_arch = "wasm32"))]
 mod detector;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod dinov2;
+#[cfg(not(target_arch = "wasm32"))]
+mod dinov2_positions;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod fetch;
 pub mod mask;
 #[cfg(not(target_arch = "wasm32"))]

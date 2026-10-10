@@ -8,10 +8,16 @@ Status, 2026-10-10: source implementation & static review only. No current-revis
 | --- | --- | --- |
 | CI restoration | Fork usage suspension confirmed; API toggles/dispatch attempts recorded | Maintainer re-enable at [fork Actions](https://github.com/Orthic-Labs/lightcraft/actions), then generated CI & exact-artifact hidden Mac/Windows QA |
 | Culling decisions & evaluation | Detached cancellable desktop jobs, paged React review, explicit acceptance/undo, CLI baseline/scorer & synthetic regression source | Generated gates & exact-artifact hidden RightKit review/apply/undo journey; lock human-labelled shoot-level test corpus |
-| Face/eye & similarity weights | Exact YuNet, DINOv2 & MediaPipe v1 bytes/SHA pinned; graph/container inventories recorded; experimental YuNet Candle port; no model qualified | Convert remaining candidates, prove port/reference agreement, measure larger-crop accuracy/abstention & named-platform latency |
+| Face/eye & similarity weights | Exact YuNet, DINOv2 & MediaPipe v1 bytes/SHA pinned; graph/container inventories recorded; offline DINOv2 Candle core with cached 224/518 position tables & cosine helper; experimental YuNet Candle port; no model qualified | Add immutable verified-byte DINOv2 artifact conversion/loader, prove port/reference agreement, measure larger-crop accuracy/abstention & named-platform latency |
 | Cloud BYOK comparison | Strict bounded multi-image OpenRouter contract/transport in source, unknown blur/blink & reviewable outputs | Shared transport qualification, real provider credentials & controlled ambiguous-burst evaluation |
-| Personal Auto | Deterministic style-residual learner; explicit-file extract/train/evaluate CLI; private provenance digests, coverage & fallback receipts in source | Shoot-disjoint rendered/preference comparison against deterministic Auto; numeric distance alone cannot promote a model |
+| Personal Auto | Deterministic style-residual learner; explicit-file extract/train/evaluate CLI; private provenance digests, coverage & fallback receipts in source; source regression covers CLI roundtrip, source/sidecar preservation, consent refusal & overwrite refusal | Shoot-disjoint rendered/preference comparison against deterministic Auto; numeric distance alone cannot promote a model |
 | ChatGPT-plan OAuth | Researched spec retained | Login convenience after useful photo workflows qualify |
+
+## Current offline DINOv2 source
+
+`crates/segment/src/dinov2.rs` now contains a source-only Candle 0.9.2 DINOv2 ViT-S/14 core: 12 blocks, 384-D embeddings, six heads, 14 px patches, fused QKV, LayerNorm, GELU, LayerScale & residual paths. `DinoV2::forward` accepts already-normalized F32 `[1,3,224,224]` or `[1,3,518,518]` pixels; it performs no resize, crop, channel normalization, artifact loading or CLI wiring. `dinov2_positions.rs` validates 518 position table, builds bicubic 224 interpolation once & retains both tables for reuse. `DinoV2::cosine` validates finite nonzero `[1,384]` embeddings & computes f64-accumulated cosine clamped to `[-1,1]`.
+
+`DinoV2::from_var_builder` validates architecture shapes & F32 dtype; it accepts caller-supplied tensors without checking artifact identity. Candle 0.9.2 path-based `VarBuilder::from_pth` reopens its path per tensor, so official `.pth` use still needs an immutable verified-byte conversion/loader before any evaluator. No inference, model quality, numeric parity, runtime, artifact conversion or platform result is qualified.
 
 ## Reviewable culling commands
 
@@ -62,6 +68,8 @@ lightcraft-cli ai personal evaluate --manifest tests/fixtures/personal-auto/mini
 ```
 
 Fixture contains synthetic numeric labels only. Explicit-file extraction requires supplied consent & labels, uses disposable local state with sidecar writes disabled, emits canonical numeric features & omits file paths/EXIF/editor fields. Learner fits train shoots, checks frozen split/provenance, skips missing per-control labels & predicts bounded contrast/vibrance/saturation residuals. Lightroom weak labels & accepted Ember labels produce separate experimental variants. Extraction uses 16 fixed pipeline features, including `baseline.exposure`; camera identifiers are excluded from model features, while supplied opaque camera strata may remain in reports. Reports retain label-provenance digests, separate validation/test shoot & camera aggregates, input/eligible/scored/skipped counts & baseline fallback comparisons. No production Auto replacement, render-quality claim or automatic model promotion exists.
+
+`apps/lightcraft-cli/tests/personal_auto.rs` provides source regression coverage for explicit extract → train → evaluate: it checks path-free provenance digests, train/test receipt binding, coverage arithmetic, unclaimed personal-preference status, unchanged source files & XMP sidecars, refusal to overwrite extracted output, & consent rejection. This is source evidence only; current-revision execution remains unclaimed.
 
 ## Detector qualification source
 
