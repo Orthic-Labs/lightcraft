@@ -70,7 +70,7 @@ fn single_float<'a>(inputs: &'a [Value], name: &str) -> Result<&'a Tensor> {
     inputs[0].float()
 }
 
-fn binary<F>(inputs: &[Value], name: &str, operation: F, activation: Activation) -> Result<Tensor>
+fn binary<F>(inputs: &[Value], name: &'static str, operation: F, activation: Activation) -> Result<Tensor>
 where
     F: FnOnce(&Tensor, &Tensor) -> candle_core::Result<Tensor>,
 {

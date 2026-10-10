@@ -893,7 +893,7 @@ fn decode_and_nms(outputs: RawOutputs, width: usize, height: usize, score_thresh
             let sy = resized_h as f32 / height as f32;
             let mut keypoint_values = [[0.0f32; 2]; 5];
             let keypoint_offset = cell.checked_mul(10).ok_or_else(|| Error::Model("keypoint output offset overflow".into()))?;
-            for point in 0..5 {
+            for point in 0usize..5 {
                 let point_offset = keypoint_offset
                     .checked_add(point.checked_mul(2).ok_or_else(|| Error::Model("keypoint offset overflow".into()))?)
                     .ok_or_else(|| Error::Model("keypoint offset overflow".into()))?;

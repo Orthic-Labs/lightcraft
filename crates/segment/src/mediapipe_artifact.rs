@@ -214,7 +214,7 @@ fn half_to_f32(bits: u16) -> Result<f32> {
             // Preserve IEEE representation long enough to reject infinities/NaNs explicitly.
             sign | 0x7f80_0000 | (fraction << 13)
         }
-        exponent => sign | ((exponent + 112) << 23) | (fraction << 13),
+        exponent => sign | ((u32::from(exponent) + 112) << 23) | (fraction << 13),
     };
     let value = f32::from_bits(value_bits);
     if value.is_finite() { Ok(value) } else { Err(Error::Model("MediaPipe Float16 constant is non-finite".into())) }
