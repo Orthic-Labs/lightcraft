@@ -20,6 +20,8 @@ use rightkit_qa::util::sha256_hex;
 use rightkit_qa::workspace;
 use serde_json::{Value, json};
 
+static RETAINED_LAYOUT_IDENTITY_NONCE: AtomicU64 = AtomicU64::new(0);
+
 fn required_env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} is required for native qualification"))
 }
@@ -711,7 +713,8 @@ fn diagnose_stage_child_invalidation(control: &rightkit_qa::control::Control, sc
             }};
             const nodeInfo = (node, parent, identity) => {{
                 if (!node) return {{ present: false }};
-                return {{ present: true, connected: Boolean(node.isConnected), sameParent: Boolean(parent && node.parentElement === parent), identity, className: String(node.className || '').slice(0, 256), geometry: geometry(node) }};
+                const layout = node.closest('.lc-stage-layout,.lc-library-layout');
+                return {{ present: true, connected: Boolean(node.isConnected), sameParent: Boolean(parent && layout === parent), identity, className: String(node.className || '').slice(0, 256), geometry: geometry(node) }};
             }};
             const probeInfo = (node, parent, identity) => {{
                 if (!node) return {{ present: false }};
@@ -744,8 +747,8 @@ fn diagnose_stage_child_invalidation(control: &rightkit_qa::control::Control, sc
             try {{
                 const original = document.querySelector(selector);
                 state.target = {{ selector, original, parent: original ? original.parentElement : null }};
-                state.stage = original ? Array.from(original.children).find((child) => child.classList.contains('stage-workspace')) : null;
-                state.inspector = original ? Array.from(original.children).find((child) => child.classList.contains('lc-inspector')) : null;
+                state.stage = original?.querySelector('.stage-workspace') || null;
+                state.inspector = original?.querySelector('.lc-inspector') || null;
                 state.sample('before');
                 if (!original || !state.target.parent || !original.isConnected || original.parentElement !== state.target.parent) throw new Error('original node is disconnected or parent changed');
                 const probe = document.createElement('span');
@@ -782,7 +785,7 @@ fn diagnose_stage_child_invalidation(control: &rightkit_qa::control::Control, sc
         Err(error) => json!({"error": error.to_string().chars().take(512).collect::<String>()}),
     };
     let cleanup = match control.eval(&format!(
-        "return (() => {{ const key = {key:?}; const owner = {owner:?}; const state = window[key]; if (!state) return {{owned: false, restored: false, owner, error: 'probe state missing'}}; if (state.owner !== owner) return {{owned: false, restored: false, owner, error: 'probe state ownership mismatch'}}; let error = null; try {{ if (state.timer) clearTimeout(state.timer); }} catch (timerError) {{ error = String(timerError && timerError.stack ? timerError.stack : timerError).slice(0, 512); }} finally {{ state.live = false; try {{ state.restore(); }} catch (restoreError) {{ error = String(restoreError && restoreError.stack ? restoreError.stack : restoreError).slice(0, 512); }} }} const target = state.target; const before = state.samples.find((sample) => sample.phase === 'before')?.target?.geometry; const after = target && target.original ? (() => {{ const rect = target.original.getBoundingClientRect(); const style = getComputedStyle(target.original); return {{ rect: {{ x: rect.x, y: rect.y, width: rect.width, height: rect.height }}, computed: {{ columns: style.gridTemplateColumns, rows: style.gridTemplateRows }} }}; }})() : null; const parentChanged = Boolean(before && after && (before.computed.columns !== after.computed.columns || before.computed.rows !== after.computed.rows || Math.abs(before.rect.x - after.rect.x) > 0.5 || Math.abs(before.rect.y - after.rect.y) > 0.5 || Math.abs(before.rect.width - after.rect.width) > 0.5 || Math.abs(before.rect.height - after.rect.height) > 0.5)); const restoredTarget = {{connected: Boolean(target && target.original && target.original.isConnected), sameParent: Boolean(target && target.original && target.parent && target.original.parentElement === target.parent), stagePreserved: Boolean(state.stage && state.stage.isConnected && state.stage.parentElement === target.original), inspectorPreserved: Boolean(state.inspector && state.inspector.isConnected && state.inspector.parentElement === target.original)}}; const result = {{owned: true, owner, parentChanged, restored: restoredTarget.connected && restoredTarget.sameParent && restoredTarget.stagePreserved && restoredTarget.inspectorPreserved, restoredTarget, restoreErrors: state.restoreErrors, error}}; if (window[key] === state) delete window[key]; return result; }})();",
+        "return (() => {{ const key = {key:?}; const owner = {owner:?}; const state = window[key]; if (!state) return {{owned: false, restored: false, owner, error: 'probe state missing'}}; if (state.owner !== owner) return {{owned: false, restored: false, owner, error: 'probe state ownership mismatch'}}; let error = null; try {{ if (state.timer) clearTimeout(state.timer); }} catch (timerError) {{ error = String(timerError && timerError.stack ? timerError.stack : timerError).slice(0, 512); }} finally {{ state.live = false; try {{ state.restore(); }} catch (restoreError) {{ error = String(restoreError && restoreError.stack ? restoreError.stack : restoreError).slice(0, 512); }} }} const target = state.target; const before = state.samples.find((sample) => sample.phase === 'before')?.target?.geometry; const after = target && target.original ? (() => {{ const rect = target.original.getBoundingClientRect(); const style = getComputedStyle(target.original); return {{ rect: {{ x: rect.x, y: rect.y, width: rect.width, height: rect.height }}, computed: {{ columns: style.gridTemplateColumns, rows: style.gridTemplateRows }} }}; }})() : null; const parentChanged = Boolean(before && after && (before.computed.columns !== after.computed.columns || before.computed.rows !== after.computed.rows || Math.abs(before.rect.x - after.rect.x) > 0.5 || Math.abs(before.rect.y - after.rect.y) > 0.5 || Math.abs(before.rect.width - after.rect.width) > 0.5 || Math.abs(before.rect.height - after.rect.height) > 0.5)); const restoredTarget = {{connected: Boolean(target && target.original && target.original.isConnected), sameParent: Boolean(target && target.original && target.parent && target.original.parentElement === target.parent), stagePreserved: Boolean(state.stage && state.stage.isConnected && state.stage.closest('.lc-stage-layout,.lc-library-layout') === target.original), inspectorPreserved: Boolean(state.inspector && state.inspector.isConnected && state.inspector.closest('.lc-stage-layout,.lc-library-layout') === target.original)}}; const result = {{owned: true, owner, parentChanged, restored: restoredTarget.connected && restoredTarget.sameParent && restoredTarget.stagePreserved && restoredTarget.inspectorPreserved, restoredTarget, restoreErrors: state.restoreErrors, error}}; if (window[key] === state) delete window[key]; return result; }})();",
         key = key,
         owner = owner,
     )) {
@@ -1052,6 +1055,29 @@ fn assert_active_grid_is_bounded(control: &rightkit_qa::control::Control) {
     assert!(value["images"].as_u64().is_some_and(|count| count <= 512), "virtualized grid rendered too many images: {value}");
     assert_eq!(value["active"].as_u64(), Some(1), "grid must expose exactly one active photo: {value}");
     assert!(value["loaded"].as_u64().is_some_and(|count| count > 0), "grid must expose decoded WebView pixels: {value}");
+}
+
+fn assert_grid_geometry_retains_focus_and_preview(control: &rightkit_qa::control::Control) {
+    let nonce = RETAINED_LAYOUT_IDENTITY_NONCE.fetch_add(1, Ordering::Relaxed);
+    let key = format!("__lcGridGeometryIdentity_{nonce}");
+    let owner = format!("grid-geometry:{nonce}");
+    click_dom(control, ".lc-display-wrap > button", "grid geometry display menu must open");
+    let setup = control
+        .eval(&format!("return (() => {{ const key = {key:?}; const owner = {owner:?}; if (Object.prototype.hasOwnProperty.call(window, key)) return {{owned:false, owner, error:'probe state collision'}}; const cell = document.querySelector('.lc-photo-cell.is-active'); const preview = cell?.querySelector('img.lc-photo-preview'); const grid = document.querySelector('.lc-grid-window'); const input = document.querySelector('.lc-display-size input[type=range]'); if (!cell || !preview || !grid || !input || !preview.complete || preview.naturalWidth < 1 || preview.naturalHeight < 1) return {{owned:false, owner, error:'focused cell, preview, grid or slider missing'}}; cell.focus(); if (document.activeElement !== cell) return {{owned:false, owner, error:'active grid cell could not receive focus'}}; const next = Number(input.value) >= Number(input.max) ? Number(input.min) : Number(input.value) + Number(input.step || 4); window[key] = {{owner, cell, preview, grid, input, next}}; const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set; if (!setter) return {{owned:false, owner, error:'native range value setter missing'}}; setter.call(input, String(next)); input.dispatchEvent(new Event('input', {{bubbles:true}})); input.dispatchEvent(new Event('change', {{bubbles:true}})); return {{owned:true, owner, next, focused:document.activeElement === cell}}; }})();"))
+        .expect("grid geometry identity probe must execute");
+    assert_eq!(setup["owned"].as_bool(), Some(true), "grid geometry identity probe must initialize: {setup}");
+    wait_for_dom(
+        control,
+        &format!(
+            "return (() => {{ const state = window[{key:?}]; const grid = document.querySelector('.lc-grid-window'); if (!state || state.owner !== {owner:?} || !grid || !state.input || Number(state.input.value) !== state.next) return false; return grid !== state.grid && document.activeElement === state.cell && state.cell.isConnected && state.preview === state.cell.querySelector('img.lc-photo-preview') && state.preview.complete && state.preview.naturalWidth > 0 && state.preview.naturalHeight > 0; }})();"
+        ),
+    );
+    control.key("Escape").expect("grid geometry display menu dismissal must execute");
+    let cleanup = control
+        .eval(&format!("return (() => {{ const key = {key:?}; const owner = {owner:?}; const state = window[key]; if (!state) return {{owned:false, owner, error:'probe state missing'}}; if (state.owner !== owner) return {{owned:false, owner, error:'probe state ownership mismatch'}}; delete window[key]; return {{owned:true, owner, deleted:!Object.prototype.hasOwnProperty.call(window, key)}}; }})();"))
+        .expect("grid geometry identity probe cleanup must execute");
+    assert_eq!(cleanup["owned"].as_bool(), Some(true), "grid geometry identity probe cleanup must be owned: {cleanup}");
+    assert_eq!(cleanup["deleted"].as_bool(), Some(true), "grid geometry identity probe cleanup must delete state: {cleanup}");
 }
 
 fn grid_metrics(control: &rightkit_qa::control::Control) -> Value {
@@ -2000,16 +2026,28 @@ fn native_hidden_control_journeys() {
                             wait_for_rendered_preview(control, "img.stage-preview", None);
                             capture_visible_tool_preview(control, &develop);
                             assert!(develop.is_file());
+                            let identity_nonce = RETAINED_LAYOUT_IDENTITY_NONCE.fetch_add(1, Ordering::Relaxed);
+                            let identity_key = format!("__lcRetainedLayoutIdentity_{identity_nonce}");
+                            let identity_owner = format!("retained-layout:{width}x{height}:{identity_nonce}");
+                            let identity_setup = control
+                                .eval(&format!("return (() => {{ const key = {identity_key:?}; const owner = {identity_owner:?}; if (Object.prototype.hasOwnProperty.call(window, key)) return {{owned:false, owner, error:'probe state collision'}}; const stage = document.querySelector('.stage-workspace'); const inspector = document.querySelector('.lc-inspector'); const layout = inspector?.closest('.lc-stage-layout,.lc-library-layout'); const collapse = inspector?.querySelector('button[data-inspector-collapse]'); const preview = document.querySelector('img.stage-preview'); if (!stage || !inspector || !layout || !collapse || !preview || !preview.complete || preview.naturalWidth < 1 || preview.naturalHeight < 1) return {{owned:false, owner, error:'retained nodes, collapse button or ready preview missing'}}; collapse.focus(); if (document.activeElement !== collapse) return {{owned:false, owner, error:'collapse button could not receive focus'}}; window[key] = {{owner, layout, stage, inspector, collapse, preview}}; return {{owned:true, owner, focused:true}}; }})();"))
+                                .expect("retained layout identity probe must execute");
+                            assert_eq!(identity_setup["owned"].as_bool(), Some(true), "retained layout identity probe must initialize: {identity_setup}");
                             click_dom(control, ".lc-inspector button[data-inspector-collapse]", "manual inspector collapse must execute");
-                            wait_for_dom(control, "return (() => { const e = document.querySelector('.lc-inspector'); const layout = e?.parentElement; if (!e || !layout) return false; const r = e.getBoundingClientRect(); const rail = e.querySelector('.lc-inspector__rail')?.getBoundingClientRect(); return e.classList.contains('is-collapsed') && layout.classList.contains('is-inspector-collapsed') && Math.abs(r.width - 44) < 2 && !!rail && Math.abs(rail.right - innerWidth) < 2; })();");
+                            wait_for_dom(control, &format!("return (() => {{ const e = document.querySelector('.lc-inspector'); const layout = e?.closest('.lc-stage-layout,.lc-library-layout'); const retained = window[{identity_key:?}]; const preview = document.querySelector('img.stage-preview'); if (!e || !layout || !retained || retained.owner !== {identity_owner:?} || !preview) return false; const r = e.getBoundingClientRect(); const rail = e.querySelector('.lc-inspector__rail')?.getBoundingClientRect(); return e.classList.contains('is-collapsed') && layout.classList.contains('is-inspector-collapsed') && Math.abs(r.width - 44) < 2 && !!rail && Math.abs(rail.right - innerWidth) < 2 && retained.layout !== layout && retained.stage === document.querySelector('.stage-workspace') && retained.inspector === e && retained.collapse === document.activeElement && retained.collapse === e.querySelector('button[data-inspector-collapse]') && retained.preview === preview && preview.complete && preview.naturalWidth > 0 && preview.naturalHeight > 0; }})();"));
                             click_dom(control, ".lc-inspector button[data-more-tools]", "collapsed More tools must open");
-                            let collapsed_menu = control.eval("return (() => { const e = document.querySelector('.lc-inspector__more-menu'); if (!e) return null; const r = e.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); const inspector = document.querySelector('.lc-inspector'); const layout = inspector?.parentElement; return { width: inspector?.getBoundingClientRect().width, layout: layout?.className, columns: layout ? getComputedStyle(layout).gridTemplateColumns : null, inside: r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight, reachable: e.contains(hit) }; })();").expect("collapsed More geometry must be queryable");
+                            let collapsed_menu = control.eval("return (() => { const e = document.querySelector('.lc-inspector__more-menu'); if (!e) return null; const r = e.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); const inspector = document.querySelector('.lc-inspector'); const layout = inspector?.closest('.lc-stage-layout,.lc-library-layout'); return { width: inspector?.getBoundingClientRect().width, layout: layout?.className, columns: layout ? getComputedStyle(layout).gridTemplateColumns : null, inside: r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight, reachable: e.contains(hit) }; })();").expect("collapsed More geometry must be queryable");
                             assert!(collapsed_menu["width"].as_f64().is_some_and(|value| (value - 44.0).abs() < 2.0), "collapsed inspector must retain44px rail: {collapsed_menu}");
                             assert_eq!(collapsed_menu["inside"].as_bool(), Some(true), "collapsed menu must remain inside viewport: {collapsed_menu}");
                             assert_eq!(collapsed_menu["reachable"].as_bool(), Some(true), "collapsed More menu must be visible & reachable: {collapsed_menu}");
                             control.key("Escape").expect("More dismissal must execute");
                             click_dom(control, ".lc-inspector button[data-inspector-collapse]", "manual inspector expansion must execute");
                             wait_for_dom(control, "return document.querySelector('.lc-inspector')?.classList.contains('is-collapsed') === false;");
+                            let identity_cleanup = control
+                                .eval(&format!("return (() => {{ const key = {identity_key:?}; const owner = {identity_owner:?}; const state = window[key]; if (!state) return {{owned:false, owner, error:'probe state missing'}}; if (state.owner !== owner) return {{owned:false, owner, error:'probe state ownership mismatch'}}; delete window[key]; return {{owned:true, owner, deleted:!Object.prototype.hasOwnProperty.call(window, key)}}; }})();"))
+                                .expect("retained layout identity probe cleanup must execute");
+                            assert_eq!(identity_cleanup["owned"].as_bool(), Some(true), "retained layout identity probe cleanup must be owned: {identity_cleanup}");
+                            assert_eq!(identity_cleanup["deleted"].as_bool(), Some(true), "retained layout identity probe cleanup must delete state: {identity_cleanup}");
                             assert_workspace_design(control);
                             control.key("G").expect("library route key must execute");
                             wait_for_dom(control, "return document.querySelector('.lc-library-workspace') !== null;");
@@ -2220,6 +2258,7 @@ fn native_hidden_control_journeys() {
                         assert!(!initial_name.is_empty(), "initial grid must expose first filename");
                         assert!(initial["scrollHeight"].as_f64().unwrap_or(0.0) > initial["clientHeight"].as_f64().unwrap_or(0.0), "2048-photo grid must have scrollable height: {initial}");
                         assert_active_grid_is_bounded(control);
+                        assert_grid_geometry_retains_focus_and_preview(control);
                         scroll_grid_to_end(control);
                         let far = wait_for_grid(control, true, Some(initial_name.as_str()));
                         assert!(far["scrollHeight"].as_f64().unwrap_or(0.0) > far["clientHeight"].as_f64().unwrap_or(0.0), "far grid viewport must preserve scrollable height: {far}");
