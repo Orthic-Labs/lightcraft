@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use lightcraft_fetch::http::{Limits, Url, get, post_json};
 use serde_json::Value;
 
-use crate::{MAX_RESPONSE_BYTES, Proxy, Receipt, parse_response, request_body};
+use crate::{MAX_RESPONSE_BYTES, Proxy, Receipt, culling, parse_response, request_body};
 
 const ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -46,6 +46,34 @@ impl OpenRouter {
             return Err("assessment cancelled; no result published".into());
         }
         Ok(parse_response(model, proxy.digest(), start.elapsed().as_millis().min(u64::MAX as u128) as u64, &bytes))
+    }
+
+    /// Compare one bounded burst through the same strict, read-only provider path.
+    /// Budget admits a frozen-rate reserve before upload; this client cannot enforce
+    /// provider spend through `max_price`, so receipts preserve reported/unknown billing.
+    pub fn cull_burst(
+        &self,
+        model: &str,
+        proxies: &[culling::ProxyInput<'_>],
+        options: culling::RequestOptions,
+        cancel: &AtomicBool,
+    ) -> Result<culling::Receipt, String> {
+        let body = serde_json::to_vec(&culling::request_body(model, proxies, options)?).map_err(|_| "could not encode culling provider request")?;
+        let limits = limits(cancel, options.deadline_secs);
+        let url = Url::parse(ENDPOINT).map_err(|_| "invalid provider endpoint")?;
+        let start = Instant::now();
+        let response = post_json(&url, &[("Authorization", format!("Bearer {}", self.key))], &body, &limits)
+            .map_err(|_| "culling network failure; billing status unknown; no retry performed")?;
+        let bytes =
+            read_body(response, &limits, MAX_RESPONSE_BYTES).map_err(|error| format!("{error}; billing status unknown; no retry performed"))?;
+        if echoes_key(&bytes, &self.key) {
+            return Err("provider echoed credential; response discarded; billing status unknown; no retry performed".into());
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err("culling cancelled; no result published; billing status unknown; no retry performed".into());
+        }
+        let latency_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        Ok(culling::parse_response(model, proxies, options, latency_ms, &bytes))
     }
 }
 

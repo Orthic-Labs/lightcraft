@@ -34,6 +34,7 @@ pub mod lut;
 pub mod masks;
 pub mod optics;
 pub mod output;
+pub mod personal_auto;
 pub mod profiles;
 pub mod redeye;
 pub mod spots;

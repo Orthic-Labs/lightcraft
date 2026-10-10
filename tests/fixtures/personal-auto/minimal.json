@@ -1,0 +1,286 @@
+{
+  "version": 1,
+  "feature_schema": [
+    "ev.p01",
+    "ev.p05",
+    "ev.median",
+    "ev.p95",
+    "ev.p995",
+    "ev.spread",
+    "chroma.p90",
+    "luminance.mean",
+    "luminance.stddev",
+    "scene.shadow_share",
+    "scene.highlight_share",
+    "source.aspect",
+    "source.raw",
+    "baseline.exposure",
+    "source.wb_temp",
+    "source.wb_tint"
+  ],
+  "controls": [
+    "light.contrast",
+    "color.vibrance",
+    "color.saturation"
+  ],
+  "shoots": [
+    {
+      "shoot_id": "synthetic-train",
+      "split": "train",
+      "camera": {
+        "make": "Synthetic",
+        "model": "Fixture"
+      },
+      "photos": [
+        {
+          "photo_id": "synthetic-train-1",
+          "features": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0.2,
+            0.2,
+            0.1,
+            0.1,
+            0.1,
+            1.5,
+            1,
+            0,
+            6500,
+            0
+          ],
+          "baseline": {
+            "light.contrast": 0,
+            "color.vibrance": 0,
+            "color.saturation": 0
+          },
+          "weakLabelColdStart": {
+            "values": {
+              "light.contrast": 8,
+              "color.vibrance": 2,
+              "color.saturation": 1
+            },
+            "confidence": {
+              "light.contrast": 1,
+              "color.vibrance": 1,
+              "color.saturation": 1
+            },
+            "provenance": {
+              "source": "synthetic-weak"
+            }
+          },
+          "emberGroundTruth": {
+            "values": {
+              "light.contrast": 10,
+              "color.vibrance": 3,
+              "color.saturation": 2
+            },
+            "provenance": {
+              "accepted": true,
+              "origin": "synthetic-human-edit"
+            },
+            "confidence": {
+              "light.contrast": 1,
+              "color.vibrance": 1,
+              "color.saturation": 1
+            }
+          }
+        },
+        {
+          "photo_id": "synthetic-train-2",
+          "features": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+            0.4,
+            0.4,
+            0.1,
+            0.1,
+            0.1,
+            1.5,
+            1,
+            0,
+            6500,
+            0
+          ],
+          "baseline": {
+            "light.contrast": 0,
+            "color.vibrance": 0,
+            "color.saturation": 0
+          },
+          "weakLabelColdStart": {
+            "values": {
+              "light.contrast": 6,
+              "color.vibrance": 1,
+              "color.saturation": 0.5
+            },
+            "provenance": {
+              "source": "synthetic-weak"
+            },
+            "confidence": {
+              "light.contrast": 1,
+              "color.vibrance": 1,
+              "color.saturation": 1
+            }
+          },
+          "emberGroundTruth": {
+            "values": {
+              "light.contrast": 7,
+              "color.vibrance": 2,
+              "color.saturation": 1
+            },
+            "provenance": {
+              "accepted": true,
+              "origin": "synthetic-human-edit"
+            },
+            "confidence": {
+              "light.contrast": 1,
+              "color.vibrance": 1,
+              "color.saturation": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "shoot_id": "synthetic-validation",
+      "split": "validation",
+      "camera": {
+        "make": "Synthetic",
+        "model": "Fixture"
+      },
+      "photos": [
+        {
+          "photo_id": "synthetic-validation-1",
+          "features": [
+            0.5,
+            0.5,
+            0.5,
+            0.5,
+            0.5,
+            0,
+            0.3,
+            0.3,
+            0.1,
+            0.1,
+            0.1,
+            1.5,
+            1,
+            0,
+            6500,
+            0
+          ],
+          "baseline": {
+            "light.contrast": 0,
+            "color.vibrance": 0,
+            "color.saturation": 0
+          },
+          "weakLabelColdStart": {
+            "values": {
+              "light.contrast": 5,
+              "color.vibrance": 1,
+              "color.saturation": 0.5
+            },
+            "provenance": {
+              "source": "synthetic-weak"
+            },
+            "confidence": {
+              "light.contrast": 1,
+              "color.vibrance": 1,
+              "color.saturation": 1
+            }
+          },
+          "emberGroundTruth": {
+            "values": {
+              "light.contrast": 6,
+              "color.vibrance": 2,
+              "color.saturation": 1
+            },
+            "provenance": {
+              "accepted": true,
+              "origin": "synthetic-human-edit"
+            },
+            "confidence": {
+              "light.contrast": 1,
+              "color.vibrance": 1,
+              "color.saturation": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "shoot_id": "synthetic-test",
+      "split": "test",
+      "camera": {
+        "make": "Synthetic",
+        "model": "HeldOut"
+      },
+      "photos": [
+        {
+          "photo_id": "synthetic-test-1",
+          "features": [
+            0.25,
+            0.25,
+            0.25,
+            0.25,
+            0.25,
+            0,
+            0.25,
+            0.25,
+            0.1,
+            0.1,
+            0.1,
+            1.5,
+            1,
+            0,
+            6500,
+            0
+          ],
+          "baseline": {
+            "light.contrast": 0,
+            "color.vibrance": 0,
+            "color.saturation": 0
+          },
+          "weakLabelColdStart": {
+            "values": {
+              "light.contrast": 4,
+              "color.vibrance": 1,
+              "color.saturation": 0.5
+            },
+            "provenance": {
+              "source": "synthetic-weak"
+            },
+            "confidence": {
+              "light.contrast": 1,
+              "color.vibrance": 1,
+              "color.saturation": 1
+            }
+          },
+          "emberGroundTruth": {
+            "values": {
+              "light.contrast": 5,
+              "color.vibrance": 1.5,
+              "color.saturation": 0.75
+            },
+            "provenance": {
+              "accepted": true,
+              "origin": "synthetic-human-edit"
+            },
+            "confidence": {
+              "light.contrast": 1,
+              "color.vibrance": 1,
+              "color.saturation": 1
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

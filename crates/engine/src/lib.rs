@@ -15,6 +15,7 @@ pub mod branding;
 mod camera_preview;
 pub mod camera_profiles;
 pub mod cmd;
+pub use cmd::cull::{CullApplyJob, CullJob, CullJobResult, CullPhotoSnapshot, CullProgressFn};
 pub mod crs;
 pub mod crs_masks;
 pub mod demo;
@@ -334,6 +335,13 @@ impl Session {
     /// `NotSaved`). Not journaled. The app's import task commits its batches this way.
     pub fn execute_fn(&mut self, id: &str, f: impl FnOnce(&mut Session) -> Result<Value>) -> Result<Value> {
         self.run_command(id, None, f)
+    }
+
+    /// Finish detached work through the command's enabled, journal & persistence contract.
+    pub fn execute_prepared_command(&mut self, id: &str, params: &Value, f: impl FnOnce(&mut Session) -> Result<Value>) -> Result<Value> {
+        let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        (spec.enabled)(self).map_err(|why| EngineError::Disabled(id.to_string(), why))?;
+        self.run_command(id, spec.journal.then_some(params), f)
     }
 
     fn run_command(&mut self, id: &str, journal: Option<&Value>, f: impl FnOnce(&mut Session) -> Result<Value>) -> Result<Value> {
@@ -810,6 +818,8 @@ pub fn json_delta(old: &Value, new: &Value) -> Option<Value> {
 mod tests;
 #[cfg(test)]
 mod tests_color;
+#[cfg(test)]
+mod tests_cull_jobs;
 #[cfg(test)]
 mod tests_cull_review;
 #[cfg(test)]

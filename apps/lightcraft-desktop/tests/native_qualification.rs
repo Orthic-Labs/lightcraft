@@ -1338,6 +1338,7 @@ fn native_hidden_control_journeys() {
         // Capture core import/edit/undo/export proof before broader parity journeys.
         "engineExport",
         "mergeHdr",
+        "cullReview",
         "ipc",
         "stalePreview",
         "cache",
@@ -1786,6 +1787,120 @@ fn native_hidden_control_journeys() {
                             .command("lc_view_slice", &json!({"generation": second_again["viewGeneration"].as_u64().unwrap_or(0) + 1, "offset": 0, "limit": 512}))
                             .expect("slice must reply");
                         assert_eq!(stale["generationChanged"].as_bool(), Some(true), "stale generation must be rejected");
+                    }
+                    "cullReview" => {
+                        let opened = control
+                            .command("lc_native", &json!({"action": "openLibrary", "params": {"path": inputs.scalability_library}}))
+                            .expect("cull review must open procedural demo library");
+                        let library_path = inputs.scalability_library.to_string_lossy().to_string();
+                        assert_eq!(opened["path"].as_str(), Some(library_path.as_str()));
+                        let opened_snapshot = snapshot(control);
+                        let generation = opened_snapshot["viewGeneration"].as_u64().expect("cull review generation must be numeric");
+                        let page = control
+                            .command("lc_view_slice", &json!({"generation": generation, "offset": 0, "limit": 4}))
+                            .expect("cull review demo slice must reply");
+                        let ids = page["photos"]
+                            .as_array()
+                            .expect("cull review demo slice must expose photos")
+                            .iter()
+                            .take(4)
+                            .map(|photo| photo["id"].as_u64().expect("cull review photo id must be numeric"))
+                            .collect::<Vec<_>>();
+                        assert!(ids.len() >= 2, "cull review must have multiple procedural photos");
+                        run(control, "library.select", json!({"ids": ids, "active": ids[0], "mode": "replace"}));
+                        let baseline = snapshot(control);
+                        let baseline_slice = control
+                            .command("lc_view_slice", &json!({"generation": baseline["viewGeneration"], "offset": 0, "limit": 4}))
+                            .expect("cull review baseline slice must reply");
+
+                        click_dom(control, ".rk-search--trigger", "cull review command palette must open");
+                        wait_for_dom(control, "return document.querySelector('.rk-palette') !== null;");
+                        for key in ["c", "u", "l", "l"] {
+                            control.key(key).expect("cull review palette search must execute");
+                        }
+                        click_dom(control, "[data-command=\"dialog.cull\"]", "cull review dialog command must open");
+                        wait_for_dom(control, "return document.querySelector('.lc-cull-review-dialog') !== null;");
+                        wait_for_dom(control, "return document.querySelector('.lc-cull-review-progress') === null && document.querySelectorAll('.lc-cull-review-row').length > 0;");
+                        let initial_apply_disabled = control
+                            .eval("return document.querySelector('.lc-cull-review-button-primary')?.disabled === true;")
+                            .expect("initial cull review apply state must be queryable");
+                        assert_eq!(initial_apply_disabled.as_bool(), Some(true), "cull review must keep Apply disabled before explicit selection");
+
+                        // Default pick-best analysis can legitimately produce no suggestions for distinct demo frames.
+                        // Re-run with an explicit reject threshold so this journey exercises one accepted suggestion.
+                        click_dom(control, ".lc-cull-review-settings input[type=\"checkbox\"]", "cull review reject suggestions must enable");
+                        let threshold = control
+                            .eval("return (() => { const node = document.querySelector('.lc-cull-review-threshold input'); if (!node) return false; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(node, '100'); node.dispatchEvent(new Event('input', {bubbles:true})); return node.value === '100'; })();")
+                            .expect("cull review threshold must accept explicit value");
+                        assert_eq!(threshold.as_bool(), Some(true));
+                        click_dom(control, ".lc-cull-review-settings .lc-cull-review-button-secondary", "cull review suggestions must regenerate");
+                        wait_for_dom(control, "return document.querySelector('.lc-cull-review-progress') === null && [...document.querySelectorAll('.lc-cull-review-row .lc-cull-review-check input')].some((node) => !node.disabled && node.parentElement?.textContent?.includes('Accept'));");
+
+                        let analyzed = snapshot(control);
+                        for key in ["counts", "active", "selection", "viewGeneration", "source", "filter", "sort", "undo"] {
+                            assert_eq!(analyzed[key], baseline[key], "read-only cull analysis must preserve snapshot field {key}");
+                        }
+                        let analyzed_slice = control
+                            .command("lc_view_slice", &json!({"generation": analyzed["viewGeneration"], "offset": 0, "limit": 4}))
+                            .expect("cull review analyzed slice must reply");
+                        assert_eq!(analyzed_slice["photos"], baseline_slice["photos"], "read-only cull analysis must preserve catalog flags");
+                        let review_screenshot = scenario.dir().join("cull-review-unselected.png");
+                        control.screenshot_to(&review_screenshot).expect("cull review empty-accept screenshot must save");
+                        assert!(review_screenshot.is_file());
+                        scenario.keep("cull-review-unselected.png", &review_screenshot);
+
+                        let suggested = control
+                            .eval("return (() => { const rows = [...document.querySelectorAll('.lc-cull-review-row')]; const index = rows.findIndex((row) => { const input = row.querySelector('.lc-cull-review-check input'); return input && !input.disabled && /Accept (pick|reject)/.test(row.textContent || ''); }); if (index < 0) return null; const row = rows[index]; const id = Number((row.textContent || '').match(/Photo ID (\\d+)/)?.[1]); const flag = (row.textContent || '').match(/Accept (pick|reject)/)?.[1] || ''; return { index: index + 1, id, flag }; })();")
+                            .expect("cull review suggested row must be queryable");
+                        assert!(suggested.is_object(), "cull review must expose explicit suggested checkbox");
+                        let row_index = suggested["index"].as_u64().expect("cull review row index must be numeric");
+                        let suggested_id = suggested["id"].as_u64().expect("cull review suggested id must be numeric");
+                        let suggested_flag = suggested["flag"].as_str().expect("cull review suggested flag must be text");
+                        click_dom(
+                            control,
+                            &format!(".lc-cull-review-row:nth-child({row_index}) .lc-cull-review-check input"),
+                            "cull review explicit suggestion checkbox must select",
+                        );
+                        wait_for_dom(control, "return document.querySelector('.lc-cull-review-button-primary')?.disabled === false;");
+                        click_dom(control, ".lc-cull-review-button-primary", "cull review apply selected must execute");
+                        wait_for_dom(control, "return document.querySelector('.lc-cull-review-dialog') === null;");
+                        let applied = snapshot(control);
+                        assert!(applied["undo"].as_u64().is_some_and(|count| count > baseline["undo"].as_u64().unwrap_or(0)), "cull apply must create one undo step");
+                        let applied_slice = control
+                            .command("lc_view_slice", &json!({"generation": applied["viewGeneration"], "offset": 0, "limit": 4}))
+                            .expect("cull review applied slice must reply");
+                        let applied_photo = applied_slice["photos"]
+                            .as_array()
+                            .and_then(|photos| photos.iter().find(|photo| photo["id"].as_u64() == Some(suggested_id)))
+                            .expect("cull review applied photo must remain visible");
+                        assert_eq!(applied_photo["flag"].as_str(), Some(suggested_flag), "explicit cull accept must set suggested flag");
+
+                        run(control, "edit.undo", json!({}));
+                        let restored = wait_for_snapshot(control, |value| value["undo"] == baseline["undo"], "cull review undo must restore baseline history");
+                        let restored_slice = control
+                            .command("lc_view_slice", &json!({"generation": restored["viewGeneration"], "offset": 0, "limit": 4}))
+                            .expect("cull review restored slice must reply");
+                        assert_eq!(restored["counts"], baseline["counts"], "cull review undo must preserve catalog counts");
+                        assert_eq!(restored["selection"], baseline["selection"], "cull review undo must preserve selection");
+                        assert_eq!(restored_slice["photos"], baseline_slice["photos"], "cull review undo must restore flags");
+
+                        click_dom(control, ".rk-search--trigger", "cull review cancel palette must open");
+                        wait_for_dom(control, "return document.querySelector('.rk-palette') !== null;");
+                        for key in ["c", "u", "l", "l"] {
+                            control.key(key).expect("cull review cancel palette search must execute");
+                        }
+                        click_dom(control, "[data-command=\"dialog.cull\"]", "cull review cancel dialog must open");
+                        wait_for_dom(control, "return document.querySelector('.lc-cull-review-dialog') !== null;");
+                        click_dom(control, ".lc-cull-review-footer .lc-cull-review-button-secondary", "cull review Cancel must close without mutation");
+                        wait_for_dom(control, "return document.querySelector('.lc-cull-review-dialog') === null;");
+                        let cancelled = snapshot(control);
+                        let cancelled_slice = control
+                            .command("lc_view_slice", &json!({"generation": cancelled["viewGeneration"], "offset": 0, "limit": 4}))
+                            .expect("cull review cancelled slice must reply");
+                        assert_eq!(cancelled["counts"], baseline["counts"], "cull review cancel must preserve catalog counts");
+                        assert_eq!(cancelled["selection"], baseline["selection"], "cull review cancel must preserve selection");
+                        assert_eq!(cancelled["undo"], baseline["undo"], "cull review cancel must preserve undo history");
+                        assert_eq!(cancelled_slice["photos"], baseline_slice["photos"], "cull review cancel must preserve flags");
                     }
                     "cache" => {
                         let imported = import_file(control, &inputs.png);

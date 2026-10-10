@@ -44,6 +44,8 @@ mod tracker;
 mod vit;
 #[cfg(not(target_arch = "wasm32"))]
 mod weights;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod yunet;
 
 use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]

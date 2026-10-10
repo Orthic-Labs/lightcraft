@@ -9,7 +9,7 @@ use lightcraft_catalog::PhotoId;
 use lightcraft_engine::import::{ImportCandidate, ImportJob, ImportOptions, Prepared, RawJpegImportPolicy, ScanInput, ScanOutput, ScanProgress};
 use lightcraft_engine::media::QuickSource;
 use lightcraft_engine::merge::{MergeJob, MergeOutput};
-use lightcraft_engine::{Selection, Session};
+use lightcraft_engine::{CullApplyJob, CullJob, CullJobResult, Selection, Session};
 
 use crate::snapshot::{JobStatus, TerminalTask};
 
@@ -21,6 +21,7 @@ const MAX_PENDING_PREVIEW_IDS: usize = 8_192;
 const MAX_COMPLETED_TASKS: usize = 64;
 const MAX_IMPORT_PREVIEWS: usize = 128;
 const IMPORT_PREVIEW_EDGE: usize = 256;
+const CULL_MAX_IDS: usize = 8_192;
 
 struct Task {
     id: String,
@@ -90,6 +91,21 @@ enum Event {
         status: Value,
         failed: usize,
         cancelled: bool,
+    },
+    Cull {
+        id: String,
+        job: CullJob,
+        result: Result<CullJobResult, String>,
+        cancelled: bool,
+        library_id: Option<String>,
+    },
+    CullApply {
+        id: String,
+        prepared: CullApplyJob,
+        params: Value,
+        result: Result<CullJobResult, String>,
+        cancelled: bool,
+        library_id: Option<String>,
     },
 }
 
@@ -204,6 +220,143 @@ impl Tasks {
             self.notices.push(format!("export preferences were not saved: {error}"));
         }
         Ok(json!({"taskId": task_id, "total": total}))
+    }
+
+    /// Plan culling on the owner thread, then measure detached sources in cancellable worker.
+    /// Catalog flags and analysis remain untouched until a caller explicitly applies proposal.
+    pub(crate) fn start_cull_suggest(&mut self, session: &mut Session, params: &Value) -> Result<Value, String> {
+        if self.running_kind("cull") {
+            return Err("a cull suggestion is already running".into());
+        }
+        if self.jobs.len() >= MAX_TASKS {
+            return Err("too many background tasks".into());
+        }
+        let reject_below = match params.get("rejectBelow") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_f64()
+                    .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+                    .ok_or_else(|| "photo.cullSuggest: `rejectBelow` must be a finite number 0..100".to_string())? as f32,
+            ),
+        };
+        let pick_best = params
+            .get("pickBest")
+            .map_or(Ok(false), |value| value.as_bool().ok_or_else(|| "photo.cullSuggest: `pickBest` must be a boolean".to_string()))?;
+        let ids = if let Some(raw_ids) = params.get("ids") {
+            let values = raw_ids.as_array().ok_or_else(|| "photo.cullSuggest: `ids` must be an array of photo ids".to_string())?;
+            if values.len() > CULL_MAX_IDS {
+                return Err(format!("photo.cullSuggest: too many culling photo ids: {}", values.len()));
+            }
+            let ids = values
+                .iter()
+                .map(|value| value.as_u64().map(PhotoId).ok_or_else(|| "photo.cullSuggest: `ids` must contain only unsigned photo ids".to_string()))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut seen = HashSet::with_capacity(ids.len());
+            for id in &ids {
+                if !seen.insert(*id) {
+                    return Err(format!("photo.cullSuggest: duplicate photo id {}", id.0));
+                }
+                if session.catalog.photo(*id).is_none() {
+                    return Err(format!("photo.cullSuggest: unknown photo id {}", id.0));
+                }
+            }
+            ids
+        } else if session.selection.ids.len() > 1 {
+            session.targets(params)
+        } else {
+            session.visible_cloned()
+        };
+        if ids.len() > CULL_MAX_IDS {
+            return Err(format!("photo.cullSuggest: too many culling photo ids: {}", ids.len()));
+        }
+        for id in &ids {
+            crate::validate_id(id.0)?;
+        }
+        let job = session.plan_cull_job(&ids, reject_below, pick_best).map_err(|error| error.to_string())?;
+        let library_id = session.library.as_ref().map(|library| library.dir.to_string_lossy().into_owned());
+        // Reserve one terminal unit for owner-thread validation/publication. The worker reports
+        // item progress in 0..N while the task advertises N+1 units until it is finished.
+        let total = Arc::new(AtomicUsize::new(job.photos.len().saturating_add(1).max(1)));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let task_id = self.new_id("cull");
+        let task = Task {
+            id: task_id.clone(),
+            kind: "cull".into(),
+            label: "Suggest Culling".into(),
+            total: total.clone(),
+            completed: completed.clone(),
+            cancel: cancel.clone(),
+            worker: None,
+        };
+        let tx = self.tx.clone();
+        let id_for_worker = task_id.clone();
+        let worker_cancel = cancel.clone();
+        let worker = std::thread::Builder::new()
+            .name("lightcraft-cull".into())
+            .spawn(move || {
+                let result = lightcraft_engine::guard::catch("cull suggestion", || {
+                    job.run(&|fraction, _stage| {
+                        let terminal = total.load(Ordering::Relaxed).saturating_sub(1);
+                        completed.store((fraction.clamp(0.0, 1.0) * terminal as f32).round() as usize, Ordering::Relaxed);
+                        !worker_cancel.load(Ordering::Relaxed)
+                    })
+                })
+                .unwrap_or_else(Err);
+                let cancelled = worker_cancel.load(Ordering::Relaxed);
+                let _ = tx.send(Event::Cull { id: id_for_worker, job, result, cancelled, library_id });
+            })
+            .map_err(|error| format!("could not start cull suggestion: {error}"))?;
+        self.insert(Task { worker: Some(worker), ..task })?;
+        Ok(json!({"taskId": task_id, "kind": "cull", "total": total.load(Ordering::Relaxed)}))
+    }
+
+    /// Re-measure a reviewed proposal off-thread, then apply accepted flags on owner thread.
+    /// The engine performs final revision/source/flag validation before one undoable commit.
+    pub(crate) fn start_cull_apply(&mut self, session: &mut Session, params: &Value) -> Result<Value, String> {
+        if self.running_kind("cullApply") {
+            return Err("a cull apply is already running".into());
+        }
+        if self.jobs.len() >= MAX_TASKS {
+            return Err("too many background tasks".into());
+        }
+        let prepared = session.plan_cull_apply(params).map_err(|error| error.to_string())?;
+        let library_id = session.library.as_ref().map(|library| library.dir.to_string_lossy().into_owned());
+        let total = Arc::new(AtomicUsize::new(prepared.job.photos.len().saturating_add(1).max(1)));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let task_id = self.new_id("cullApply");
+        let task = Task {
+            id: task_id.clone(),
+            kind: "cullApply".into(),
+            label: "Apply Culling".into(),
+            total: total.clone(),
+            completed: completed.clone(),
+            cancel: cancel.clone(),
+            worker: None,
+        };
+        let tx = self.tx.clone();
+        let id_for_worker = task_id.clone();
+        let worker_cancel = cancel.clone();
+        let params_for_event = params.clone();
+        let worker = std::thread::Builder::new()
+            .name("lightcraft-cull-apply".into())
+            .spawn(move || {
+                let result = lightcraft_engine::guard::catch("cull apply", || {
+                    prepared.job.run(&|fraction, _stage| {
+                        let terminal = total.load(Ordering::Relaxed).saturating_sub(1);
+                        completed.store((fraction.clamp(0.0, 1.0) * terminal as f32).round() as usize, Ordering::Relaxed);
+                        !worker_cancel.load(Ordering::Relaxed)
+                    })
+                })
+                .unwrap_or_else(Err);
+                let cancelled = worker_cancel.load(Ordering::Relaxed);
+                let _ = tx.send(Event::CullApply { id: id_for_worker, prepared, params: params_for_event, result, cancelled, library_id });
+            })
+            .map_err(|error| format!("could not start cull apply: {error}"))?;
+        self.insert(Task { worker: Some(worker), ..task })?;
+        Ok(json!({"taskId": task_id, "kind": "cullApply", "total": total.load(Ordering::Relaxed)}))
     }
 
     pub(crate) fn start_import(&mut self, session: &mut Session, params: &Value) -> Result<Value, String> {
@@ -804,6 +957,34 @@ impl Tasks {
                         self.start_preview_build_for_ids(session, &pending);
                     }
                 }
+                Event::Cull { id, job, result, cancelled, library_id } => {
+                    let cancelled = cancelled || self.jobs.get(&id).is_some_and(|task| task.cancel.load(Ordering::Relaxed));
+                    let current_library_id = session.library.as_ref().map(|library| library.dir.to_string_lossy().into_owned());
+                    let result = if cancelled {
+                        Err("cancelled".into())
+                    } else if current_library_id != library_id {
+                        Err("stale culling result: library changed".into())
+                    } else {
+                        result.and_then(|result| session.validate_cull_job_result(&job, &result).map_err(|error| error.to_string()))
+                    };
+                    self.finish(id, result, "cull", cancelled);
+                }
+                Event::CullApply { id, prepared, params, result, cancelled, library_id } => {
+                    let cancelled = cancelled || self.jobs.get(&id).is_some_and(|task| task.cancel.load(Ordering::Relaxed));
+                    let current_library_id = session.library.as_ref().map(|library| library.dir.to_string_lossy().into_owned());
+                    let result = if cancelled {
+                        Err("cancelled".into())
+                    } else if current_library_id != library_id {
+                        Err("stale culling result: library changed".into())
+                    } else {
+                        result.and_then(|result| {
+                            session
+                                .execute_prepared_command("photo.cullApply", &params, |session| session.finish_cull_apply(prepared, result))
+                                .map_err(|error| error.to_string())
+                        })
+                    };
+                    self.finish(id, result, "cullApply", cancelled);
+                }
             }
         }
     }
@@ -1340,6 +1521,113 @@ mod tests {
         assert_eq!(completed[0].id, "merge-early");
         assert_eq!(completed[0].state, "done");
         assert_eq!(completed[0].result.as_ref().and_then(|value| value.get("id")).and_then(Value::as_u64), Some(41));
+    }
+
+    #[test]
+    fn cull_suggest_returns_task_status_and_read_only_terminal_proposal() {
+        let mut tasks = Tasks::new();
+        let mut session = Session::with_demo();
+        let before = session.catalog.to_snapshot();
+        let expected_total = session.visible_cloned().len().saturating_add(1).max(1);
+        let started = tasks.start_cull_suggest(&mut session, &json!({"rejectBelow": 100.0, "pickBest": true}));
+        assert!(started.is_ok(), "cull suggestion should start: {started:?}");
+        let Ok(started) = started else { return };
+        let Some(task_id) = started.get("taskId").and_then(Value::as_str) else { return };
+        assert_eq!(started.get("total").and_then(Value::as_u64), Some(expected_total as u64));
+        assert!(tasks.statuses().iter().any(|job| job.id == task_id && job.kind == "cull"));
+        for _ in 0..2_000 {
+            tasks.poll(&mut session);
+            if !tasks.running() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!tasks.running(), "cull worker must reach terminal state");
+        let terminal = tasks.completed_jobs().into_iter().find(|job| job.id == task_id).expect("cull terminal record");
+        assert_eq!(terminal.state, "done");
+        assert!(terminal.result.as_ref().and_then(|value| value.get("proposal")).is_some(), "terminal result carries proposal");
+        assert_eq!(session.catalog.to_snapshot(), before, "suggestion does not mutate catalog");
+    }
+
+    #[test]
+    fn cull_suggest_rejects_malformed_explicit_ids() {
+        let mut tasks = Tasks::new();
+        let mut session = Session::with_demo();
+        let first = session.visible_cloned().first().copied().expect("demo photo").0;
+        let cases = [
+            (json!({"ids": null}), "must be an array"),
+            (json!({"ids": "1"}), "must be an array"),
+            (json!({"ids": ["1"]}), "must contain only unsigned"),
+            (json!({"ids": [first, first]}), "duplicate photo id"),
+            (json!({"ids": [9_999_999_u64]}), "unknown photo id"),
+        ];
+        for (params, expected) in cases {
+            let error = tasks.start_cull_suggest(&mut session, &params).expect_err("malformed ids must fail before starting a task");
+            assert!(error.contains(expected), "{error:?} should mention {expected:?}");
+            assert!(tasks.statuses().is_empty());
+        }
+    }
+
+    #[test]
+    fn cull_cancel_wins_before_terminal_publication() {
+        let mut tasks = Tasks::new();
+        let mut session = Session::with_demo();
+        let ids = session.visible_cloned();
+        let job = session.plan_cull_job(&ids, None, false).expect("cull job plan");
+        let id = "cull-cancel-1".to_string();
+        tasks.jobs.insert(
+            id.clone(),
+            Task {
+                id: id.clone(),
+                kind: "cull".into(),
+                label: "Suggest Culling".into(),
+                total: Arc::new(AtomicUsize::new(1)),
+                completed: Arc::new(AtomicUsize::new(0)),
+                cancel: Arc::new(AtomicBool::new(false)),
+                worker: None,
+            },
+        );
+        assert_eq!(tasks.cancel(Some(&id)).expect("cull cancel")["cancelled"], 1);
+        let _ = tasks.tx.send(Event::Cull { id: id.clone(), job, result: Err("cancelled".into()), cancelled: true, library_id: None });
+        tasks.poll(&mut session);
+        let terminal = tasks.completed_jobs().into_iter().find(|task| task.id == id).expect("cancelled cull terminal record");
+        assert_eq!(terminal.state, "cancelled");
+        assert!(terminal.result.is_none());
+    }
+
+    #[test]
+    fn cull_apply_remeasures_then_commits_one_undoable_batch() {
+        let mut tasks = Tasks::new();
+        let mut session = Session::with_demo();
+        let suggestion = session.execute("photo.cullSuggest", &json!({"rejectBelow": 100.0, "pickBest": true})).expect("cull proposal");
+        let proposal = suggestion.get("proposal").cloned().expect("nested cull proposal");
+        let accepted = proposal
+            .get("photos")
+            .and_then(Value::as_array)
+            .and_then(|photos| {
+                photos.iter().find_map(|photo| {
+                    let flag = photo.get("proposedFlag").and_then(Value::as_str)?;
+                    (flag == "pick" || flag == "reject").then(|| json!({"id": photo.get("id")?, "flag": flag}))
+                })
+            })
+            .expect("proposal should include an explicit flag");
+        let undo_before = session.undo.len();
+        let started = tasks.start_cull_apply(&mut session, &json!({"proposal": proposal, "accept": [accepted]}));
+        assert!(started.is_ok(), "cull apply should start: {started:?}");
+        let Ok(started) = started else { return };
+        let Some(task_id) = started.get("taskId").and_then(Value::as_str) else { return };
+        assert_eq!(started.get("kind").and_then(Value::as_str), Some("cullApply"));
+        for _ in 0..2_000 {
+            tasks.poll(&mut session);
+            if !tasks.running() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let terminal = tasks.completed_jobs().into_iter().find(|job| job.id == task_id).expect("cull apply terminal record");
+        assert_eq!(terminal.state, "done");
+        assert_eq!(terminal.result.as_ref().and_then(|value| value.get("accepted")).and_then(Value::as_u64), Some(1));
+        assert_eq!(session.undo.len(), undo_before + 1, "accepted flags are one undoable batch");
     }
 
     #[test]

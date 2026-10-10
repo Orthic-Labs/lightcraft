@@ -206,6 +206,8 @@ impl Controller {
             "library.importLightroom" => self.tasks.start_lightroom_import(&mut self.session, params),
             "library.inspectLightroom" => self.tasks.start_lightroom_inspection(&mut self.session, params),
             "library.buildPreviews" => self.tasks.start_preview_build(&mut self.session, params),
+            "photo.cullSuggest" => self.tasks.start_cull_suggest(&mut self.session, params),
+            "photo.cullApply" => self.tasks.start_cull_apply(&mut self.session, params),
             "merge.hdr" | "merge.panorama" | "merge.hdrPanorama" => {
                 if params.get("preview").and_then(Value::as_bool).unwrap_or(false) {
                     self.session.execute(id, params).map_err(|error| error.to_string())

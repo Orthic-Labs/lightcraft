@@ -70,8 +70,16 @@ fn secs(iso: &str) -> Option<i64> {
 
 fn source_identity(photo: &lightcraft_catalog::Photo) -> String {
     let key = crate::media::content_key(photo);
-    let lightcraft_catalog::Source::File { path } = &photo.source else {
-        return key;
+    let path = match &photo.source {
+        lightcraft_catalog::Source::File { path } => Some(path.as_str()),
+        lightcraft_catalog::Source::Demo { .. } => None,
+    };
+    source_identity_for(&key, path)
+}
+
+fn source_identity_for(key: &str, path: Option<&str>) -> String {
+    let Some(path) = path else {
+        return key.to_string();
     };
     let Ok(meta) = std::fs::metadata(path) else {
         return format!("{key}|stat:missing");
@@ -85,23 +93,10 @@ fn source_identity(photo: &lightcraft_catalog::Photo) -> String {
     format!("{key}|stat:{modified}:len:{}", meta.len())
 }
 
-fn fresh_source(s: &mut Session, id: PhotoId) -> std::result::Result<std::sync::Arc<lightcraft_raster::Rgb32f>, String> {
-    let photo = s.catalog.photo(id).ok_or_else(|| format!("unknown photo id {}", id.0))?.clone();
-    if !matches!(&photo.source, lightcraft_catalog::Source::File { .. }) {
-        return s.source_now(id, crate::media::SourceLevel::Thumb);
-    }
-    let before = source_identity(&photo);
-    let image = s.media.origin_ref(&photo.source, crate::media::SourceLevel::Thumb.max_edge()).load()?;
-    let after = s.catalog.photo(id).map(source_identity).ok_or_else(|| format!("unknown photo id {}", id.0))?;
-    if before != after {
-        return Err("source changed while measuring".into());
-    }
-    Ok(image)
-}
-
 #[derive(Clone)]
 struct CullRow {
     id: PhotoId,
+    file_name: String,
     sharpness: f32,
     clipped: f32,
     source: String,
@@ -111,6 +106,274 @@ struct CullRow {
     decision: lightcraft_pipeline::cull::report::Decision,
     uncertainty: lightcraft_pipeline::cull::report::Uncertainty,
     reason_codes: Vec<lightcraft_pipeline::cull::report::ReasonCode>,
+}
+
+/// Detached culling input. Source refs own their decoder and can cross into a worker without a
+/// `Session` or catalog lock.
+#[derive(Clone)]
+pub struct CullPhotoSnapshot {
+    pub id: PhotoId,
+    pub file_name: String,
+    pub captured_secs: Option<i64>,
+    pub source: String,
+    pub source_key: String,
+    pub source_path: Option<String>,
+    pub flag: Flag,
+    pub source_ref: crate::media::SourceRef,
+}
+
+/// Owned culling request suitable for bounded background execution.
+pub struct CullJob {
+    pub catalog_revision: u64,
+    pub reject_below: Option<f32>,
+    pub pick_best: bool,
+    pub photos: Vec<CullPhotoSnapshot>,
+}
+
+/// Result produced by [`CullJob::run`]. Caller must validate revision/source state before showing
+/// it as current or passing its nested proposal to `photo.cullApply`.
+pub struct CullJobResult {
+    pub catalog_revision: u64,
+    pub value: Value,
+}
+
+/// Detached apply plan. Run [`Self::job`] off-thread, then pass whole plan & result to
+/// [`Session::finish_cull_apply`] for final validation & one undoable commit.
+pub struct CullApplyJob {
+    pub job: CullJob,
+    proposal: Value,
+    accepted: std::collections::BTreeMap<PhotoId, Flag>,
+}
+
+pub type CullProgressFn<'a> = dyn Fn(f32, &str) -> bool + Sync + 'a;
+
+fn validate_policy_values(reject_below: Option<f32>, _pick_best: bool) -> std::result::Result<(), String> {
+    if reject_below.is_some_and(|value| !value.is_finite() || !(0.0..=100.0).contains(&value)) {
+        return Err("`rejectBelow` must be a finite number 0..100".into());
+    }
+    Ok(())
+}
+
+impl CullJob {
+    pub fn new(
+        catalog_revision: u64,
+        photos: Vec<CullPhotoSnapshot>,
+        reject_below: Option<f32>,
+        pick_best: bool,
+    ) -> std::result::Result<Self, String> {
+        validate_policy_values(reject_below, pick_best)?;
+        if photos.len() > lightcraft_pipeline::cull::report::MAX_MEASUREMENTS {
+            return Err(format!("too many culling photo ids: {}", photos.len()));
+        }
+        let mut ids = std::collections::HashSet::with_capacity(photos.len());
+        for photo in &photos {
+            if !ids.insert(photo.id) {
+                return Err(format!("duplicate photo id {}", photo.id.0));
+            }
+        }
+        Ok(Self { catalog_revision, reject_below, pick_best, photos })
+    }
+
+    fn measure_rows(&self, progress: &CullProgressFn<'_>) -> std::result::Result<(Vec<CullRow>, Vec<Value>), String> {
+        if !progress(0.0, "Reading photos") {
+            return Err("cancelled".into());
+        }
+        let total = self.photos.len().max(1) as f32;
+        let mut rows = Vec::new();
+        let mut measurements = Vec::new();
+        let mut failed = Vec::new();
+        for (index, photo) in self.photos.iter().enumerate() {
+            if !progress(index as f32 / total, "Reading photos") {
+                return Err("cancelled".into());
+            }
+            let measured = photo
+                .source_ref
+                .load()
+                .map_err(|error| error.to_string())
+                .and_then(|source| lightcraft_pipeline::cull::measure_checked(&source).map_err(|error| error.to_string()).map(|m| (source, m)));
+            match measured {
+                Ok((_source, measured)) => {
+                    if let Some(path) = photo.source_path.as_deref()
+                        && source_identity_for(&photo.source_key, Some(path)) != photo.source
+                    {
+                        failed.push(json!([photo.id.0, "source changed while measuring"]));
+                        continue;
+                    }
+                    measurements.push(lightcraft_pipeline::cull::report::Measurement {
+                        id: photo.id.0,
+                        captured_secs: photo.captured_secs,
+                        sharpness: measured.sharpness,
+                        clipped: measured.clipped,
+                        signature: measured.signature,
+                    });
+                    rows.push(CullRow {
+                        id: photo.id,
+                        file_name: photo.file_name.clone(),
+                        sharpness: measured.sharpness,
+                        clipped: measured.clipped,
+                        source: photo.source.clone(),
+                        flag: photo.flag,
+                        group: None,
+                        best: false,
+                        decision: lightcraft_pipeline::cull::report::Decision::Abstain,
+                        uncertainty: lightcraft_pipeline::cull::report::Uncertainty::Abstain,
+                        reason_codes: Vec::new(),
+                    });
+                }
+                Err(error) => failed.push(json!([photo.id.0, error])),
+            }
+            if !progress((index + 1) as f32 / total, "Measuring photos") {
+                return Err("cancelled".into());
+            }
+        }
+        let policy = lightcraft_pipeline::cull::report::CullPolicy {
+            burst_gap_secs: BURST_GAP,
+            similarity_threshold: SAME,
+            reject_below: self.reject_below,
+            pick_best: self.pick_best,
+        };
+        let report = lightcraft_pipeline::cull::report::plan(&measurements, &policy).map_err(|error| error.to_string())?;
+        let report_by_id: std::collections::HashMap<u64, &lightcraft_pipeline::cull::report::PhotoReport> =
+            report.photos.iter().map(|photo| (photo.id, photo)).collect();
+        for row in &mut rows {
+            if let Some(measured) = report_by_id.get(&row.id.0) {
+                row.group = measured.group;
+                row.best = measured.best;
+                row.decision = measured.decision;
+                row.uncertainty = measured.uncertainty;
+                row.reason_codes = measured.reason_codes.clone();
+            }
+        }
+        Ok((rows, failed))
+    }
+
+    pub fn run(&self, progress: &CullProgressFn<'_>) -> std::result::Result<CullJobResult, String> {
+        let (rows, failed) = self.measure_rows(progress)?;
+        Ok(CullJobResult {
+            catalog_revision: self.catalog_revision,
+            value: proposal_result_revision(self.catalog_revision, &rows, failed, self.reject_below, self.pick_best),
+        })
+    }
+}
+
+fn exact_object(value: &Value, required: &[&str], what: &str) -> Result<&serde_json::Map<String, Value>> {
+    let object = value.as_object().ok_or_else(|| super::bad("photo.cullSuggest", format!("{what} must be an object")))?;
+    if required.iter().any(|key| !object.contains_key(*key)) || object.keys().any(|key| !required.iter().any(|expected| *expected == key)) {
+        return Err(super::bad("photo.cullSuggest", format!("{what} fields are invalid")));
+    }
+    Ok(object)
+}
+
+fn f32_value(value: &Value, field: &str, min: f32, max: f32) -> Result<f32> {
+    let value = value
+        .as_f64()
+        .filter(|value| value.is_finite() && *value >= f64::from(min) && *value <= f64::from(max))
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| super::bad("photo.cullSuggest", format!("proposal {field} is invalid")))?;
+    Ok(value)
+}
+
+fn validate_worker_result(job: &CullJob, value: Value) -> Result<()> {
+    const C: &str = "photo.cullSuggest";
+    let result = exact_object(&value, &["photos", "groups", "rejected", "picked", "failed", "proposal"], "worker result")?;
+    let proposal_value = result.get("proposal").expect("exact_object checked proposal");
+    let proposal = exact_object(proposal_value, &["version", "catalogRevision", "policy", "photos", "binding"], "worker proposal")?;
+    let version = proposal["version"].as_u64().ok_or_else(|| super::bad(C, "worker proposal version is invalid"))?;
+    if version != PROPOSAL_VERSION {
+        return Err(super::bad(C, "worker proposal version is unsupported"));
+    }
+    let revision = proposal["catalogRevision"].as_u64().ok_or_else(|| super::bad(C, "worker proposal revision is invalid"))?;
+    if revision != job.catalog_revision {
+        return Err(super::bad(C, "worker proposal revision is stale"));
+    }
+    let policy = exact_object(&proposal["policy"], &["rejectBelow", "pickBest"], "worker proposal policy")?;
+    let (reject_below, pick_best) = strict_policy(&Value::Object(policy.clone()), C)?;
+    if pick_best != job.pick_best || reject_below.map(f32::to_bits) != job.reject_below.map(f32::to_bits) {
+        return Err(super::bad(C, "worker proposal policy does not match job"));
+    }
+    let binding = proposal["binding"].as_str().ok_or_else(|| super::bad(C, "worker proposal binding is invalid"))?;
+    if lightcraft_preview::Hash128::parse(binding).is_none() {
+        return Err(super::bad(C, "worker proposal binding is invalid"));
+    }
+    let proposal_photos = proposal["photos"].as_array().ok_or_else(|| super::bad(C, "worker proposal photos are invalid"))?;
+    let result_photos = result["photos"].as_array().ok_or_else(|| super::bad(C, "worker result photos are invalid"))?;
+    if proposal_photos != result_photos || proposal_photos.len() > job.photos.len() {
+        return Err(super::bad(C, "worker proposal photo coverage is invalid"));
+    }
+    let expected: std::collections::HashMap<PhotoId, &CullPhotoSnapshot> = job.photos.iter().map(|photo| (photo.id, photo)).collect();
+    let mut rows = Vec::with_capacity(proposal_photos.len());
+    let mut seen = std::collections::HashSet::with_capacity(proposal_photos.len());
+    for value in proposal_photos {
+        let photo = exact_object(
+            value,
+            &["id", "fileName", "source", "flag", "proposedFlag", "sharpness", "clipped", "group", "best", "decision", "uncertainty", "reasonCodes"],
+            "worker proposal photo",
+        )?;
+        let id = photo["id"].as_u64().map(PhotoId).ok_or_else(|| super::bad(C, "worker proposal photo id is invalid"))?;
+        if !seen.insert(id) {
+            return Err(super::bad(C, format!("duplicate worker proposal photo id {}", id.0)));
+        }
+        let snapshot = expected.get(&id).ok_or_else(|| super::bad(C, format!("unknown worker proposal photo id {}", id.0)))?;
+        let file_name = photo["fileName"].as_str().ok_or_else(|| super::bad(C, "worker proposal fileName is invalid"))?.to_string();
+        let source = photo["source"].as_str().ok_or_else(|| super::bad(C, "worker proposal source is invalid"))?.to_string();
+        if file_name != snapshot.file_name || source != snapshot.source {
+            return Err(super::bad(C, format!("worker proposal photo {} does not match snapshot", id.0)));
+        }
+        let flag = parse_flag(&photo["flag"], C, "flag")?;
+        if flag != snapshot.flag {
+            return Err(super::bad(C, format!("worker proposal flag for photo {} does not match snapshot", id.0)));
+        }
+        let proposed = match &photo["proposedFlag"] {
+            Value::Null => None,
+            value => Some(parse_flag(value, C, "proposedFlag")?),
+        };
+        let sharpness = f32_value(&photo["sharpness"], "sharpness", 0.0, 100.0)?;
+        let clipped = f32_value(&photo["clipped"], "clipped", 0.0, 1.0)?;
+        let group = match &photo["group"] {
+            Value::Null => None,
+            value => {
+                Some(value.as_u64().and_then(|value| u32::try_from(value).ok()).ok_or_else(|| super::bad(C, "worker proposal group is invalid"))?)
+            }
+        };
+        let best = photo["best"].as_bool().ok_or_else(|| super::bad(C, "worker proposal best is invalid"))?;
+        let decision = serde_json::from_value(photo["decision"].clone()).map_err(|_| super::bad(C, "worker proposal decision is invalid"))?;
+        let uncertainty =
+            serde_json::from_value(photo["uncertainty"].clone()).map_err(|_| super::bad(C, "worker proposal uncertainty is invalid"))?;
+        let reason_codes =
+            serde_json::from_value(photo["reasonCodes"].clone()).map_err(|_| super::bad(C, "worker proposal reasonCodes are invalid"))?;
+        let row = CullRow { id, file_name, sharpness, clipped, source, flag, group, best, decision, uncertainty, reason_codes };
+        if proposed != proposed_flag(&row, job.reject_below, job.pick_best) {
+            return Err(super::bad(C, format!("worker proposal action for photo {} is inconsistent", id.0)));
+        }
+        rows.push(row);
+    }
+
+    let failed = result["failed"].as_array().ok_or_else(|| super::bad(C, "worker result failures are invalid"))?;
+    let mut failed_ids = std::collections::HashSet::with_capacity(failed.len());
+    for item in failed {
+        let pair = item.as_array().filter(|pair| pair.len() == 2).ok_or_else(|| super::bad(C, "worker result failure must be [id, message]"))?;
+        let id = pair[0].as_u64().map(PhotoId).ok_or_else(|| super::bad(C, "worker result failure id is invalid"))?;
+        if !expected.contains_key(&id) || !failed_ids.insert(id) || seen.contains(&id) || pair[1].as_str().is_none() {
+            return Err(super::bad(C, format!("worker result failure for photo {} is invalid", id.0)));
+        }
+    }
+    if seen.len() + failed_ids.len() != job.photos.len()
+        || job.photos.iter().any(|photo| !seen.contains(&photo.id) && !failed_ids.contains(&photo.id))
+    {
+        return Err(super::bad(C, "worker result photo coverage is incomplete"));
+    }
+
+    let groups = rows.iter().filter_map(|row| row.group).collect::<std::collections::HashSet<_>>().len() as u64;
+    let rejected = rows.iter().filter(|row| proposed_flag(row, job.reject_below, job.pick_best) == Some(Flag::Reject)).count() as u64;
+    let picked = rows.iter().filter(|row| proposed_flag(row, job.reject_below, job.pick_best) == Some(Flag::Pick)).count() as u64;
+    if result["groups"].as_u64() != Some(groups) || result["rejected"].as_u64() != Some(rejected) || result["picked"].as_u64() != Some(picked) {
+        return Err(super::bad(C, "worker result aggregate counts are invalid"));
+    }
+    if binding_hash(job.catalog_revision, job.reject_below, job.pick_best, &rows) != binding {
+        return Err(super::bad(C, "worker proposal binding does not match contents"));
+    }
+    Ok(())
 }
 
 fn strict_policy(p: &Value, cmd: &str) -> Result<(Option<f32>, bool)> {
@@ -128,6 +391,7 @@ fn strict_policy(p: &Value, cmd: &str) -> Result<(Option<f32>, bool)> {
         None => false,
         Some(v) => v.as_bool().ok_or_else(|| super::bad(cmd, "`pickBest` must be a boolean"))?,
     };
+    validate_policy_values(reject_below, pick_best).map_err(|message| super::bad(cmd, message))?;
     Ok((reject_below, pick_best))
 }
 
@@ -160,60 +424,200 @@ fn strict_ids(s: &mut Session, p: &Value, cmd: &str) -> Result<Vec<PhotoId>> {
     Ok(ids)
 }
 
-fn measure(s: &mut Session, ids: &[PhotoId], cmd: &str, reject_below: Option<f32>, pick_best: bool) -> Result<(Vec<CullRow>, Vec<Value>)> {
-    let mut rows = Vec::new();
-    let mut measurements = Vec::new();
-    let mut failed = Vec::new();
+fn prepare_cull_job(s: &mut Session, ids: &[PhotoId], reject_below: Option<f32>, pick_best: bool, cmd: &str) -> Result<CullJob> {
+    validate_policy_values(reject_below, pick_best).map_err(|message| super::bad(cmd, message))?;
+    if ids.len() > lightcraft_pipeline::cull::report::MAX_MEASUREMENTS {
+        return Err(super::bad(cmd, format!("too many culling photo ids: {}", ids.len())));
+    }
+    let mut seen = std::collections::HashSet::with_capacity(ids.len());
+    let mut photos = Vec::with_capacity(ids.len());
     for id in ids {
-        let (captured, source, flag) = {
-            let p = s.catalog.photo(*id).ok_or_else(|| super::bad(cmd, format!("unknown photo id {}", id.0)))?;
-            (p.captured.as_deref().and_then(secs), source_identity(p), p.flag)
+        if !seen.insert(*id) {
+            return Err(super::bad(cmd, format!("duplicate photo id {}", id.0)));
+        }
+        let photo = s.catalog.photo(*id).ok_or_else(|| super::bad(cmd, format!("unknown photo id {}", id.0)))?.clone();
+        let source_key = crate::media::content_key(&photo);
+        let source_path = match &photo.source {
+            lightcraft_catalog::Source::File { path } => Some(path.clone()),
+            lightcraft_catalog::Source::Demo { .. } => None,
         };
-        match fresh_source(s, *id) {
-            Ok(src) => {
-                use lightcraft_pipeline::cull;
-                match cull::measure_checked(&src) {
-                    Ok(measured) => {
-                        measurements.push(lightcraft_pipeline::cull::report::Measurement {
-                            id: id.0,
-                            captured_secs: captured,
-                            sharpness: measured.sharpness,
-                            clipped: measured.clipped,
-                            signature: measured.signature,
-                        });
-                        rows.push(CullRow {
-                            id: *id,
-                            sharpness: measured.sharpness,
-                            clipped: measured.clipped,
-                            source,
-                            flag,
-                            group: None,
-                            best: false,
-                            decision: lightcraft_pipeline::cull::report::Decision::Abstain,
-                            uncertainty: lightcraft_pipeline::cull::report::Uncertainty::Abstain,
-                            reason_codes: Vec::new(),
-                        });
-                    }
-                    Err(e) => failed.push(json!([id.0, e.to_string()])),
-                }
+        let source_ref = s.media.origin_ref(&photo.source, crate::media::SourceLevel::Thumb.max_edge());
+        photos.push(CullPhotoSnapshot {
+            id: *id,
+            file_name: photo.file_name.clone(),
+            captured_secs: photo.captured.as_deref().and_then(secs),
+            source: source_identity(&photo),
+            source_key,
+            source_path,
+            flag: photo.flag,
+            source_ref,
+        });
+    }
+    CullJob::new(s.catalog.revision, photos, reject_below, pick_best).map_err(|message| super::bad(cmd, message))
+}
+
+impl Session {
+    /// Detach culling sources so decode can run on a worker without borrowing this session.
+    pub fn plan_cull_job(&mut self, ids: &[PhotoId], reject_below: Option<f32>, pick_best: bool) -> Result<CullJob> {
+        prepare_cull_job(self, ids, reject_below, pick_best, "photo.cullSuggest")
+    }
+
+    /// Revalidate a worker result against current catalog revision, source identities & flags.
+    pub fn validate_cull_job_result(&self, job: &CullJob, result: &CullJobResult) -> Result<Value> {
+        if job.catalog_revision != self.catalog.revision
+            || result.catalog_revision != self.catalog.revision
+            || result.catalog_revision != job.catalog_revision
+        {
+            return Err(super::bad("photo.cullSuggest", "stale culling result: catalog changed"));
+        }
+        for photo in &job.photos {
+            let current = self
+                .catalog
+                .photo(photo.id)
+                .ok_or_else(|| super::bad("photo.cullSuggest", format!("stale culling result: photo {} was removed", photo.id.0)))?;
+            if current.flag != photo.flag || current.file_name != photo.file_name || source_identity(current) != photo.source {
+                return Err(super::bad("photo.cullSuggest", "stale culling result: source or flags changed"));
             }
-            Err(e) => failed.push(json!([id.0, e])),
+        }
+        validate_worker_result(job, result.value.clone())?;
+        Ok(result.value.clone())
+    }
+}
+
+fn parse_cull_apply(s: &mut Session, p: &Value) -> Result<CullApplyJob> {
+    const C: &str = "photo.cullApply";
+    let proposal_arg = p.get("proposal").ok_or_else(|| super::bad(C, "missing `proposal`"))?;
+    let proposal = proposal_arg
+        .get("version")
+        .map_or_else(|| proposal_arg.get("proposal").ok_or_else(|| super::bad(C, "`proposal` must be a cull proposal or cullSuggest result")), Ok)?;
+    let proposal = exact_object(proposal, &["version", "catalogRevision", "policy", "photos", "binding"], "cull proposal")?;
+    let proposal = Value::Object(proposal.clone());
+    let version = proposal["version"].as_u64().ok_or_else(|| super::bad(C, "proposal version is missing or invalid"))?;
+    if version != PROPOSAL_VERSION {
+        return Err(super::bad(C, "unsupported proposal version"));
+    }
+    let revision = proposal["catalogRevision"].as_u64().ok_or_else(|| super::bad(C, "proposal catalog revision is missing or invalid"))?;
+    if revision != s.catalog.revision {
+        return Err(super::bad(C, "stale culling proposal: catalog changed"));
+    }
+    let binding = proposal["binding"].as_str().ok_or_else(|| super::bad(C, "proposal binding is missing or invalid"))?;
+    if lightcraft_preview::Hash128::parse(binding).is_none() {
+        return Err(super::bad(C, "proposal binding is invalid"));
+    }
+    let policy = exact_object(&proposal["policy"], &["rejectBelow", "pickBest"], "cull proposal policy")?;
+    let (reject_below, pick_best) = strict_policy(&Value::Object(policy.clone()), C)?;
+    let photo_values = proposal["photos"].as_array().ok_or_else(|| super::bad(C, "proposal photos are missing or invalid"))?;
+    if photo_values.len() > lightcraft_pipeline::cull::report::MAX_MEASUREMENTS {
+        return Err(super::bad(C, "too many culling proposal photos"));
+    }
+    let mut ids = Vec::with_capacity(photo_values.len());
+    let mut seen_ids = std::collections::HashSet::with_capacity(photo_values.len());
+    let mut offered = std::collections::HashMap::with_capacity(photo_values.len());
+    for photo in photo_values {
+        let object = exact_object(
+            photo,
+            &["id", "fileName", "source", "flag", "proposedFlag", "sharpness", "clipped", "group", "best", "decision", "uncertainty", "reasonCodes"],
+            "cull proposal photo",
+        )?;
+        let id = object["id"].as_u64().map(PhotoId).ok_or_else(|| super::bad(C, "proposal photo id is invalid"))?;
+        if !seen_ids.insert(id) {
+            return Err(super::bad(C, format!("duplicate proposal photo id {}", id.0)));
+        }
+        let _ = object["fileName"].as_str().ok_or_else(|| super::bad(C, "proposal photo fileName is invalid"))?;
+        let _ = object["source"].as_str().ok_or_else(|| super::bad(C, "proposal photo source is invalid"))?;
+        let prior_flag = parse_flag(&object["flag"], C, "flag")?;
+        let proposed = if object["proposedFlag"].is_null() { None } else { Some(parse_flag(&object["proposedFlag"], C, "proposedFlag")?) };
+        offered.insert(id, (prior_flag, proposed));
+        let _ = f32_value(&object["sharpness"], "sharpness", 0.0, 100.0)?;
+        let _ = f32_value(&object["clipped"], "clipped", 0.0, 1.0)?;
+        if !object["group"].is_null() {
+            let _ = object["group"]
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| super::bad(C, "proposal photo group is invalid"))?;
+        }
+        let _ = object["best"].as_bool().ok_or_else(|| super::bad(C, "proposal photo best is invalid"))?;
+        let _: lightcraft_pipeline::cull::report::Decision =
+            serde_json::from_value(object["decision"].clone()).map_err(|_| super::bad(C, "proposal photo decision is invalid"))?;
+        let _: lightcraft_pipeline::cull::report::Uncertainty =
+            serde_json::from_value(object["uncertainty"].clone()).map_err(|_| super::bad(C, "proposal photo uncertainty is invalid"))?;
+        let _: Vec<lightcraft_pipeline::cull::report::ReasonCode> =
+            serde_json::from_value(object["reasonCodes"].clone()).map_err(|_| super::bad(C, "proposal photo reasonCodes are invalid"))?;
+        ids.push(id);
+    }
+    let accept = p.get("accept").and_then(Value::as_array).ok_or_else(|| super::bad(C, "`accept` must be an array of {id, flag}"))?;
+    if accept.len() > lightcraft_pipeline::cull::report::MAX_MEASUREMENTS {
+        return Err(super::bad(C, "too many accepted culling photos"));
+    }
+    let mut accepted = std::collections::BTreeMap::new();
+    for item in accept {
+        let object = item.as_object().ok_or_else(|| super::bad(C, "each accepted item must be an object"))?;
+        if object.keys().any(|key| key != "id" && key != "flag") || !object.contains_key("id") || !object.contains_key("flag") {
+            return Err(super::bad(C, "accepted item fields are invalid"));
+        }
+        let id = object["id"].as_u64().map(PhotoId).ok_or_else(|| super::bad(C, "accepted photo id is invalid"))?;
+        let flag = parse_flag(&object["flag"], C, "flag")?;
+        if offered.get(&id) != Some(&(Flag::None, Some(flag))) || flag == Flag::None {
+            return Err(super::bad(C, format!("accepted flag for photo {} does not match an available proposal", id.0)));
+        }
+        if accepted.insert(id, flag).is_some() {
+            return Err(super::bad(C, format!("duplicate accepted photo id {}", id.0)));
         }
     }
-    let policy = lightcraft_pipeline::cull::report::CullPolicy { burst_gap_secs: BURST_GAP, similarity_threshold: SAME, reject_below, pick_best };
-    let report = lightcraft_pipeline::cull::report::plan(&measurements, &policy).map_err(|e| super::bad(cmd, e.to_string()))?;
-    let report_by_id: std::collections::HashMap<u64, &lightcraft_pipeline::cull::report::PhotoReport> =
-        report.photos.iter().map(|photo| (photo.id, photo)).collect();
-    for row in &mut rows {
-        if let Some(measured) = report_by_id.get(&row.id.0) {
-            row.group = measured.group;
-            row.best = measured.best;
-            row.decision = measured.decision;
-            row.uncertainty = measured.uncertainty;
-            row.reason_codes = measured.reason_codes.clone();
-        }
+    let job = prepare_cull_job(s, &ids, reject_below, pick_best, C)?;
+    Ok(CullApplyJob { job, proposal, accepted })
+}
+
+impl Session {
+    /// Validate apply input & detach sources before any worker decode.
+    pub fn plan_cull_apply(&mut self, params: &Value) -> Result<CullApplyJob> {
+        parse_cull_apply(self, params)
     }
-    Ok((rows, failed))
+
+    /// Validate detached measurements against current catalog, then commit accepted flags once.
+    pub fn finish_cull_apply(&mut self, prepared: CullApplyJob, result: CullJobResult) -> Result<Value> {
+        const C: &str = "photo.cullApply";
+        let fresh = self.validate_cull_job_result(&prepared.job, &result)?;
+        let result_object = fresh.as_object().ok_or_else(|| super::bad(C, "worker result is invalid"))?;
+        if result_object["failed"].as_array().is_none_or(|failed| !failed.is_empty()) {
+            return Err(super::bad(C, "stale culling proposal: a proposed photo can no longer be measured"));
+        }
+        let fresh_proposal = result_object.get("proposal").ok_or_else(|| super::bad(C, "worker proposal is missing"))?;
+        if fresh_proposal.get("binding") != prepared.proposal.get("binding") || fresh_proposal.get("photos") != prepared.proposal.get("photos") {
+            return Err(super::bad(C, "stale culling proposal: source, flags or measurements changed"));
+        }
+        let photos = fresh_proposal["photos"].as_array().ok_or_else(|| super::bad(C, "worker proposal photos are invalid"))?;
+        let rows_by_id: std::collections::HashMap<PhotoId, &Value> =
+            photos.iter().filter_map(|photo| photo.get("id").and_then(Value::as_u64).map(|id| (PhotoId(id), photo))).collect();
+        let mut ops = Vec::new();
+        for (id, flag) in prepared.accepted {
+            let row = rows_by_id.get(&id).ok_or_else(|| super::bad(C, format!("accepted photo id {} is not in proposal", id.0)))?;
+            let row_flag = parse_flag(row.get("flag").ok_or_else(|| super::bad(C, "proposal photo flag is missing"))?, C, "flag")?;
+            let proposed = row
+                .get("proposedFlag")
+                .and_then(|value| (!value.is_null()).then_some(value))
+                .map(|value| parse_flag(value, C, "proposedFlag"))
+                .transpose()?;
+            if row_flag != Flag::None {
+                return Err(super::bad(C, format!("photo {} already has a flag", id.0)));
+            }
+            if proposed != Some(flag) {
+                return Err(super::bad(C, format!("accepted flag for photo {} does not match proposal", id.0)));
+            }
+            ops.push(Op::SetFlag { id, flag });
+        }
+        if ops.is_empty() {
+            return Ok(json!({"accepted": 0}));
+        }
+        let count = ops.len();
+        self.commit("Accept Assisted Culling", Op::Batch { ops })?;
+        Ok(json!({"accepted": count}))
+    }
+}
+
+fn measure(s: &mut Session, ids: &[PhotoId], cmd: &str, reject_below: Option<f32>, pick_best: bool) -> Result<(Vec<CullRow>, Vec<Value>)> {
+    let job = prepare_cull_job(s, ids, reject_below, pick_best, cmd)?;
+    job.measure_rows(&|_, _| true).map_err(|message| super::bad(cmd, message))
 }
 
 fn flag_name(flag: Flag) -> &'static str {
@@ -246,10 +650,12 @@ fn row_json(row: &CullRow, reject_below: Option<f32>, pick_best: bool) -> Value 
     let proposed = proposed_flag(row, reject_below, pick_best).map(flag_name);
     json!({
         "id": row.id.0,
+        "fileName": row.file_name,
         "source": row.source,
         "flag": flag_name(row.flag),
         "proposedFlag": proposed,
-        "sharpness": (row.sharpness * 10.0).round() / 10.0,
+        // Keep exact f32 for threshold decisions; clients can round for display.
+        "sharpness": row.sharpness,
         "clipped": row.clipped,
         "group": row.group,
         "best": row.best,
@@ -270,31 +676,42 @@ fn binding_hash(revision: u64, reject_below: Option<f32>, pick_best: bool, rows:
     };
     h.u64(pick_best as u64);
     for row in sorted {
-        h.u64(row.id.0).str(&row.source).str(flag_name(row.flag));
+        h.u64(row.id.0).str(&row.file_name).str(&row.source).str(flag_name(row.flag));
         h.u64(row.sharpness.to_bits() as u64).u64(row.clipped.to_bits() as u64);
         h.u64(row.group.unwrap_or(0) as u64).u64(row.best as u64);
         h.str(proposed_flag(&row, reject_below, pick_best).map(flag_name).unwrap_or(""));
+        h.str(&serde_json::to_string(&row.decision).unwrap_or_default());
+        h.str(&serde_json::to_string(&row.uncertainty).unwrap_or_default());
+        h.str(&serde_json::to_string(&row.reason_codes).unwrap_or_default());
     }
     h.finish().to_string()
 }
 
 fn proposal_value(s: &Session, rows: &[CullRow], reject_below: Option<f32>, pick_best: bool) -> Value {
+    proposal_value_revision(s.catalog.revision, rows, reject_below, pick_best)
+}
+
+fn proposal_value_revision(revision: u64, rows: &[CullRow], reject_below: Option<f32>, pick_best: bool) -> Value {
     let photos: Vec<Value> = rows.iter().map(|row| row_json(row, reject_below, pick_best)).collect();
     json!({
         "version": PROPOSAL_VERSION,
-        "catalogRevision": s.catalog.revision,
+        "catalogRevision": revision,
         "policy": {"rejectBelow": reject_below, "pickBest": pick_best},
         "photos": photos,
-        "binding": binding_hash(s.catalog.revision, reject_below, pick_best, rows),
+        "binding": binding_hash(revision, reject_below, pick_best, rows),
     })
 }
 
 fn proposal_result(s: &Session, rows: &[CullRow], failed: Vec<Value>, reject_below: Option<f32>, pick_best: bool) -> Value {
+    proposal_result_revision(s.catalog.revision, rows, failed, reject_below, pick_best)
+}
+
+fn proposal_result_revision(revision: u64, rows: &[CullRow], failed: Vec<Value>, reject_below: Option<f32>, pick_best: bool) -> Value {
     let photos: Vec<Value> = rows.iter().map(|row| row_json(row, reject_below, pick_best)).collect();
     let rejected = rows.iter().filter(|row| proposed_flag(row, reject_below, pick_best) == Some(Flag::Reject)).count();
     let picked = rows.iter().filter(|row| proposed_flag(row, reject_below, pick_best) == Some(Flag::Pick)).count();
     let groups = rows.iter().filter_map(|row| row.group).collect::<std::collections::HashSet<_>>().len();
-    json!({"photos": photos, "groups": groups, "rejected": rejected, "picked": picked, "failed": failed, "proposal": proposal_value(s, rows, reject_below, pick_best)})
+    json!({"photos": photos, "groups": groups, "rejected": rejected, "picked": picked, "failed": failed, "proposal": proposal_value_revision(revision, rows, reject_below, pick_best)})
 }
 
 fn cull_suggest(s: &mut Session, p: &Value) -> Result<Value> {
@@ -305,93 +722,9 @@ fn cull_suggest(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn cull_apply(s: &mut Session, p: &Value) -> Result<Value> {
-    const C: &str = "photo.cullApply";
-    let proposal_arg = p.get("proposal").ok_or_else(|| super::bad(C, "missing `proposal`"))?;
-    let proposal = proposal_arg.get("version").map_or_else(
-        || proposal_arg.get("proposal").ok_or_else(|| super::bad(C, "`proposal` must be a cull proposal or cullSuggest result")),
-        |_| Ok(proposal_arg),
-    )?;
-    let version = proposal.get("version").and_then(Value::as_u64).ok_or_else(|| super::bad(C, "proposal version is missing or invalid"))?;
-    if version != PROPOSAL_VERSION {
-        return Err(super::bad(C, "unsupported proposal version"));
-    }
-    let revision =
-        proposal.get("catalogRevision").and_then(Value::as_u64).ok_or_else(|| super::bad(C, "proposal catalog revision is missing or invalid"))?;
-    if revision != s.catalog.revision {
-        return Err(super::bad(C, "stale culling proposal: catalog changed"));
-    }
-    let binding = proposal.get("binding").and_then(Value::as_str).ok_or_else(|| super::bad(C, "proposal binding is missing or invalid"))?;
-    if lightcraft_preview::Hash128::parse(binding).is_none() {
-        return Err(super::bad(C, "proposal binding is invalid"));
-    }
-    let policy = proposal.get("policy").and_then(Value::as_object).ok_or_else(|| super::bad(C, "proposal policy is missing or invalid"))?;
-    if !policy.contains_key("rejectBelow") || !policy.contains_key("pickBest") || policy.keys().any(|key| key != "rejectBelow" && key != "pickBest") {
-        return Err(super::bad(C, "proposal policy fields are invalid"));
-    }
-    let (reject_below, pick_best) = strict_policy(&Value::Object(policy.clone()), C)?;
-    let photo_values = proposal.get("photos").and_then(Value::as_array).ok_or_else(|| super::bad(C, "proposal photos are missing or invalid"))?;
-    if photo_values.len() > lightcraft_pipeline::cull::report::MAX_MEASUREMENTS {
-        return Err(super::bad(C, "too many culling proposal photos"));
-    }
-    let mut ids = Vec::with_capacity(photo_values.len());
-    let mut seen_ids = std::collections::HashSet::with_capacity(photo_values.len());
-    for photo in photo_values {
-        let o = photo.as_object().ok_or_else(|| super::bad(C, "proposal photo must be an object"))?;
-        let id = o.get("id").and_then(Value::as_u64).map(PhotoId).ok_or_else(|| super::bad(C, "proposal photo id is invalid"))?;
-        if !seen_ids.insert(id) {
-            return Err(super::bad(C, format!("duplicate proposal photo id {}", id.0)));
-        }
-        ids.push(id);
-        let _ = o.get("source").and_then(Value::as_str).ok_or_else(|| super::bad(C, "proposal photo source is invalid"))?;
-        let _ = parse_flag(o.get("flag").ok_or_else(|| super::bad(C, "proposal photo flag is missing"))?, C, "flag")?;
-        if let Some(v) = o.get("proposedFlag")
-            && !v.is_null()
-        {
-            let _ = parse_flag(v, C, "proposedFlag")?;
-        }
-    }
-    let accept = p.get("accept").and_then(Value::as_array).ok_or_else(|| super::bad(C, "`accept` must be an array of {id, flag}"))?;
-    if accept.len() > lightcraft_pipeline::cull::report::MAX_MEASUREMENTS {
-        return Err(super::bad(C, "too many accepted culling photos"));
-    }
-    let mut accepted = std::collections::BTreeMap::new();
-    for item in accept {
-        let o = item.as_object().ok_or_else(|| super::bad(C, "each accepted item must be an object"))?;
-        let id = o.get("id").and_then(Value::as_u64).map(PhotoId).ok_or_else(|| super::bad(C, "accepted photo id is invalid"))?;
-        if accepted.insert(id, parse_flag(o.get("flag").ok_or_else(|| super::bad(C, "accepted flag is missing"))?, C, "flag")?).is_some() {
-            return Err(super::bad(C, format!("duplicate accepted photo id {}", id.0)));
-        }
-    }
-    let (rows, failed) = measure(s, &ids, C, reject_below, pick_best)?;
-    if !failed.is_empty() {
-        return Err(super::bad(C, "stale culling proposal: a proposed photo can no longer be measured"));
-    }
-    let actual = proposal_value(s, &rows, reject_below, pick_best);
-    if actual.get("binding") != Some(&Value::String(binding.to_string())) || actual.get("photos") != proposal.get("photos") {
-        return Err(super::bad(C, "stale culling proposal: source, flags or measurements changed"));
-    }
-    let rows_by_id: std::collections::HashMap<PhotoId, &CullRow> = rows.iter().map(|row| (row.id, row)).collect();
-    let mut ops = Vec::new();
-    for (id, flag) in accepted {
-        let Some(row) = rows_by_id.get(&id) else {
-            return Err(super::bad(C, format!("accepted photo id {} is not in proposal", id.0)));
-        };
-        let expected =
-            proposed_flag(row, reject_below, pick_best).ok_or_else(|| super::bad(C, format!("photo {} has no pending cull suggestion", id.0)))?;
-        if flag != expected {
-            return Err(super::bad(C, format!("accepted flag for photo {} does not match proposal", id.0)));
-        }
-        if row.flag != Flag::None {
-            return Err(super::bad(C, format!("photo {} already has a flag", id.0)));
-        }
-        ops.push(Op::SetFlag { id, flag });
-    }
-    if !ops.is_empty() {
-        let count = ops.len();
-        s.commit("Accept Assisted Culling", Op::Batch { ops })?;
-        return Ok(json!({"accepted": count}));
-    }
-    Ok(json!({"accepted": 0}))
+    let prepared = s.plan_cull_apply(p)?;
+    let result = prepared.job.run(&|_, _| true).map_err(|message| super::bad("photo.cullApply", message))?;
+    s.finish_cull_apply(prepared, result)
 }
 
 fn analyze(s: &mut Session, p: &Value) -> Result<Value> {
@@ -560,4 +893,36 @@ pub fn specs() -> Vec<CommandSpec> {
             cull_suggest
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_result_keeps_raw_sharpness_at_reject_cutoff() {
+        let mut session = Session::with_demo();
+        let id = session.visible_cloned()[0];
+        let job = session.plan_cull_job(&[id], Some(50.0), false).unwrap();
+        let snapshot = &job.photos[0];
+        let sharpness = 49.96_f32;
+        let row = CullRow {
+            id,
+            file_name: snapshot.file_name.clone(),
+            sharpness,
+            clipped: 0.0,
+            source: snapshot.source.clone(),
+            flag: snapshot.flag,
+            group: None,
+            best: false,
+            decision: lightcraft_pipeline::cull::report::Decision::Reject,
+            uncertainty: lightcraft_pipeline::cull::report::Uncertainty::Low,
+            reason_codes: vec![lightcraft_pipeline::cull::report::ReasonCode::BelowRejectThreshold],
+        };
+        let value = proposal_result_revision(job.catalog_revision, &[row], Vec::new(), Some(50.0), false);
+        assert_eq!(value["proposal"]["photos"][0]["sharpness"].as_f64().map(|v| v as f32), Some(sharpness));
+        assert_eq!(value["proposal"]["photos"][0]["proposedFlag"], "reject");
+        let result = CullJobResult { catalog_revision: job.catalog_revision, value };
+        validate_worker_result(&job, result.value).unwrap();
+    }
 }

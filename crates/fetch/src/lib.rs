@@ -43,6 +43,31 @@ pub struct FileSpec<'a> {
     pub max: u64,
 }
 
+/// Verify already-read bytes so callers parse exactly what was hashed, without reopening files.
+pub fn verify_bytes(spec: &FileSpec<'_>, bytes: &[u8]) -> Result<bool, String> {
+    validate_files(std::slice::from_ref(spec)).map_err(|error| error.to_string())?;
+    let size = u64::try_from(bytes.len()).map_err(|_| "byte length exceeds verification limit".to_string())?;
+    if size > spec.max || spec.size.is_some_and(|expected| expected != size) {
+        return Ok(false);
+    }
+    Ok(spec.sha256.is_none_or(|expected| format!("{:x}", Sha256::digest(bytes)) == expected))
+}
+
+#[cfg(test)]
+mod byte_verification_tests {
+    use super::{FileSpec, verify_bytes};
+
+    #[test]
+    fn verifies_exact_bytes_size_hash_and_spec() {
+        let spec =
+            FileSpec { name: "model.bin", size: Some(3), max: 3, sha256: Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") };
+        assert!(verify_bytes(&spec, b"abc").unwrap());
+        assert!(!verify_bytes(&spec, b"abd").unwrap());
+        assert!(!verify_bytes(&spec, b"abcd").unwrap());
+        assert!(verify_bytes(&FileSpec { max: 0, ..spec }, b"abc").is_err());
+    }
+}
+
 /// Most mirrors used (a hostile list can't make a download loop forever).
 const MAX_MIRRORS: usize = 16;
 /// Redirects followed per request.

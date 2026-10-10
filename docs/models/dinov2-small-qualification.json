@@ -1,0 +1,163 @@
+{
+  "schema": "ember.model-qualification/v1",
+  "status": "research-only-unqualified",
+  "observed_at": "2026-10-10",
+  "candidate": {
+    "family": "DINOv2",
+    "variant": "dinov2_vits14",
+    "purpose": "optional image-embedding similarity evidence for burst reranking",
+    "not_a": [
+      "aesthetic score",
+      "face detector",
+      "blink classifier",
+      "focus or blur classifier",
+      "automatic keeper/reject decision"
+    ]
+  },
+  "source_revision": {
+    "repository": "https://github.com/facebookresearch/dinov2",
+    "commit": "7764ea0f912e53c92e82eb78a2a1631e92725fc8",
+    "commit_date": "2026-06-03",
+    "model_card": "https://github.com/facebookresearch/dinov2/blob/7764ea0f912e53c92e82eb78a2a1631e92725fc8/MODEL_CARD.md",
+    "backbone_source": "https://raw.githubusercontent.com/facebookresearch/dinov2/7764ea0f912e53c92e82eb78a2a1631e92725fc8/dinov2/hub/backbones.py",
+    "architecture_source": "https://raw.githubusercontent.com/facebookresearch/dinov2/7764ea0f912e53c92e82eb78a2a1631e92725fc8/dinov2/models/vision_transformer.py",
+    "input_transform_source": "https://raw.githubusercontent.com/facebookresearch/dinov2/7764ea0f912e53c92e82eb78a2a1631e92725fc8/dinov2/data/transforms.py"
+  },
+  "weight_artifact": {
+    "url": "https://dl.fbaipublicfiles.com/dinov2/dinov2_vits14/dinov2_vits14_pretrain.pth",
+    "format": "PyTorch .pth state_dict",
+    "bytes": 88283115,
+    "mib_2_pow_20": 84.19,
+    "headers_observed_at": "2026-10-10",
+    "last_modified": "2023-04-13T22:01:20Z",
+    "etag": "0bd1417efc23bdb1d69200156f5a22bc-11",
+    "sha256": null,
+    "sha256_status": "not published by pinned repository or observed artifact headers",
+    "pin_rule": "ETag and Last-Modified are transport metadata, not immutable byte pins; capture SHA-256 before any use or packaging",
+    "training_data": "LVD-142M; not shipped with Ember",
+    "saved_for_this_record": false
+  },
+  "licensing": {
+    "model_and_weight_notice": "Apache-2.0",
+    "basis": "Pinned model card labels model License Apache License 2.0; repository LICENSE is Apache-2.0",
+    "license_source": "https://github.com/facebookresearch/dinov2/blob/7764ea0f912e53c92e82eb78a2a1631e92725fc8/LICENSE",
+    "separate_binary_notice": "not found in pinned model card or repository source reviewed",
+    "data_terms": "LVD-142M training data terms are separate and no training data is redistributed",
+    "attribution_gate": "retain pinned model card, repository license, artifact URL, byte count and captured SHA-256 in attribution before packaging"
+  },
+  "input_contract": {
+    "channels": "RGB",
+    "tensor_layout": "NCHW",
+    "tensor_range_before_normalize": "ToTensor-style [0,1]",
+    "normalize_mean": [0.485, 0.456, 0.406],
+    "normalize_std": [0.229, 0.224, 0.225],
+    "patch_size_px": 14,
+    "source_eval_224": {
+      "resize_size_px": 256,
+      "resize_interpolation": "bicubic",
+      "crop": "center crop 224x224",
+      "source": "pinned input_transform_source"
+    },
+    "source_architecture_default": {
+      "img_size_px": 518,
+      "note": "hub constructor default only; it does not define an Ember photo-crop policy"
+    },
+    "larger_input_rule": "model card permits dimensions divisible by 14; nonmultiples are cropped to closest smaller multiple",
+    "qualification_conditions": [
+      "224x224 using exact pinned classification evaluation transform",
+      "518x518 as separate condition with transform frozen and recorded before comparison"
+    ],
+    "crop_warning": "224 and 518 are separate preprocessing conditions, not equivalent inputs; center crops can remove faces, blink evidence or intentional blur context"
+  },
+  "model_contract": {
+    "parameters_reported": "21M",
+    "embedding_dim": 384,
+    "depth": 12,
+    "heads": 6,
+    "mlp_ratio": 4,
+    "qkv_bias": true,
+    "ffn_bias": true,
+    "proj_bias": true,
+    "layerscale_init_values": 1.0,
+    "activation": "GELU",
+    "block_chunks": 0,
+    "patch_projection": "Conv2d, kernel and stride 14",
+    "position_encoding": "learned class-plus-patch table with bicubic interpolation for other grids; interpolate_offset 0.1 and antialias false in pinned non-register hub path",
+    "tokens": {
+      "register_variant": "none",
+      "224": "1 CLS + 256 patch tokens",
+      "518": "1 CLS + 1369 patch tokens"
+    },
+    "output": "final LayerNorm class token plus patch tokens; source does not return a quality score",
+    "similarity_operation": "qualification may L2-normalize 384-D CLS embeddings then compute cosine; this is evaluator logic, not a learned aesthetic prediction"
+  },
+  "applicability": {
+    "supported_use": "nearest-neighbor or pairwise visual similarity as optional burst evidence",
+    "evidence": "pinned model card lists image retrieval using nearest neighbors",
+    "not_supported_as_claim": [
+      "aesthetic ranking",
+      "technical image quality",
+      "face quality",
+      "blink detection",
+      "intentional blur preservation"
+    ],
+    "style_and_blur_policy": "treat similarity behavior on personal style, motion blur, shallow depth of field and soft focus as unknown; retain classical scores and human review; model must not set catalog.best or reject an image",
+    "Ember_latency": "UNMEASURED",
+    "Ember_heldout_accuracy": "UNMEASURED",
+    "paper_metrics": "model-card ImageNet and Oxford-H metrics are separate tasks and must not be reported as Ember or burst accuracy"
+  },
+  "candle_port": {
+    "existing_dependencies": [
+      "candle-core = 0.9.2",
+      "candle-nn = 0.9.2"
+    ],
+    "new_dependencies_required": false,
+    "reuse": [
+      "Candle Tensor, Device, Module and LayerNorm operations",
+      "existing segment safetensors VarBuilder and verified-weight plumbing",
+      "existing Metal feature path on macOS and CPU fallback path"
+    ],
+    "checkpoint_boundary": "official artifact is PyTorch .pth; existing segment loader expects safetensors, so conversion and tensor-name/shape audit are qualification work; no conversion was performed here",
+    "operator_inventory": [
+      "Conv2d patch projection",
+      "class token and learned position table",
+      "bicubic position interpolation",
+      "LayerNorm",
+      "QKV and output Linear projections",
+      "scaled dot-product attention",
+      "GELU MLP",
+      "LayerScale and residual additions",
+      "reshape, transpose, concat and L2 normalization"
+    ],
+    "existing_segment_difference": "segment/src/vit.rs is SAM3-specific: 32 layers, 1024 hidden, 16 heads, 1008px input, 2-D axial RoPE, window/global attention and convolutional feature output; DINOv2-S/14 is a separate 12-layer, 384-D, 6-head class-token ViT and is not a drop-in replacement",
+    "platform_reality": {
+      "macOS_Metal": "existing Candle Metal route can be reused in principle; operator support, memory and latency are UNMEASURED",
+      "Windows_CPU": "existing Candle CPU route can be reused in principle; memory and latency are UNMEASURED",
+      "selection_rule": "measure both paths on held-out bursts before any product selection; do not infer suitability from architecture alone"
+    }
+  },
+  "qualification_gate": {
+    "state": "blocked_pending_artifact_hash_and_measurement",
+    "required_before_use": [
+      "obtain artifact under approved license review",
+      "capture SHA-256 and verify exact 88283115-byte artifact",
+      "convert or obtain an equivalent safetensors representation without adding runtime dependencies",
+      "compare reference outputs for 224 and 518 preprocessing separately",
+      "label held-out bursts for technical keeper, intentional-style keeper and tie/uncertain",
+      "measure pairwise accuracy, tie coverage, blur-preservation rate, p50/p95 Metal and Windows CPU latency, peak memory and cold/warm costs",
+      "require abstention on low margin or disagreement; retain baseline order"
+    ],
+    "no_ship_claim": "this record qualifies a candidate for an experiment; it does not qualify model accuracy or a shipped feature"
+  },
+  "minimal_implementation_task": {
+    "scope": "offline evaluator only; no catalog, pipeline or dependency edits",
+    "steps": [
+      "Add a separate DINOv2-S/14 module beside, not inside, SAM3 ViT code using existing Candle 0.9.2 dependencies",
+      "load only a SHA-256-verified converted artifact through existing weight plumbing",
+      "implement exact patch embedding, class token, position interpolation and 12 standard blocks from pinned source",
+      "emit final-normalized 384-D CLS embedding and cosine pair scores for 224 and 518 conditions",
+      "compare against existing 8x8 luma signature on held-out bursts; expose score and uncertainty as review evidence only"
+    ],
+    "acceptance": "reference parity, artifact hash, license record and platform measurements are recorded before any consideration of shipping"
+  }
+}

@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom';
 import { acknowledgePreview, cancelMergePreview, convertFileSrc, requestMergePreview } from '../api';
 import { useDesktop } from '../desktop';
 import { ImportCandidatePreview } from '../preview/ImportCandidatePreview';
+import { CullReviewDialog } from './CullReviewDialog';
 import type { DesktopContextValue, DialogState, JsonObject, MergePreviewDescriptor, UiState } from '../types';
 import './dialogs.css';
 
@@ -1001,6 +1002,7 @@ export default function DialogHost({ desktop: provided }: HostProps = {}) {
   if (kind === 'import' || kind === 'importphotos' || kind === 'importfolder' || kind === 'importdevice') return <ImportDialog d={dialog} desktop={context} />;
   if (kind === 'lightroom' || kind === 'lightroomimport' || kind === 'importlightroom') return <LightroomDialog d={dialog} desktop={context} />;
   if (kind === 'export') return <ExportDialog d={dialog} desktop={context} />;
+  if (kind === 'cull') return <CullReviewDialog desktop={context} photoIds={arr(dialog.params?.ids).length ? arr(dialog.params?.ids).filter((id): id is number => Number.isSafeInteger(id)) : context.snapshot?.selection} onClose={() => context.setDialog(null)} />;
   if (kind === 'importprogress' || kind === 'exportprogress' || kind.endsWith('progress')) return <JobDialog kind={kind} d={dialog} desktop={context} />;
   if (kind === 'merge.hdr' || kind === 'merge.panorama' || kind === 'merge.hdrpanorama') return <MergeDialog kind={dialog.kind} d={dialog} desktop={context} />;
   if (kind === 'newalbum') return <AlbumDialog folder={false} d={dialog} desktop={context} />;

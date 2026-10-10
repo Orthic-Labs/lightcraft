@@ -15,7 +15,7 @@ React/Tauri targets **macOS & Windows**. Existing egui, Linux, web/WASM & CLI ho
 
 ## Auto, masks & AI
 
-Local Auto uses image statistics & deterministic processing; Adobe Auto quality parity is not established. Local culling uses focus/burst heuristics, with read-only proposals & explicit undoable acceptance through engine commands. [Culling evaluation](docs/culling-evaluation.md) defines shoot-level labels, CLI scoring & proposed qualification targets. Denoise is classical processing. Optional [SAM 3 masking](docs/ai-masks.md) requires separately acquired model weights under Meta’s licence.
+Local Auto uses image statistics & deterministic processing; Adobe Auto quality parity is not established. Culling source adds cancellable background analysis, paged review & explicit undoable acceptance. [Culling evaluation](docs/culling-evaluation.md) defines shoot-level labels, CLI scoring & proposed qualification targets. Experimental YuNet/Candle face inference & [Personal Auto](docs/personal-auto-evaluation.md) training/evaluation remain unqualified. Denoise is classical processing. Optional [SAM 3 masking](docs/ai-masks.md) requires separately acquired model weights under Meta’s licence.
 
 [OpenRouter photo assessment](crates/photo-ai/README.md) is an opt-in experiment for bounded, read-only model comparisons. It produces proposals, does not apply edits or delete/reject photos, & has no validated provider winner. Credentials & real-photo evaluation are separate from this branding change.
 

@@ -122,6 +122,12 @@ cannot pass.
 * Cold-start honesty: weak-label result is reported as style transfer only; no claim of improved
   personal preference is allowed until Ember-groundtruth thresholds pass on held-out shoots.
 
+## Source harness
+
+`crates/pipeline/src/personal_auto.rs` implements deterministic float64 ridge residuals for contrast, vibrance & saturation. Fixed 16-feature extraction uses pipeline pixels/WB plus deterministic `baseline.exposure`; camera identifiers never enter features. Models record schema, train shoots, manifest identity, label sources/counts & experimental status. Missing fields are skipped, settings are bounded, malformed models fall back to baseline.
+
+CLI `ai personal train --manifest FILE --out NEW_MODEL` & `ai personal evaluate --manifest FILE --model FILE --out NEW_REPORT` operate offline on explicit numeric manifests. Canonical synthetic example: [`minimal.json`](../tests/fixtures/personal-auto/minimal.json). Separate weak/Ember variants report numeric edit distance by photo, shoot, split & camera. This source has no rendered comparison, preference votes, production Auto replacement or automatic promotion.
+
 ## Rollout gate
 
 Run all three variants offline in shadow mode against immutable manifest. Release candidate
