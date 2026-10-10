@@ -19,7 +19,7 @@ pub const MODEL_SCHEMA: &str = "lightcraft.personal-auto.v2";
 /// to source facts/settings; it is an integrity identity, not proof of source ownership.
 pub const BASELINE_RECEIPT_SCHEMA: &str = "lightcraft.personal-auto.baseline-receipt.v2";
 /// Bump when deterministic Auto or baseline preparation semantics change.
-pub const BASELINE_AUTO_REVISION: &str = "lightcraft.deterministic-auto.v1";
+pub const BASELINE_AUTO_REVISION: &str = crate::auto::REVISION;
 /// Serialized model version.
 pub const MODEL_VERSION: u32 = 3;
 /// Serialized split-manifest schema.

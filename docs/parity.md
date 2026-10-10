@@ -230,7 +230,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 
 | Id | Feature | Tier | Status | Evidence | Missing / notes |
 |---|---|---|---|---|---|
-| LR-EDIT-AUTO | Auto settings | P0 | 🟡 | `cmd:develop.auto`, `cmd:ai.models`, `cmd:ai.schema`, `cmd:ai.validate`, `crates/pipeline/src/auto.rs`, `crates/photo-ai/README.md` | Eight sliders & one-step undo work; scene-key/backlight-aware tone rules & content-dependent colour adjustments, with procedural rendered-output regressions. Experimental read-only OpenRouter CLI comparison produces current Auto/model renders & typed receipts; no cloud recipe is applied to libraries. Model quality and Auto quality are not yet qualified. |
+| LR-EDIT-AUTO | Auto settings | P0 | 🟡 | `cmd:develop.auto`, `cmd:ai.models`, `cmd:ai.schema`, `cmd:ai.validate`, `crates/pipeline/src/auto.rs`, `crates/photo-ai/README.md` | Eight sliders & one-step undo work; deterministic & closed-loop ([`docs/auto-tone.md`](auto-tone.md)): exposure sets the key from the centre-weighted scene median (half frame, half central ellipse: spatially sensitive like Lightroom's) with continuous low-key / high-key / backlit weights (no branches, so burst frames across a threshold agree), then contrast / highlights / shadows / whites / blacks are fitted against a model of the real tone stage (the source kind's tone map plus finish's highlight/shadow offsets) with fixed-order coordinate descent; content-dependent colour adjustments; procedural rendered-output regressions incl. repeat stability & burst continuity. Experimental read-only OpenRouter CLI comparison produces current Auto/model renders & typed receipts; no cloud recipe is applied to libraries. Model quality and Auto quality are not yet qualified. |
 | LR-EDIT-BW | Black & white | P0 | ✅ | `cmd:develop.treatment` | |
 | LR-EDIT-HDR-MODE | HDR editing | P2 | ⬜ | | |
 | LR-EDIT-LIGHT-EXPOSURE | Exposure | P0 | ✅ | `ctl:light.exposure` | |
@@ -244,7 +244,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 | LR-EDIT-LIGHT-CURVE-RGB | Per-channel curves | P0 | ✅ | `cmd:develop.curve` (`channel`) | |
 | LR-EDIT-LIGHT-CURVE-REFINESAT | Curve saturation compensation | P1 | ✅ | `ctl:curve.refineSaturation` | |
 | LR-EDIT-LIGHT-CURVE-TAT | Drag-on-image curve adjust | P1 | ✅ | `cmd:develop.targeted` (`target: curve`) | |
-| LR-EDIT-COLOR-WB-PRESET | White-balance presets | P0 | ✅ | `cmd:develop.wb` | |
+| LR-EDIT-COLOR-WB-PRESET | White-balance presets | P0 | ✅ | `cmd:develop.wb`, `crates/pipeline/src/auto.rs` | Auto = mid-tone grey-world with a strong low-chroma preference (a coloured surface filling most of the frame still loses to the neutrals), tint held within ±60 of the illuminant locus; the picker uses the exact, unbounded estimate ([`docs/auto-tone.md`](auto-tone.md)) |
 | LR-EDIT-COLOR-WB-PICKER | White-balance eyedropper | P0 | ✅ | `cmd:tool.wbPicker`, `cmd:develop.wbPick` | no magnified loupe while picking |
 | LR-EDIT-COLOR-TEMP | Temperature | P0 | ✅ | `ctl:wb.temp` | relative scale for non-raw in the UI |
 | LR-EDIT-COLOR-TINT | Tint | P0 | ✅ | `ctl:wb.tint`, `docs/tint-direction.md` | DNG / Lightroom sign: negative (left) adds green, positive (right) magenta; XMP `crs:Tint` values render as in Lightroom (issue #188); CPU/GPU regression tests |
@@ -260,7 +260,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 | LR-EDIT-EFFECTS-VIGNETTE | Post-crop vignette | P0 | ✅ | `ctl:vignette.*`, `crates/pipeline/src/finish.rs`, `crates/ui-egui/src/panels/edit.rs` | style picker (Highlight / Color / Paint) in the Effects section |
 | LR-EDIT-EFFECTS-GRAIN | Grain | P1 | ✅ | `ctl:grain.*` | |
 | LR-EDIT-DETAIL-SHARPEN | Sharpening | P0 | ✅ | `ctl:detail.sharpenAmount`, `ctl:detail.sharpenRadius`, `ctl:detail.sharpenDetail`, `ctl:detail.sharpenMasking` | no Alt-drag mask preview |
-| LR-EDIT-DETAIL-NR | Luminance noise reduction | P0 | ✅ | `ctl:detail.nrLuminance`, `ctl:detail.nrDetail`, `ctl:detail.nrContrast` | |
+| LR-EDIT-DETAIL-NR | Luminance noise reduction | P0 | ✅ | `ctl:detail.nrLuminance`, `ctl:detail.nrDetail`, `ctl:detail.nrContrast`, `cmd:develop.autoNoise`, `crates/pipeline/src/noise.rs` | guided filter of log luminance (CPU + GPU); Photo ▸ Auto Noise Reduction measures the photo's noise (signal-dependent model fitted on flat tiles of the original, [`docs/noise-reduction.md`](noise-reduction.md)) & sets luminance + colour NR deterministically, ISO as fallback; `dryRun` returns the estimate |
 | LR-EDIT-DETAIL-CNR | Colour noise reduction | P0 | ✅ | `ctl:detail.nrColor`, `ctl:detail.nrColorDetail`, `ctl:detail.nrColorSmoothness` | |
 | LR-EDIT-DETAIL-DENOISE | AI denoise | P2 | ⬜ | | settings field reserved, not rendered |
 | LR-EDIT-DETAIL-RAWDETAILS | Improved demosaic toggle | P2 | ⬜ | | |
@@ -372,7 +372,8 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 | LR-PRE-CREATE | Create preset | P0 | ✅ | `cmd:dialog.createPreset`, `cmd:preset.create` (`groups`) | name, group and a checklist of settings groups (crop, masks, remove, red eye off by default; All / None) |
 | LR-PRE-MANAGE | Manage presets | P1 | ✅ | `cmd:preset.delete`, `cmd:preset.favorite`, `cmd:preset.import`, `cmd:preset.export`, `cmd:preset.rename`, `cmd:preset.update`, `cmd:preset.move` | rename, update with current settings, move to a group (existing or new); no hiding of groups |
 | LR-PRE-AMOUNT | Preset amount | P1 | ✅ | `cmd:preset.apply` (`amount` 0–200) | |
-| LR-PRE-ADAPTIVE | Adaptive presets | P2 | ⬜ | | |
+| LR-PRE-ADAPTIVE | Adaptive presets | P2 | ⬜ | | Lightroom's adaptive presets are AI-mask presets (LR-MASK-SUBJECT…); Ember's adaptive *tone* preset is the look target below |
+| LR-PRE-LOOKTARGET | Look targets (Ember) | P1 | ✅ | `cmd:develop.applyLook`, `crates/pipeline/src/look.rs`, `apps/lightcraft-cli/src/main.rs` | `lightcraft-cli look extract SAMPLES… -o look.json` measures what finished sample renders have in common (tone percentiles, clip share, Oklab chroma; median across samples); `develop.applyLook` refits a photo's eight Auto values toward those statistics, exposure settled against the real render, one undo step, `dryRun` ([`docs/look-targets.md`](look-targets.md)); no hue / split-tone / curve transfer, no batch `ids` yet |
 | LR-PRE-PREMIUM | Built-in presets (own) | P2 | ✅ | `crates/engine/src/presets.rs` | 41 own-authored presets in 10 groups (Color, Film, B&W incl. toners, Portrait, Landscape, Urban, Food, Seasons, Vintage, Style) |
 | LR-PRE-RECOMMENDED | Community recommendations | OOS | 🚫 | | |
 | LR-PRE-ONIMPORT | Apply during import | P2 | ✅ | `cmd:library.import` (`preset`) | chosen in the import review; raw / per-camera defaults in Settings |
@@ -601,7 +602,7 @@ visible menu bar yet: the menu model is only exposed through the control channel
 | MENU-PHOTO-STACK | Stack submenu | P1 | ✅ | `cmd:stack.group`, `cmd:stack.ungroup`, `cmd:dialog.autoStack` | |
 | MENU-PHOTO-MERGE | Photo merge submenu | P2 | ✅ | `cmd:dialog.mergeHdr`, `cmd:dialog.mergePanorama`, `cmd:dialog.mergeHdrPanorama`, `cmd:merge.hdrLast` | |
 | MENU-PHOTO-ENHANCE | Enhance… | P2 | ⬜ | | |
-| MENU-PHOTO-AUTO | Auto settings | P0 | ✅ | `cmd:develop.auto` | |
+| MENU-PHOTO-AUTO | Auto settings | P0 | ✅ | `cmd:develop.auto` | followed by Auto Noise Reduction (`cmd:develop.autoNoise`, Ember-only) |
 | MENU-PHOTO-BW | Convert to B&W | P0 | ✅ | `cmd:develop.treatment` | |
 | MENU-PHOTO-RESET | Reset edits / crop | P0 | ✅ | `cmd:develop.reset`, `cmd:crop.reset` | |
 | MENU-PHOTO-UPDATEAI | Update AI settings | P2 | ⬜ | | |

@@ -184,12 +184,21 @@ fn ordinary_underexposed_auto_reaches_middle_exposure_in_render() {
     let a = auto_tone(&src, &SourceInfo::default(), &DevelopSettings::default());
     let median = median_after(&src, a);
     let pixels = output_luma(&auto_render(&src));
-    let legacy = output_luma(&render_with(&src, &legacy_settings(&src)));
+    let legacy_settings = legacy_settings(&src);
+    let legacy = output_luma(&render_with(&src, &legacy_settings));
+    let clipped = |v: &[f32]| v.iter().filter(|v| **v > 0.98).count() as f32 / v.len() as f32;
+    // reaches middle grey (the legacy rule left a bias), lifts the mid-tones at least as much
+    // as the legacy rule, and clips no more of the bright wall than it did
+    let mid = |v: &[f32]| v.iter().filter(|v| (0.1..0.98).contains(*v)).sum::<f32>() / v.len() as f32;
     assert!(
-        median > -0.25 && mean(&pixels) > mean(&legacy) + 0.02,
-        "median {median:.2}, mean {:.3}/{:.3}, settings {a:?}",
+        median > -0.25 && a.exposure > legacy_settings.light.exposure + 0.2 && mid(&pixels) >= mid(&legacy) && clipped(&pixels) <= clipped(&legacy),
+        "median {median:.2}, mean {:.3}/{:.3}, mid {:.3}/{:.3}, clipped {:.3}/{:.3}, settings {a:?}",
         mean(&pixels),
-        mean(&legacy)
+        mean(&legacy),
+        mid(&pixels),
+        mid(&legacy),
+        clipped(&pixels),
+        clipped(&legacy)
     );
 }
 
@@ -286,4 +295,104 @@ fn invalid_pixels_never_make_auto_non_finite() {
 fn empty_input_returns_neutral_finite_settings() {
     let a = auto_tone(&Rgb32f::new(0, 0), &SourceInfo::default(), &DevelopSettings::default());
     assert_eq!(a, AutoTone::default());
+}
+
+#[test]
+fn auto_is_a_pure_function_of_its_input() {
+    for src in [low_key_scene(), ordinary_underexposed_scene(), high_key_scene(), backlit_scene()] {
+        let a = auto_tone(&src, &SourceInfo::default(), &DevelopSettings::default());
+        let b = auto_tone(&src, &SourceInfo::default(), &DevelopSettings::default());
+        assert_eq!(a, b);
+        let raw = SourceInfo { raw: true, ..Default::default() };
+        assert_eq!(auto_tone(&src, &raw, &DevelopSettings::default()), auto_tone(&src, &raw, &DevelopSettings::default()));
+    }
+}
+
+#[test]
+fn burst_frames_across_a_key_threshold_get_nearly_the_same_auto() {
+    // Two frames of one burst, 6 % apart in brightness, straddling the low-key boundary
+    // (median −1.35 EV). A branch on that boundary moved exposure by almost a stop between them.
+    let scale = |g: f32| {
+        let mut s = low_key_scene();
+        s.map_in_place(|p| p.map(|v| v * g));
+        s
+    };
+    let (a, b) = (scale(6.9), scale(7.3));
+    let ta = auto_tone(&a, &SourceInfo::default(), &DevelopSettings::default());
+    let tb = auto_tone(&b, &SourceInfo::default(), &DevelopSettings::default());
+    let ma = percentile(&source_ev(&a), 0.5);
+    let mb = percentile(&source_ev(&b), 0.5);
+    assert!(ma < -1.35 && mb > -1.35, "frames should straddle the threshold: {ma:.2} / {mb:.2}");
+    assert!((ta.exposure - tb.exposure).abs() < 0.3, "exposure jumped across a burst: {ta:?} vs {tb:?}");
+    for (x, y) in
+        [(ta.contrast, tb.contrast), (ta.highlights, tb.highlights), (ta.shadows, tb.shadows), (ta.whites, tb.whites), (ta.blacks, tb.blacks)]
+    {
+        assert!((x - y).abs() <= 12.0, "a shaping slider jumped across a burst: {ta:?} vs {tb:?}");
+    }
+}
+
+#[test]
+fn fitted_sliders_track_the_tone_map_of_the_source_kind() {
+    // The fit reads the real tone map: a raw (Reinhard shoulder, highlight headroom) and a
+    // display-referred source (clips at 1.0) get different recovery for the same bright tail.
+    let src = ordinary_underexposed_scene();
+    let raw = auto_tone(&src, &SourceInfo { raw: true, ..Default::default() }, &DevelopSettings::default());
+    let jpeg = auto_tone(&src, &SourceInfo::default(), &DevelopSettings::default());
+    assert!(jpeg.highlights < raw.highlights, "display source needs more recovery: raw {raw:?}, jpeg {jpeg:?}");
+}
+
+#[test]
+fn auto_is_centre_weighted_and_so_spatially_sensitive() {
+    // A dark subject in the middle of a bright frame: the histogram alone would darken the
+    // frame; the subject should still come up. The same pixels shuffled (same histogram) get a
+    // different Auto, as a spatial Auto must.
+    let framed = Rgb32f::from_fn(64, 64, |x, y| {
+        let (dx, dy) = (x as f32 - 31.5, y as f32 - 31.5);
+        if dx * dx + dy * dy < 14.0 * 14.0 { [0.012, 0.011, 0.01] } else { [0.6, 0.58, 0.55] }
+    });
+    let shuffled = Rgb32f::from_fn(64, 64, |x, y| {
+        let (sx, sy) = ((x * 37 + y * 11) % 64, (x * 5 + y * 23) % 64);
+        framed.get(sx, sy)
+    });
+    let a = auto_tone(&framed, &SourceInfo::default(), &DevelopSettings::default());
+    let b = auto_tone(&shuffled, &SourceInfo::default(), &DevelopSettings::default());
+    assert!(a.exposure > b.exposure + 0.3, "centre subject should weigh more: framed {a:?}, shuffled {b:?}");
+    // a flat frame is unaffected by weighting (every pixel is the same)
+    let flat = Rgb32f::filled(64, 64, [0.05, 0.05, 0.05]);
+    assert_eq!(
+        auto_tone(&flat, &SourceInfo::default(), &DevelopSettings::default()),
+        auto_tone(&flat, &SourceInfo::default(), &DevelopSettings::default())
+    );
+}
+
+#[test]
+fn auto_wb_resists_a_large_coloured_surface_and_holds_tint_near_the_locus() {
+    use super::auto_wb;
+    // a blue-cast scene: 70 % of the frame is a red wall, 30 % a true grey; the cast is the light
+    let cast = [0.8f32, 0.9, 1.25];
+    let scene = Rgb32f::from_fn(64, 64, |x, _| {
+        let base = if x < 45 { [0.5, 0.12, 0.1] } else { [0.2, 0.2, 0.2] };
+        [base[0] * cast[0], base[1] * cast[1], base[2] * cast[2]]
+    });
+    let info = SourceInfo { raw: true, relative_wb: true, ..Default::default() };
+    let (temp, tint) = auto_wb(&scene, &info);
+    let mut s = DevelopSettings::default();
+    s.wb.mode = lightcraft_develop::WbMode::Custom;
+    s.wb.temp = temp;
+    s.wb.tint = tint;
+    let mut corrected = scene.clone();
+    crate::local::white_balance(&mut corrected, &info, &s);
+    let g = corrected.get(60, 10);
+    let spread = (g[0].max(g[1]).max(g[2]) - g[0].min(g[1]).min(g[2])) / g[1];
+    assert!(spread < 0.2, "grey should come out near neutral despite the red wall: {g:?} (temp {temp}, tint {tint})");
+    // a green scene is not a green light: Auto's tint stays bounded, the picker's does not
+    let foliage = Rgb32f::from_fn(32, 32, |_, _| [0.08, 0.3, 0.05]);
+    let (_, tint) = auto_wb(&foliage, &info);
+    assert!(tint.abs() <= 60.0, "{tint}");
+    let (_, exact) = super::neutral_wb(&foliage, &info);
+    assert!(exact > 60.0, "{exact}");
+    // hostile pixels never break it
+    let bad = Rgb32f::from_fn(16, 16, |x, _| if x % 2 == 0 { [f32::NAN, -1.0, f32::INFINITY] } else { [0.2, 0.2, 0.2] });
+    let (t, ti) = auto_wb(&bad, &info);
+    assert!(t.is_finite() && ti.is_finite());
 }
