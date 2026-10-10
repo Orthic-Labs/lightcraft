@@ -682,6 +682,145 @@ fn diagnose_native_viewport_bounce(control: &rightkit_qa::control::Control, scen
     }
 }
 
+// Failure-only macOS probe for stale layout state on an existing DOM node. Each
+// selector gets an isolated replacement in its original parent & sibling slot;
+// no offscreen clone is used as a viewport comparison.
+fn diagnose_same_parent_layout(control: &rightkit_qa::control::Control, scenario: &rightkit_qa::harness::Scenario) {
+    const MAX_EVIDENCE_BYTES: usize = 64 * 1024;
+    static PROBE_NONCE: AtomicU64 = AtomicU64::new(0);
+    let selectors = match scenario.name() {
+        "ipc" => vec![".lc-stage-layout.is-inspector-collapsed"],
+        "scalability" => vec![".lc-grid-spacer", ".lc-grid-window"],
+        _ => return,
+    };
+    let mut trials = Vec::new();
+    for (index, selector) in selectors.iter().enumerate() {
+        let key = format!("__lcSameParentLayoutProbe_{index}");
+        let owner = format!("same-parent:{}:{index}:{}", scenario.name(), PROBE_NONCE.fetch_add(1, Ordering::Relaxed));
+        let setup = format!(
+            r#"return (() => {{
+                const key = {key:?};
+                const owner = {owner:?};
+                if (Object.prototype.hasOwnProperty.call(window, key)) return {{ owned: false, owner, error: 'probe state collision' }};
+                const selector = {selector:?};
+                const state = {{ owner, selector, target: null, samples: [], setupError: null, restoreErrors: [], live: true, timer: null }};
+                const safeError = (error) => String(error && error.stack ? error.stack : error).slice(0, 512);
+                const nodeInfo = (node, target) => {{
+                    if (!node) return {{ present: false }};
+                    const connected = Boolean(node.isConnected);
+                    const parent = target.parent;
+                    const sameParent = Boolean(parent && node.parentElement === parent);
+                    const siblingStable = Boolean(!target.nextSibling || node.nextSibling === target.nextSibling);
+                    if (!connected) return {{ present: true, connected: false, sameParent, siblingStable }};
+                    const rect = node.getBoundingClientRect();
+                    const style = getComputedStyle(node);
+                    const parentRect = parent && parent.isConnected ? parent.getBoundingClientRect() : null;
+                    return {{
+                        present: true,
+                        connected: true,
+                        sameParent,
+                        siblingStable,
+                        identity: node === target.original ? 'original' : node === target.replacement ? 'replacement' : 'other',
+                        parent: parent ? {{ tag: parent.tagName, id: String(parent.id || '').slice(0, 256), className: String(parent.className || '').slice(0, 256), connected: parent.isConnected }} : null,
+                        parentRect: parentRect ? {{ x: parentRect.x, y: parentRect.y, width: parentRect.width, height: parentRect.height, right: parentRect.right, bottom: parentRect.bottom }} : null,
+                        nextSibling: target.nextSibling ? {{ tag: target.nextSibling.tagName, id: String(target.nextSibling.id || '').slice(0, 256), className: String(target.nextSibling.className || '').slice(0, 256) }} : null,
+                        rect: {{ x: rect.x, y: rect.y, width: rect.width, height: rect.height, right: rect.right, bottom: rect.bottom }},
+                        inline: String(node.getAttribute('style') || '').slice(0, 512),
+                        computed: {{ top: style.top, left: style.left, width: style.width, height: style.height, columns: style.gridTemplateColumns, rows: style.gridTemplateRows, display: style.display, position: style.position, visibility: style.visibility }},
+                        layout: {{ scrollTop: node.scrollTop, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight, scrollWidth: node.scrollWidth, clientWidth: node.clientWidth }},
+                    }};
+                }};
+                state.sample = (phase) => state.samples.push({{
+                    phase,
+                    viewport: {{ width: innerWidth, height: innerHeight }},
+                    target: state.target ? {{
+                        selector: state.target.selector,
+                        error: state.target.error || null,
+                        original: nodeInfo(state.target.original, state.target),
+                        replacement: nodeInfo(state.target.replacement, state.target),
+                    }} : null,
+                }});
+                state.restore = () => {{
+                    const target = state.target;
+                    if (!target) return;
+                    try {{
+                        if (target.replacement && target.replacement.isConnected && target.replacement.parentElement === target.parent && target.original) {{
+                            target.parent.replaceChild(target.original, target.replacement);
+                        }} else if (target.original && !target.original.isConnected && target.parent && target.parent.isConnected) {{
+                            const sibling = target.nextSibling && target.nextSibling.parentElement === target.parent ? target.nextSibling : null;
+                            target.parent.insertBefore(target.original, sibling);
+                        }}
+                    }} catch (error) {{
+                        state.restoreErrors.push({{ selector: target.selector, error: safeError(error) }});
+                    }}
+                }};
+                window[key] = state;
+                try {{
+                    const original = document.querySelector(selector);
+                    state.target = {{ selector, original, replacement: null, parent: original ? original.parentElement : null, nextSibling: original ? original.nextSibling : null, error: original ? null : 'missing original node' }};
+                    state.sample('before');
+                    const target = state.target;
+                    if (!target.original || !target.parent || !target.original.isConnected || target.original.parentElement !== target.parent) {{
+                        target.error = target.error || 'original node is disconnected or parent changed';
+                    }} else {{
+                        target.replacement = target.original.cloneNode(true);
+                        target.parent.replaceChild(target.replacement, target.original);
+                        state.sample('after-replacement-immediate');
+                        state.timer = setTimeout(() => {{ if (state.live) state.sample('after-replacement-64ms'); }}, 64);
+                    }}
+                }} catch (error) {{
+                    state.setupError = safeError(error);
+                }}
+                return {{ owned: true, owner: state.owner, selector, setupError: state.setupError, samples: state.samples }};
+            }})();"#,
+            key = key,
+            owner = owner,
+            selector = selector,
+        );
+        let setup_result = match control.eval(&setup) {
+            Ok(value) => value,
+            Err(error) => json!({"error": error.to_string().chars().take(512).collect::<String>()}),
+        };
+        sleep(Duration::from_millis(80));
+        let after_64ms = match control.eval(&format!(
+            "return (() => {{ const key = {key:?}; const owner = {owner:?}; const state = window[key]; if (!state) return {{owned: false, owner, error: 'probe state missing'}}; if (state.owner !== owner) return {{owned: false, owner, error: 'probe state ownership mismatch'}}; return {{owned: true, owner: state.owner, setupError: state.setupError, samples: state.samples, restoreErrors: state.restoreErrors}}; }})();",
+            key = key,
+            owner = owner,
+        )) {
+            Ok(value) => value,
+            Err(error) => json!({"error": error.to_string().chars().take(512).collect::<String>()}),
+        };
+        let cleanup = match control.eval(&format!(
+            "return (() => {{ const key = {key:?}; const owner = {owner:?}; const state = window[key]; if (!state) return {{owned: false, restored: false, owner, error: 'probe state missing'}}; if (state.owner !== owner) return {{owned: false, restored: false, owner, error: 'probe state ownership mismatch'}}; let error = null; try {{ if (state.timer) clearTimeout(state.timer); }} catch (timerError) {{ error = String(timerError && timerError.stack ? timerError.stack : timerError).slice(0, 512); }} finally {{ state.live = false; try {{ state.restore(); }} catch (restoreError) {{ error = String(restoreError && restoreError.stack ? restoreError.stack : restoreError).slice(0, 512); }} }} const target = state.target; const restoredTarget = {{selector: state.selector, connected: Boolean(target && target.original && target.original.isConnected), sameParent: Boolean(target && target.original && target.original.parentElement === target.parent), siblingPreserved: Boolean(target && target.original && target.original.nextSibling === target.nextSibling)}}; const result = {{owned: true, owner, restored: restoredTarget.connected && restoredTarget.sameParent && restoredTarget.siblingPreserved, restoredTarget, restoreErrors: state.restoreErrors, error}}; if (window[key] === state) delete window[key]; return result; }})();",
+            key = key,
+            owner = owner,
+        )) {
+            Ok(value) => value,
+            Err(error) => json!({"error": error.to_string().chars().take(512).collect::<String>()}),
+        };
+        trials.push(json!({"selector": selector, "setup": setup_result, "after64ms": after_64ms, "cleanup": cleanup}));
+    }
+    let evidence = json!({"schema": 1, "probe": "same-parent-dom-replacement", "journey": scenario.name(), "trials": trials});
+    let pretty = match serde_json::to_vec_pretty(&evidence) {
+        Ok(bytes) => bytes,
+        Err(error) => serde_json::to_vec(
+            &json!({"schema": 1, "probe": "same-parent-dom-replacement", "error": error.to_string().chars().take(512).collect::<String>()}),
+        )
+        .unwrap_or_default(),
+    };
+    let output = if pretty.len() <= MAX_EVIDENCE_BYTES {
+        pretty
+    } else {
+        serde_json::to_vec(&json!({"schema": 1, "probe": "same-parent-dom-replacement", "truncated": true, "encodedBytes": pretty.len(), "maxBytes": MAX_EVIDENCE_BYTES})).unwrap_or_default()
+    };
+    let output = output.into_iter().take(MAX_EVIDENCE_BYTES).collect::<Vec<_>>();
+    eprintln!("[qa] same-parent layout diagnostics={}", String::from_utf8_lossy(&output));
+    let path = scenario.dir().join("same-parent-layout.json");
+    if fs::write(&path, &output).is_ok() {
+        scenario.keep("same-parent-layout.json", &path);
+    }
+}
+
 fn assert_layout_settled(control: &rightkit_qa::control::Control, selector: &str) {
     let expression = format!(
         "return (() => {{ const node = document.querySelector({selector:?}); if (!node) return false; const rect = node.getBoundingClientRect(); return rect.width >= 1 && rect.height >= 1 && getComputedStyle(node).display !== 'none'; }})();"
@@ -1170,6 +1309,7 @@ fn with_control<T>(
             && let (Some(width), Some(height)) = (viewport["width"].as_u64(), viewport["height"].as_u64())
             && let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height))
         {
+            diagnose_same_parent_layout(&control, scenario);
             diagnose_native_viewport_bounce(&control, scenario, width, height);
         }
     }
