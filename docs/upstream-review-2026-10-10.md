@@ -44,10 +44,23 @@ Current slider coalescing/cancellation fixes already exist in fork. Upstream's >
 
 Auto tuning commit `8b9a0200` contains six procedural tests, but no reproducible 24-Sony-RAW evaluation manifest, source hashes or reference exports. Its numerical Lightroom comparison is developer-reported. Sony DRO correction `5a61fc5f` is a sibling change that alters source tone after fitting; reported DRO examples already underperform an unedited baseline. Treat calibration as a candidate to evaluate, not a proven universal improvement.
 
-Camera-fit changes `cc7bf0e2`, `c691bcfa`, `24427912`, `7408f11f` & `c21c305e` belong together; DRO must retain its explicitly attributed CC0 input. No Adobe assets belong in Ember. Refit Auto after changing RAW reconstruction, WB, camera looks, process behavior or fitting, then re-extract/retrain Personal Auto. Current numeric fixture/manifest hashes alone do not bind source pixels & renderer identity; durable baseline receipts must carry those inputs before a model can claim render validation.
+Camera-fit changes `cc7bf0e2`, `c691bcfa`, `24427912`, `7408f11f` & `c21c305e` belong together; DRO must retain its explicitly attributed CC0 input. No Adobe assets belong in Ember. Refit Auto after changing RAW reconstruction, WB, camera looks, process behavior or fitting, then re-extract/retrain Personal Auto. Experimental extraction now binds source pixels, source/settings facts, canonical numeric inputs & renderer identity through baseline receipts. Matching supplied receipts establishes consistency; held-out rendered comparisons remain required before any render-quality claim.
 
 ## Qualification before desktop adoption
 
 For each small batch: retain relevant upstream regression source, resolve host/API differences, run generated workspace/native gates at exact fork SHA, then hidden RightKit QA on resulting Mac/Windows artifacts. RAW batches additionally need pinned corpus renders; Auto/highlight/color changes need held-out render comparison. Face/eye/model accuracy remains unqualified until labelled larger crops & named-platform measurements exist.
 
-First implementation work is bounded GPU shutdown & Lightroom crop correctness, in separate task commits. Stage independent RAW safety/coverage ports beside them; larger model, codec & catalog features follow their own qualification gates.
+## Source adaptations landed
+
+- [`77efdbf9`](https://github.com/Orthic-Labs/lightcraft/commit/77efdbf9): Olympus capability reporting matches supported ORF containers.
+- [`496a555f`](https://github.com/Orthic-Labs/lightcraft/commit/496a555f): Sony sample/frame/strip size arithmetic rejects overflow before allocation or slicing.
+- [`5f1b6ca9`](https://github.com/Orthic-Labs/lightcraft/commit/5f1b6ca9): Lightroom catalog crops infer missing `HasCrop`, map eight orientations & straighten with stored aspect; malformed geometry is skipped with warnings. One import undo batch is retained.
+- [`6f4c997d`](https://github.com/Orthic-Labs/lightcraft/commit/6f4c997d): Final GPU shutdown gate, bounded preview cleanup, terminal worker failures & unique submission identity. Ember's Tauri & egui hosts own process exit; disposable host shutdown/disconnect keeps process GPU gate open.
+- [`8cffadd3`](https://github.com/Orthic-Labs/lightcraft/commit/8cffadd3): Personal Auto renderer/input receipts reject mutated numeric inputs, stale settings/profile/cache identities & partial receipt sets; old model envelopes require retraining.
+
+Rust 2024 formatting, diff checks & desktop static contracts pass. Luna adversarial source reviews
+covered crop geometry, shutdown races/lifetime & receipt binding. Procedural regressions were added;
+none were executed locally. Current fork compilation, native QA, real RAW renders & held-out model
+quality still await generated RightKit Actions plus consented evaluation photos. Installed desktop
+remains on its previously qualified revision. Larger model, codec & catalog features retain separate
+qualification gates.
