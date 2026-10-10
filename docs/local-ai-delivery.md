@@ -10,7 +10,8 @@ Status, 2026-10-10: source implementation & static review only. No current-revis
 | Culling decisions & evaluation | Detached cancellable desktop jobs, paged React review, explicit acceptance/undo, CLI baseline/scorer & synthetic regression source | Generated gates & exact-artifact hidden RightKit review/apply/undo journey; lock human-labelled shoot-level test corpus |
 | Face/eye & similarity weights | Exact YuNet, DINOv2 & MediaPipe v1 bytes/SHA pinned; graph/container inventories recorded; offline DINOv2 Candle core, verified loader, RGB8 input & classical comparison; experimental YuNet & MediaPipe raw graphs plus still-image decode/crops/landmark/blendshape composition; no model qualified | Prove graph/preprocessing/geometry reference agreement, calibrate held-out eye evidence, measure larger-crop accuracy/abstention & named-platform latency |
 | Cloud BYOK comparison | Strict bounded multi-image OpenRouter contract/transport in source, unknown blur/blink & reviewable outputs | Shared transport qualification, real provider credentials & controlled ambiguous-burst evaluation |
-| Personal Auto | Deterministic style-residual learner; explicit-file extract/train/evaluate CLI; private provenance digests, coverage & fallback receipts in source; source regression covers CLI roundtrip, source/sidecar preservation, consent refusal & overwrite refusal | Shoot-disjoint rendered/preference comparison against deterministic Auto; numeric distance alone cannot promote a model |
+| Personal Auto | Deterministic style-residual learner with 28 scalar/spatial fields; explicit-file extract/train/evaluate CLI; private provenance digests, coverage & fallback receipts in source; migration & preservation regression source | Shoot-disjoint rendered/preference comparison against deterministic Auto; numeric distance alone cannot promote a model |
+| Denoise | Original procedural RGB identity/classical NR benchmark source with numeric-only digests, metrics & repeat timing; learned RGB candidate research | Generated native baseline receipts, checkpoint-rights evidence, independent numerical reference & held-out photographic comparison |
 | ChatGPT-plan OAuth | Researched spec retained | Login convenience after useful photo workflows qualify |
 
 ## Current offline DINOv2 source
@@ -56,6 +57,7 @@ Evidence protocols:
 - [Face/eye model candidates](culling-models-faces-eyes.md)
 - [Aesthetic/quality/similarity candidates](culling-models-aesthetic.md)
 - [Personal Auto evaluation](personal-auto-evaluation.md)
+- [Denoise qualification](denoise-qualification.md)
 - [CI restoration](ci-restoration.md)
 - [Model qualification checklist](models/culling-qualification-checklist.md)
 
@@ -67,9 +69,13 @@ lightcraft-cli ai personal train --manifest tests/fixtures/personal-auto/minimal
 lightcraft-cli ai personal evaluate --manifest tests/fixtures/personal-auto/minimal.json --model NEW_MODEL.json --out NEW_REPORT.json
 ```
 
-Fixture contains synthetic numeric labels only. Explicit-file extraction requires supplied consent & labels, uses disposable local state with sidecar writes disabled, emits canonical numeric features & omits file paths/EXIF/editor fields. Learner fits train shoots, checks frozen split/provenance, skips missing per-control labels & predicts bounded contrast/vibrance/saturation residuals. Lightroom weak labels & accepted Ember labels produce separate experimental variants. Extraction uses 16 fixed pipeline features, including `baseline.exposure`; camera identifiers are excluded from model features, while supplied opaque camera strata may remain in reports. Reports retain label-provenance digests, separate validation/test shoot & camera aggregates, input/eligible/scored/skipped counts & baseline fallback comparisons. No production Auto replacement, render-quality claim or automatic model promotion exists.
+Fixture contains synthetic numeric labels only. Explicit-file extraction requires supplied consent & labels, uses disposable local state with sidecar writes disabled, emits canonical numeric features & omits file paths/EXIF/editor fields. Learner fits train shoots, checks frozen split/provenance, skips missing per-control labels & predicts bounded contrast/vibrance/saturation residuals. Lightroom weak labels & accepted Ember labels produce separate experimental variants. Feature-v2 extraction uses 28 fixed pipeline fields: 16 scalar fields including `baseline.exposure`, plus EV mean/stddev & Oklab chroma mean in four spatial cells. Production deterministic Auto remains unchanged. Legacy 16-field manifests/models require re-extraction/retraining; they are never padded. Camera identifiers are excluded from model features, while supplied opaque camera strata may remain in reports. Reports retain label-provenance digests, separate validation/test shoot & camera aggregates, input/eligible/scored/skipped counts & baseline fallback comparisons. No production Auto replacement, render-quality claim or automatic model promotion exists.
 
 `apps/lightcraft-cli/tests/personal_auto.rs` provides source regression coverage for explicit extract → train → evaluate: it checks path-free provenance digests, decoded-proxy baseline receipts, train/test receipt binding, renderer-contract retraining, coverage arithmetic, unclaimed personal-preference status, unchanged source files & XMP sidecars, refusal to overwrite extracted output, & consent rejection. This is source evidence only; current-revision execution remains unclaimed.
+
+## Procedural denoise source harness
+
+`apps/lightcraft-cli/src/denoise_eval.rs` exposes `ai denoise baseline`: five original procedural linear Rec.2020 patterns compare injected-noise identity against exact production guided NR at 0/25/50/75/100. Numeric-only create-new receipts bind clean/noisy/output digests, pixel/gradient error, supplied unverified hardware/revision, first call & 2..10 warm repeats. Finite production output is measured without extra clipping; nonfinite output fails. No photo, catalog, model or provider is read. Source analytic/hostile-argument/overwrite regressions remain unrun; all reports stay `UNQUALIFIED`. See [protocol](denoise-qualification.md).
 
 ## Detector qualification source
 

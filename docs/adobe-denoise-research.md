@@ -39,6 +39,10 @@ Implications:
 4. Apply any future AI denoise before image-dependent healing/masking stages, then re-evaluate existing masks/spots & shadow/tone controls. Keep current Manual NR controls independent so users can compare or combine them intentionally.
 5. Do not infer Metal acceleration from Adobe's Apple silicon guidance. Ember must measure its own wgpu Metal path, Windows CPU fallback & memory behavior; current Ember has no Denoise latency, memory or held-out-quality result.
 
+## Independent baseline source
+
+Ember now has original procedural RGB baseline harness source, separate from Adobe observation. It compares injected-noise identity with existing guided luminance/chroma NR, recording numeric errors, repeat timing & pixel digests without photo files. This is post-demosaic diagnostic work; no learned denoiser or measured improvement is claimed. [Qualification protocol](denoise-qualification.md) keeps checkpoint rights, color/transfer, numerical reference, tile behavior & photographic preference as separate gates.
+
 ## Independent pure-Rust experiments
 
 Use only original procedural/generated samples or user-consented disposable catalog material. Keep model code, weights & training data under separate license receipts; require permissive terms and SHA-256 pinning before any artifact enters Ember.

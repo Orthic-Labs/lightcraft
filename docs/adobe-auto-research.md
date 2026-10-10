@@ -48,6 +48,10 @@ For each run compare Adobe values with current `auto_tone` values as descriptive
 - Make Auto outputs inspectable as one vector with source/model/version binding. Preserve current edits until explicit apply, and make any future learned model replaceable without changing catalog semantics.
 - Require same-input reference outputs plus held-out measurements before any parity statement. Adobe marketing descriptions alone cannot support quality claims.
 
+## Independent spatial candidate source
+
+Offline Personal Auto feature-v2 now appends 12 original photometric statistics to existing 16 scalar fields: EV mean, EV population standard deviation & mean Oklab chroma in each 2×2 cell of upright 512px WB-only proxy. Same-histogram layouts can supply different spatial vectors. This is an independent hypothesis for residual style evaluation, not a reproduction of Adobe's predictor, a semantic classifier or evidence of improved Auto. Production `auto_tone` & its scene-control formulas stay unchanged; [Personal Auto protocol](personal-auto-evaluation.md) requires shoot-disjoint rendered/preference comparisons before promotion.
+
 ## Denoise cross-reference
 
 Denoise facts, including Adobe's disclosed joint demosaic/denoise CNN, current Lightroom Classic format/workflow contract & Ember implications, live in [Adobe Denoise research](adobe-denoise-research.md). This note keeps Denoise probes out of Auto research to avoid duplicating or contradicting that contract.

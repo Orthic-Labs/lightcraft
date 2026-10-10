@@ -17,8 +17,12 @@ use lightcraft_pipeline::personal_auto::{
 use serde_json::{Map, Value, json};
 
 const VERSION: u64 = 1;
-const MODEL_SCHEMA: &str = "lightcraft.personal-auto-eval.model.v3";
-const REPORT_SCHEMA: &str = "lightcraft.personal-auto.report.v1";
+const MODEL_SCHEMA: &str = "lightcraft.personal-auto-eval.model.v4";
+const REPORT_SCHEMA: &str = "lightcraft.personal-auto.report.v2";
+const LEGACY_MODEL_SCHEMA: &str = "lightcraft.personal-auto-eval.model.v3";
+const LEGACY_CORE_MODEL_SCHEMA: &str = "lightcraft.personal-auto.v1";
+const LEGACY_FEATURE_SCHEMA: &str = "lightcraft.personal-auto-features.v1";
+const LEGACY_BASELINE_RECEIPT_SCHEMA: &str = "lightcraft.personal-auto.baseline-receipt.v1";
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SHOOTS: usize = 100_000;
 const MAX_PHOTOS: usize = 1_000_000;
@@ -242,13 +246,21 @@ fn parse_manifest(value: &Value) -> Result<Manifest, String> {
         return Err("personal manifest requires version 1".into());
     }
     let receipt_schema_declared = object.get("baselineReceiptSchema").is_some();
-    if let Some(schema) = object.get("baselineReceiptSchema")
-        && schema.as_str() != Some(BASELINE_RECEIPT_SCHEMA)
-    {
-        return Err("personal manifest baseline receipt schema is unsupported".into());
+    if let Some(schema) = object.get("baselineReceiptSchema") {
+        if schema.as_str() == Some(LEGACY_BASELINE_RECEIPT_SCHEMA) {
+            return Err("personal manifest declares legacy v1 baseline receipts; re-extract manifest".into());
+        }
+        if schema.as_str() != Some(BASELINE_RECEIPT_SCHEMA) {
+            return Err("personal manifest baseline receipt schema is unsupported; re-extract manifest".into());
+        }
     }
     let features = string_array(object, &["feature_schema", "featureNames", "feature_names"])?;
     let canonical_features = FEATURE_NAMES.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
+    if features.len() == 16 {
+        return Err(format!(
+            "personal manifest uses legacy 16-feature schema ({LEGACY_FEATURE_SCHEMA}); re-extract manifest with Personal Auto feature schema v2"
+        ));
+    }
     if features != canonical_features || features.is_empty() || features.len() > MAX_FEATURES || !unique_strings(&features) {
         return Err("personal manifest has invalid feature schema".into());
     }
@@ -383,6 +395,9 @@ fn reject_unknown_fields(object: &Map<String, Value>, allowed: &[&str], scope: &
 fn parse_baseline_receipt(value: Option<&Value>) -> Result<Option<BaselineReceipt>, String> {
     let Some(value) = value else { return Ok(None) };
     let object = value.as_object().ok_or("baselineReceipt must be an object")?;
+    if object.get("schema").and_then(Value::as_str) == Some(LEGACY_BASELINE_RECEIPT_SCHEMA) {
+        return Err("baselineReceipt uses legacy v1 schema; re-extract manifest".into());
+    }
     if object.get("schema").and_then(Value::as_str) != Some(BASELINE_RECEIPT_SCHEMA)
         || object.get("autoRevision").and_then(Value::as_str) != Some(BASELINE_AUTO_REVISION)
         || object.get("featureSchema").and_then(Value::as_str) != Some(FEATURE_SCHEMA)
@@ -980,14 +995,20 @@ fn evaluate_model(manifest: &Manifest, model: &Value, manifest_digest: &str, req
 
 fn validate_model(model: &Value, manifest: &Manifest, manifest_digest: &str) -> Result<(), String> {
     let object = model.as_object().ok_or("personal model root must be an object")?;
+    if object.get("schema").and_then(Value::as_str) == Some(LEGACY_MODEL_SCHEMA)
+        || object.get("coreModelSchema").and_then(Value::as_str) == Some(LEGACY_CORE_MODEL_SCHEMA)
+        || object.get("featureSchema").and_then(Value::as_array).is_some_and(|features| features.len() == 16)
+    {
+        return Err("personal model uses legacy v1/16-feature schema; retrain model".into());
+    }
     if object.get("version").and_then(Value::as_u64) != Some(VERSION) || object.get("schema").and_then(Value::as_str) != Some(MODEL_SCHEMA) {
-        return Err("personal model schema is unsupported".into());
+        return Err("personal model schema is unsupported; retrain model".into());
     }
     if object.get("coreModelSchema").and_then(Value::as_str) != Some(CORE_MODEL_SCHEMA)
         || object.get("featureSchema") != Some(&json!(manifest.features))
         || object.get("controls") != Some(&json!(manifest.controls))
     {
-        return Err("personal model schema does not match manifest or pipeline core".into());
+        return Err("personal model schema does not match manifest or pipeline core; retrain model".into());
     }
     if object.get("training").and_then(Value::as_object).and_then(|training| training.get("manifestSha256")).and_then(Value::as_str)
         != Some(manifest_digest)
@@ -1192,17 +1213,23 @@ fn metric(pairs: &[(f64, f64)]) -> Value {
 mod tests {
     use super::*;
 
+    fn feature_values(base: [f64; 16], spatial: [f64; 12]) -> Value {
+        let mut values = base.to_vec();
+        values.extend(spatial);
+        json!(values)
+    }
+
     fn manifest() -> Value {
-        json!({"version":1,"feature_schema":["ev.p01","ev.p05","ev.median","ev.p95","ev.p995","ev.spread","chroma.p90","luminance.mean","luminance.stddev","scene.shadow_share","scene.highlight_share","source.aspect","source.raw","baseline.exposure","source.wb_temp","source.wb_tint"],"controls":["light.contrast","color.vibrance","color.saturation"],"shoots":[
+        json!({"version":1,"feature_schema":FEATURE_NAMES,"controls":["light.contrast","color.vibrance","color.saturation"],"shoots":[
             {"shoot_id":"train-1","split":"train","camera":{"make":"Ember","model":"Synthetic"},"photos":[
-                {"photo_id":"train-a","features":[0.0,0.0,0.0,0.0,0.0,0.0,0.2,0.2,0.1,0.1,0.1,1.5,1.0,0.0,6500.0,0.0],"baseline":{"light.contrast":0.0,"color.vibrance":0.0,"color.saturation":0.0},"emberGroundTruth":{"values":{"light.contrast":10.0,"color.vibrance":2.0,"color.saturation":1.0},"confidence":{"light.contrast":1.0,"color.vibrance":1.0,"color.saturation":1.0},"provenance":{"accepted":true,"origin":"human-edit"}}},
-                {"photo_id":"train-b","features":[1.0,1.0,1.0,1.0,1.0,0.0,0.4,0.4,0.1,0.1,0.1,1.5,1.0,0.0,6500.0,0.0],"baseline":{"light.contrast":0.0,"color.vibrance":0.0,"color.saturation":0.0},"weakLabelColdStart":{"values":{"light.contrast":8.0,"color.vibrance":2.0,"color.saturation":1.0},"confidence":{"light.contrast":1.0,"color.vibrance":1.0,"color.saturation":1.0},"provenance":{"source":"lightroom"}}}
+                {"photo_id":"train-a","features":feature_values([0.0,0.0,0.0,0.0,0.0,0.0,0.2,0.2,0.1,0.1,0.1,1.5,1.0,0.0,6500.0,0.0],[0.11,0.021,0.18,0.24,0.031,0.23,0.37,0.041,0.28,0.49,0.051,0.34]),"baseline":{"light.contrast":0.0,"color.vibrance":0.0,"color.saturation":0.0},"emberGroundTruth":{"values":{"light.contrast":10.0,"color.vibrance":2.0,"color.saturation":1.0},"confidence":{"light.contrast":1.0,"color.vibrance":1.0,"color.saturation":1.0},"provenance":{"accepted":true,"origin":"human-edit"}}},
+                {"photo_id":"train-b","features":feature_values([1.0,1.0,1.0,1.0,1.0,0.0,0.4,0.4,0.1,0.1,0.1,1.5,1.0,0.0,6500.0,0.0],[0.61,0.071,0.42,0.74,0.081,0.47,0.87,0.091,0.52,0.93,0.101,0.58]),"baseline":{"light.contrast":0.0,"color.vibrance":0.0,"color.saturation":0.0},"weakLabelColdStart":{"values":{"light.contrast":8.0,"color.vibrance":2.0,"color.saturation":1.0},"confidence":{"light.contrast":1.0,"color.vibrance":1.0,"color.saturation":1.0},"provenance":{"source":"lightroom"}}}
             ]},
             {"shoot_id":"validation-1","split":"validation","camera":{"make":"Ember","model":"Synthetic"},"photos":[
-                {"photo_id":"validation-a","features":[0.5,0.5,0.5,0.5,0.5,0.0,0.3,0.3,0.1,0.1,0.1,1.5,1.0,0.0,6500.0,0.0],"baseline":{"light.contrast":0.0,"color.vibrance":0.0,"color.saturation":0.0},"emberGroundTruth":{"values":{"light.contrast":5.0,"color.vibrance":1.0,"color.saturation":0.5},"confidence":{"light.contrast":1.0,"color.vibrance":1.0,"color.saturation":1.0},"provenance":{"accepted":true,"origin":"human-edit"}}}
+                {"photo_id":"validation-a","features":feature_values([0.5,0.5,0.5,0.5,0.5,0.0,0.3,0.3,0.1,0.1,0.1,1.5,1.0,0.0,6500.0,0.0],[0.36,0.046,0.31,0.44,0.056,0.35,0.55,0.066,0.39,0.63,0.076,0.43]),"baseline":{"light.contrast":0.0,"color.vibrance":0.0,"color.saturation":0.0},"emberGroundTruth":{"values":{"light.contrast":5.0,"color.vibrance":1.0,"color.saturation":0.5},"confidence":{"light.contrast":1.0,"color.vibrance":1.0,"color.saturation":1.0},"provenance":{"accepted":true,"origin":"human-edit"}}}
             ]},
             {"shoot_id":"test-1","split":"test","camera":{"make":"Other","model":"Synthetic"},"photos":[
-                {"photo_id":"test-a","features":[0.5,0.5,0.5,0.5,0.5,0.0,0.3,0.3,0.1,0.1,0.1,1.5,1.0,0.0,6500.0,0.0],"baseline":{"light.contrast":0.0,"color.vibrance":0.0,"color.saturation":0.0},"weakLabelColdStart":{"values":{"light.contrast":4.0,"color.vibrance":1.0,"color.saturation":0.5},"confidence":{"light.contrast":1.0,"color.vibrance":1.0,"color.saturation":1.0},"provenance":{"source":"lightroom"}}}
+                {"photo_id":"test-a","features":feature_values([0.5,0.5,0.5,0.5,0.5,0.0,0.3,0.3,0.1,0.1,0.1,1.5,1.0,0.0,6500.0,0.0],[0.27,0.037,0.26,0.33,0.047,0.29,0.41,0.057,0.32,0.52,0.067,0.36]),"baseline":{"light.contrast":0.0,"color.vibrance":0.0,"color.saturation":0.0},"weakLabelColdStart":{"values":{"light.contrast":4.0,"color.vibrance":1.0,"color.saturation":0.5},"confidence":{"light.contrast":1.0,"color.vibrance":1.0,"color.saturation":1.0},"provenance":{"source":"lightroom"}}}
             ]}
         ]})
     }
@@ -1257,6 +1284,55 @@ mod tests {
         let mut value = manifest();
         value["controls"] = json!(["light.contrast", "color.vibrance", "light.exposure"]);
         assert!(parse_manifest(&value).is_err());
+    }
+
+    #[test]
+    fn canonical_v2_manifest_accepts_28_features() {
+        let parsed = parse_manifest(&manifest()).expect("canonical v2 manifest must parse");
+        assert_eq!(parsed.features.len(), 28);
+        assert_eq!(parsed.features, FEATURE_NAMES.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn legacy_feature_schema_requires_reextraction() {
+        let mut value = manifest();
+        value["feature_schema"] = json!([
+            "ev.p01",
+            "ev.p05",
+            "ev.median",
+            "ev.p95",
+            "ev.p995",
+            "ev.spread",
+            "chroma.p90",
+            "luminance.mean",
+            "luminance.stddev",
+            "scene.shadow_share",
+            "scene.highlight_share",
+            "source.aspect",
+            "source.raw",
+            "baseline.exposure",
+            "source.wb_temp",
+            "source.wb_tint"
+        ]);
+        let error = parse_manifest(&value).expect_err("legacy features must be rejected");
+        assert!(error.contains("re-extract"));
+    }
+
+    #[test]
+    fn legacy_model_schema_requires_retraining() {
+        let parsed = parse_manifest(&manifest()).unwrap();
+        let mut model = train_model(&parsed, "fixture").unwrap();
+        model["schema"] = json!(LEGACY_MODEL_SCHEMA);
+        let error = evaluate_model(&parsed, &model, "fixture", Some(Variant::Ember)).expect_err("legacy models must be rejected");
+        assert!(error.contains("retrain"));
+    }
+
+    #[test]
+    fn legacy_baseline_receipt_requires_reextraction() {
+        let mut value = decoded_manifest();
+        value["baselineReceiptSchema"] = json!(LEGACY_BASELINE_RECEIPT_SCHEMA);
+        let error = parse_manifest(&value).expect_err("legacy receipts must be rejected");
+        assert!(error.contains("re-extract"));
     }
 
     #[test]
@@ -1390,6 +1466,11 @@ mod tests {
         let mut value = decoded_manifest();
         value["shoots"][0]["photos"][0]["features"][0] = json!(99.0);
         let error = parse_manifest(&value).expect_err("feature mutation must invalidate receipt");
+        assert!(error.contains("featuresDigest"));
+
+        let mut value = decoded_manifest();
+        value["shoots"][0]["photos"][0]["features"][27] = json!(99.0);
+        let error = parse_manifest(&value).expect_err("spatial feature mutation must invalidate receipt");
         assert!(error.contains("featuresDigest"));
 
         let mut value = decoded_manifest();

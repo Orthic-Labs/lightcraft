@@ -39,12 +39,15 @@ fn explicit_extract_train_evaluate_preserves_sources_and_binds_receipts() {
     let extracted = run_extract(&input, &features);
     assert!(extracted.status.success(), "{}", String::from_utf8_lossy(&extracted.stderr));
     let extracted_value: Value = serde_json::from_slice(&std::fs::read(&features).unwrap()).unwrap();
-    assert_eq!(extracted_value["feature_schema"].as_array().map(Vec::len), Some(16));
+    assert_eq!(extracted_value["feature_schema"].as_array().map(Vec::len), Some(28));
+    assert_eq!(extracted_value["feature_schema"][16], "spatial.g00.ev.mean");
+    assert_eq!(extracted_value["feature_schema"][27], "spatial.g11.chroma.mean");
+    assert_eq!(extracted_value["shoots"][0]["photos"][0]["features"].as_array().map(Vec::len), Some(28));
     assert_eq!(extracted_value["shoots"].as_array().map(Vec::len), Some(2));
     assert_eq!(extracted_value["shoots"][0]["photos"].as_array().map(Vec::len), Some(1));
     assert_eq!(extracted_value["shoots"][1]["photos"].as_array().map(Vec::len), Some(1));
     let baseline_receipt = &extracted_value["shoots"][0]["photos"][0]["baselineReceipt"];
-    assert_eq!(baseline_receipt["schema"], "lightcraft.personal-auto.baseline-receipt.v1");
+    assert_eq!(baseline_receipt["schema"], "lightcraft.personal-auto.baseline-receipt.v2");
     assert_eq!(baseline_receipt["sourceLevel"], "thumb");
     assert_eq!(baseline_receipt["sourcePixelsDigest"].as_str().map(str::len), Some(64));
     assert_eq!(baseline_receipt["settingsDigest"].as_str().map(str::len), Some(64));
@@ -66,7 +69,7 @@ fn explicit_extract_train_evaluate_preserves_sources_and_binds_receipts() {
     assert_eq!(receipt["shootId"], "train-shoot");
     assert!(receipt["provenanceSha256"].as_str().is_some());
     assert_eq!(model_value["baselineContract"]["mode"], "decodedProxy");
-    assert_eq!(model_value["baselineContract"]["receiptSchema"], "lightcraft.personal-auto.baseline-receipt.v1");
+    assert_eq!(model_value["baselineContract"]["receiptSchema"], "lightcraft.personal-auto.baseline-receipt.v2");
     let receipt_text = std::fs::read_to_string(&model).unwrap();
     assert!(!receipt_text.contains("private/original.xmp"));
     assert!(!receipt_text.contains("private-editor"));

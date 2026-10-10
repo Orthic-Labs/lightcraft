@@ -14,20 +14,22 @@ use lightcraft_raster::Rgb32f;
 use serde::{Deserialize, Serialize};
 
 /// Serialized model schema. Bump when payload shape or semantics change.
-pub const MODEL_SCHEMA: &str = "lightcraft.personal-auto.v1";
+pub const MODEL_SCHEMA: &str = "lightcraft.personal-auto.v2";
 /// Receipt schema for an extracted deterministic baseline. The receipt binds decoded proxy pixels
 /// to source facts/settings; it is an integrity identity, not proof of source ownership.
-pub const BASELINE_RECEIPT_SCHEMA: &str = "lightcraft.personal-auto.baseline-receipt.v1";
+pub const BASELINE_RECEIPT_SCHEMA: &str = "lightcraft.personal-auto.baseline-receipt.v2";
 /// Bump when deterministic Auto or baseline preparation semantics change.
 pub const BASELINE_AUTO_REVISION: &str = "lightcraft.deterministic-auto.v1";
 /// Serialized model version.
-pub const MODEL_VERSION: u32 = 2;
+pub const MODEL_VERSION: u32 = 3;
 /// Serialized split-manifest schema.
 pub const SPLIT_SCHEMA: &str = "lightcraft.personal-auto-split.v1";
 /// Stable feature schema name.
-pub const FEATURE_SCHEMA: &str = "lightcraft.personal-auto-features.v1";
-/// Number of fixed, camera-identifier-free input features.
-pub const FEATURE_COUNT: usize = 16;
+pub const FEATURE_SCHEMA: &str = "lightcraft.personal-auto-features.v2";
+/// Number of scalar, camera-identifier-free input features retained from v1.
+pub const SCALAR_FEATURE_COUNT: usize = 16;
+/// Number of fixed, camera-identifier-free input features, including spatial evidence.
+pub const FEATURE_COUNT: usize = SCALAR_FEATURE_COUNT + crate::personal_auto_spatial::SPATIAL_FEATURE_COUNT;
 /// Number of first-pass style controls.
 pub const STYLE_CONTROL_COUNT: usize = 3;
 /// Maximum decoded pixels accepted for feature extraction.
@@ -50,7 +52,8 @@ pub const MIN_ELIGIBLE_TRAIN_SHOOTS: usize = 20;
 /// Fixed feature order. Values are finite, train-normalized, and contain no camera identifier.
 ///
 /// EV percentiles and spread, luminance/chroma statistics, scene-tail shares, aspect, raw flag,
-/// baseline exposure, and source/WB metadata are intentionally scalar nuisance/scene evidence.
+/// baseline exposure, source/WB metadata, and low-level 2×2 spatial evidence are scene evidence;
+/// none is a semantic subject or camera-identity feature.
 pub const FEATURE_NAMES: [&str; FEATURE_COUNT] = [
     "ev.p01",
     "ev.p05",
@@ -68,6 +71,18 @@ pub const FEATURE_NAMES: [&str; FEATURE_COUNT] = [
     "baseline.exposure",
     "source.wb_temp",
     "source.wb_tint",
+    "spatial.g00.ev.mean",
+    "spatial.g00.ev.stddev",
+    "spatial.g00.chroma.mean",
+    "spatial.g01.ev.mean",
+    "spatial.g01.ev.stddev",
+    "spatial.g01.chroma.mean",
+    "spatial.g10.ev.mean",
+    "spatial.g10.ev.stddev",
+    "spatial.g10.chroma.mean",
+    "spatial.g11.ev.mean",
+    "spatial.g11.ev.stddev",
+    "spatial.g11.chroma.mean",
 ];
 
 /// First-pass style-only controls. Their current Ember ranges are all −100..100.
@@ -184,7 +199,7 @@ impl FeatureVector {
         let shadow_share = ev.iter().filter(|value| **value < -4.0).count() as f64 / ev.len() as f64;
         let highlight_share = ev.iter().filter(|value| **value > 2.2).count() as f64 / ev.len() as f64;
         let (wb_temp, wb_tint) = crate::local::effective_wb(info, &wb_only);
-        Self::new([
+        let scalar = [
             p01,
             p05,
             median,
@@ -201,7 +216,12 @@ impl FeatureVector {
             baseline.light.exposure,
             wb_temp,
             wb_tint,
-        ])
+        ];
+        let spatial = crate::personal_auto_spatial::SpatialFeatureVector::from_pipeline(src, info, baseline)?;
+        let mut values = [0.0; FEATURE_COUNT];
+        values[..SCALAR_FEATURE_COUNT].copy_from_slice(&scalar);
+        values[SCALAR_FEATURE_COUNT..].copy_from_slice(&spatial.0);
+        Self::new(values)
     }
 }
 
@@ -913,5 +933,11 @@ mod tests {
         let fallback = model.predict(&baseline, &bad_features);
         assert!(!fallback.used_model);
         assert_eq!(fallback.settings, baseline);
+    }
+
+    #[test]
+    fn v2_feature_schema_appends_spatial_order() {
+        assert_eq!(&FEATURE_NAMES[SCALAR_FEATURE_COUNT..], &crate::personal_auto_spatial::SPATIAL_FEATURE_NAMES);
+        assert_eq!(FEATURE_COUNT, 28);
     }
 }

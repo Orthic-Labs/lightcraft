@@ -90,7 +90,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let plan = parse_input(&input)?;
     let value = extract(plan)?;
     write_new_json(Path::new(&output), &value)?;
-    println!("{}", json!({"manifest": output, "schema": "lightcraft.personal-auto-features.v1", "version": VERSION}));
+    println!("{}", json!({"manifest": output, "schema": FEATURE_SCHEMA, "version": VERSION}));
     Ok(())
 }
 

@@ -14,6 +14,7 @@
 //! lightcraft-cli ai personal train --manifest FILE --out NEW_MODEL
 //! lightcraft-cli ai personal extract --manifest FILE --out NEW_MANIFEST
 //! lightcraft-cli ai personal evaluate --manifest FILE --model FILE [--out NEW_REPORT]
+//! lightcraft-cli ai denoise baseline --hardware LABEL --out NEW_REPORT
 //! lightcraft-cli calibrate [--max N] [--out DIR] FOLDERS/FILES…
 //! ```
 #![forbid(unsafe_code)]
@@ -21,6 +22,7 @@
 
 mod alloc_release;
 mod cull_eval;
+mod denoise_eval;
 mod personal_auto_eval;
 mod personal_auto_extract;
 mod photo_ai;
@@ -101,11 +103,13 @@ USAGE:
   lightcraft-cli cull baseline --manifest FILE [--reject-below 0..100] [--out FILE]
       Measure classical culling on explicit files in a disposable in-memory catalog.
   lightcraft-cli ai personal extract --manifest FILE --out NEW_MANIFEST
-      Extract canonical numeric features from explicit labelled photos in disposable local state.
+      Extract canonical Personal Auto feature schema v2 (28 numeric fields) from explicit labelled photos.
   lightcraft-cli ai personal train --manifest FILE --out NEW_MODEL
-      Fit experimental style residuals on train shoots in an explicit numeric manifest.
+      Fit experimental style residuals on train shoots; legacy v1/16-feature manifests require re-extraction.
   lightcraft-cli ai personal evaluate --manifest FILE --model FILE [--out NEW_REPORT]
       Compare held-out edit distances against supplied deterministic Auto baselines.
+  lightcraft-cli ai denoise baseline --hardware LABEL --out NEW_REPORT [--size 64..512] [--repeats 2..10] [--source-revision LABEL]
+      Record original procedural RGB guided-NR baseline harness results without model inference.
   lightcraft-cli ai compare --demo|FILES… --out NEW_DIR [--model ID]… [--repeat 1..3] [--budget-usd N] [--prepare-only]
       Read-only OpenRouter experiment. Renders input/current Auto/model candidates, with JSON &
       HTML receipts. Uses OPENROUTER_API_KEY from environment; no key enters files or output.
@@ -172,6 +176,7 @@ fn main() -> ExitCode {
             personal_auto_extract::run(&args[1..])
         }
         Some("ai") if args.get(1).map(String::as_str) == Some("personal") => personal_auto_eval::run(&args[1..]),
+        Some("ai") if args.get(1).map(String::as_str) == Some("denoise") => denoise_eval::run(&args[1..]),
         Some("ai") => photo_ai::run(&args[1..]),
         Some("cull") => cull_eval::run(&args[1..]),
         Some("calibrate") => calibrate(&args[1..]),
