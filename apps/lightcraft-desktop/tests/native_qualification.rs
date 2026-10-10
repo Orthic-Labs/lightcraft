@@ -193,7 +193,7 @@ fn wait_for_retained_layout_collapse(control: &rightkit_qa::control::Control, ke
         key = key,
         owner = owner,
     );
-    let last = Value::Null;
+    let mut last = Value::Null;
     for _ in 0..100 {
         last = control.eval(&expression).expect("retained layout collapse query must execute");
         if last["ready"].as_bool() == Some(true) {
