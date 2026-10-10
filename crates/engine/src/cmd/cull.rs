@@ -256,7 +256,7 @@ impl CullJob {
     }
 }
 
-fn exact_object(value: &Value, required: &[&str], what: &str) -> Result<&serde_json::Map<String, Value>> {
+fn exact_object<'a>(value: &'a Value, required: &[&str], what: &str) -> Result<&'a serde_json::Map<String, Value>> {
     let object = value.as_object().ok_or_else(|| super::bad("photo.cullSuggest", format!("{what} must be an object")))?;
     if required.iter().any(|key| !object.contains_key(*key)) || object.keys().any(|key| !required.iter().any(|expected| *expected == key)) {
         return Err(super::bad("photo.cullSuggest", format!("{what} fields are invalid")));
@@ -277,7 +277,7 @@ fn f32_value(value: &Value, field: &str, min: f32, max: f32) -> Result<f32> {
 fn validate_worker_result(job: &CullJob, value: Value) -> Result<()> {
     const C: &str = "photo.cullSuggest";
     let result = exact_object(&value, &["photos", "groups", "rejected", "picked", "failed", "proposal"], "worker result")?;
-    let proposal_value = result.get("proposal").expect("exact_object checked proposal");
+    let proposal_value = result.get("proposal").ok_or_else(|| super::bad(C, "worker proposal is missing"))?;
     let proposal = exact_object(proposal_value, &["version", "catalogRevision", "policy", "photos", "binding"], "worker proposal")?;
     let version = proposal["version"].as_u64().ok_or_else(|| super::bad(C, "worker proposal version is invalid"))?;
     if version != PROPOSAL_VERSION {
@@ -511,6 +511,7 @@ fn parse_cull_apply(s: &mut Session, p: &Value) -> Result<CullApplyJob> {
         return Err(super::bad(C, "too many culling proposal photos"));
     }
     let mut ids = Vec::with_capacity(photo_values.len());
+    let mut rows = Vec::with_capacity(photo_values.len());
     let mut seen_ids = std::collections::HashSet::with_capacity(photo_values.len());
     let mut offered = std::collections::HashMap::with_capacity(photo_values.len());
     for photo in photo_values {
@@ -523,27 +524,39 @@ fn parse_cull_apply(s: &mut Session, p: &Value) -> Result<CullApplyJob> {
         if !seen_ids.insert(id) {
             return Err(super::bad(C, format!("duplicate proposal photo id {}", id.0)));
         }
-        let _ = object["fileName"].as_str().ok_or_else(|| super::bad(C, "proposal photo fileName is invalid"))?;
-        let _ = object["source"].as_str().ok_or_else(|| super::bad(C, "proposal photo source is invalid"))?;
+        let file_name = object["fileName"].as_str().ok_or_else(|| super::bad(C, "proposal photo fileName is invalid"))?.to_owned();
+        let source = object["source"].as_str().ok_or_else(|| super::bad(C, "proposal photo source is invalid"))?.to_owned();
         let prior_flag = parse_flag(&object["flag"], C, "flag")?;
         let proposed = if object["proposedFlag"].is_null() { None } else { Some(parse_flag(&object["proposedFlag"], C, "proposedFlag")?) };
         offered.insert(id, (prior_flag, proposed));
-        let _ = f32_value(&object["sharpness"], "sharpness", 0.0, 100.0)?;
-        let _ = f32_value(&object["clipped"], "clipped", 0.0, 1.0)?;
-        if !object["group"].is_null() {
-            let _ = object["group"]
-                .as_u64()
-                .and_then(|value| u32::try_from(value).ok())
-                .ok_or_else(|| super::bad(C, "proposal photo group is invalid"))?;
-        }
-        let _ = object["best"].as_bool().ok_or_else(|| super::bad(C, "proposal photo best is invalid"))?;
-        let _: lightcraft_pipeline::cull::report::Decision =
+        let sharpness = f32_value(&object["sharpness"], "sharpness", 0.0, 100.0)?;
+        let clipped = f32_value(&object["clipped"], "clipped", 0.0, 1.0)?;
+        let group = if object["group"].is_null() {
+            None
+        } else {
+            Some(
+                object["group"]
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or_else(|| super::bad(C, "proposal photo group is invalid"))?,
+            )
+        };
+        let best = object["best"].as_bool().ok_or_else(|| super::bad(C, "proposal photo best is invalid"))?;
+        let decision: lightcraft_pipeline::cull::report::Decision =
             serde_json::from_value(object["decision"].clone()).map_err(|_| super::bad(C, "proposal photo decision is invalid"))?;
-        let _: lightcraft_pipeline::cull::report::Uncertainty =
+        let uncertainty: lightcraft_pipeline::cull::report::Uncertainty =
             serde_json::from_value(object["uncertainty"].clone()).map_err(|_| super::bad(C, "proposal photo uncertainty is invalid"))?;
-        let _: Vec<lightcraft_pipeline::cull::report::ReasonCode> =
+        let reason_codes: Vec<lightcraft_pipeline::cull::report::ReasonCode> =
             serde_json::from_value(object["reasonCodes"].clone()).map_err(|_| super::bad(C, "proposal photo reasonCodes are invalid"))?;
+        let row = CullRow { id, file_name, sharpness, clipped, source, flag: prior_flag, group, best, decision, uncertainty, reason_codes };
+        if proposed != proposed_flag(&row, reject_below, pick_best) {
+            return Err(super::bad(C, format!("proposal action for photo {} is inconsistent", id.0)));
+        }
+        rows.push(row);
         ids.push(id);
+    }
+    if binding_hash(revision, reject_below, pick_best, &rows) != binding {
+        return Err(super::bad(C, "proposal binding does not match contents"));
     }
     let accept = p.get("accept").and_then(Value::as_array).ok_or_else(|| super::bad(C, "`accept` must be an array of {id, flag}"))?;
     if accept.len() > lightcraft_pipeline::cull::report::MAX_MEASUREMENTS {
@@ -565,6 +578,13 @@ fn parse_cull_apply(s: &mut Session, p: &Value) -> Result<CullApplyJob> {
         }
     }
     let job = prepare_cull_job(s, &ids, reject_below, pick_best, C)?;
+    let snapshots: std::collections::HashMap<PhotoId, &CullPhotoSnapshot> = job.photos.iter().map(|photo| (photo.id, photo)).collect();
+    for row in &rows {
+        let snapshot = snapshots.get(&row.id).ok_or_else(|| super::bad(C, format!("proposal photo {} is not in current catalog", row.id.0)))?;
+        if row.file_name != snapshot.file_name || row.source != snapshot.source || row.flag != snapshot.flag {
+            return Err(super::bad(C, format!("proposal photo {} does not match current source or flag", row.id.0)));
+        }
+    }
     Ok(CullApplyJob { job, proposal, accepted })
 }
 

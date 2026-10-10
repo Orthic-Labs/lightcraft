@@ -126,7 +126,17 @@ cannot pass.
 
 `crates/pipeline/src/personal_auto.rs` implements deterministic float64 ridge residuals for contrast, vibrance & saturation. Fixed 16-feature extraction uses pipeline pixels/WB plus deterministic `baseline.exposure`; camera identifiers never enter features. Models record schema, train shoots, manifest identity, label sources/counts & experimental status. Missing fields are skipped, settings are bounded, malformed models fall back to baseline.
 
-CLI `ai personal train --manifest FILE --out NEW_MODEL` & `ai personal evaluate --manifest FILE --model FILE --out NEW_REPORT` operate offline on explicit numeric manifests. Canonical synthetic example: [`minimal.json`](../tests/fixtures/personal-auto/minimal.json). Separate weak/Ember variants report numeric edit distance by photo, shoot, split & camera. This source has no rendered comparison, preference votes, production Auto replacement or automatic promotion.
+CLI `ai personal extract --manifest FILE --out NEW_MANIFEST` converts an explicit photo manifest into canonical numeric features through same Rust Auto/pipeline path. Input is strict bounded JSON with `version:1`, `userConsented:true`, unique opaque `shoot_id`/`photo_id`, frozen `train|validation|eval|test` shoot split, explicit regular-file `path`, optional supplied opaque shoot `camera` stratum, & supplied `weakLabelColdStart` or `emberGroundTruth` label with provenance/confidence. Accepted weak provenance kinds are `lightroom`, `lightroom-mapped-settings`, `mapped-lightroom-settings`, & `synthetic-weak`; accepted Ember kinds are `human-edit` & `synthetic-human-edit`, always with `accepted:true`. Each listed file uses fresh ephemeral local session so catalog/raw caches do not accumulate; sidecar writes are disabled & imported settings are reset. Extraction never scans folders or writes path/EXIF data. Output labels retain numeric values/deltas & confidence while reducing provenance to normalized kind, acceptance, & source SHA. Extraction fails before output creation on malformed labels, split/ID duplicates, unreadable/decode failures or bounds violations; unpicked photos never become rejects. Resulting path-free manifest is accepted by `ai personal train`/`evaluate`; models include per-variant opaque photo/shoot receipt IDs, normalized label kinds, & provenance SHA digests, compared exactly against evaluation manifest:
+
+```text
+lightcraft-cli ai personal extract --manifest INPUT.json --out NUMERIC_MANIFEST.json
+lightcraft-cli ai personal train --manifest NUMERIC_MANIFEST.json --out NEW_MODEL.json
+lightcraft-cli ai personal evaluate --manifest NUMERIC_MANIFEST.json --model NEW_MODEL.json --out NEW_REPORT.json
+```
+
+Canonical synthetic example: [`minimal.json`](../tests/fixtures/personal-auto/minimal.json). Separate weak/Ember variants report numeric edit distance by photo, shoot, split & camera. This source has no rendered comparison, preference votes, production Auto replacement or automatic promotion.
+
+Experimental model envelope uses `lightcraft.personal-auto-eval.model.v2` because training-label receipts are now required; older v1 envelopes must be regenerated. Source provenance SHA preserves an opaque receipt when private metadata is stripped. Matching receipts establishes consistency with supplied manifest, not independent proof of who edited a photo. Reports expose input/eligible/skipped counts, `modelScored` & `fallbackScored`. Fallbacks remain in aggregate comparisons as unchanged deterministic baselines, preventing selective omission; only actual model predictions can produce numeric-evaluated status.
 
 ## Rollout gate
 

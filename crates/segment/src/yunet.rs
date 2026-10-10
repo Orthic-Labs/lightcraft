@@ -4,6 +4,10 @@
 //! ONNX protobuf surface needed by that graph, validates its fingerprint and topology, then
 //! executes its eight permitted operators with Candle.  Post-processing remains explicit here:
 //! preprocessing, score fusion, box/keypoint decoding and NMS are not encoded in ONNX.
+//! This prototype freezes its own baseline as RGB-to-BGR 0..255 input, aspect-preserving
+//! top-left resize into 640x640, grid-origin `(column, row)` decoding, square-root score fusion,
+//! source-space xyxy boxes and bounded float IoU NMS.  These choices are experimental and are not
+//! claimed to match OpenCV's reference post-processing.
 //!
 //! The model is a research prototype.  Loading it does not qualify accuracy, eye-state
 //! classification or production performance.
@@ -86,11 +90,16 @@ pub struct RawOutputs {
 pub struct YuNet {
     nodes: Vec<Node>,
     initializers: HashMap<String, Initializer>,
+    /// Device-resident FLOAT initializers; avoids per-frame host-to-device uploads.
+    tensors: HashMap<String, Tensor>,
     device: Device,
     preprocess: Preprocess,
 }
 
 impl YuNet {
+    /// Pinned model digest exposed for qualification receipts.
+    pub const PINNED_SHA256: &'static str = MODEL_SHA256;
+
     /// Load exact pinned ONNX bytes, checking size and SHA-256 through lightcraft-fetch.
     pub fn load(path: &Path, device: &Device) -> Result<Self> {
         let spec = lightcraft_fetch::FileSpec {
@@ -114,7 +123,16 @@ impl YuNet {
         }
         let parsed = Graph::parse(bytes)?;
         parsed.validate()?;
-        Ok(Self { nodes: parsed.nodes, initializers: parsed.initializers, device, preprocess: Preprocess::default() })
+        let mut tensors = HashMap::with_capacity(parsed.initializers.len());
+        for (name, initializer) in &parsed.initializers {
+            if initializer.data_type != 1 {
+                continue;
+            }
+            let tensor = Tensor::from_vec(initializer.data.clone(), initializer.dims.as_slice(), &device)?;
+            ensure_finite(&tensor)?;
+            tensors.insert(name.clone(), tensor);
+        }
+        Ok(Self { nodes: parsed.nodes, initializers: parsed.initializers, tensors, device, preprocess: Preprocess::default() })
     }
 
     /// Set explicit preprocessing policy.
@@ -156,12 +174,17 @@ impl YuNet {
             }
         }
         let mut take = |name: &str| values.remove(name).ok_or_else(|| Error::Model(format!("graph did not produce {name}")));
-        Ok(RawOutputs {
+        let outputs = RawOutputs {
             cls: [take("cls_8")?, take("cls_16")?, take("cls_32")?],
             obj: [take("obj_8")?, take("obj_16")?, take("obj_32")?],
             bbox: [take("bbox_8")?, take("bbox_16")?, take("bbox_32")?],
             keypoints: [take("kps_8")?, take("kps_16")?, take("kps_32")?],
-        })
+        };
+        // Keep intermediate tensors on device; validate bounded public heads once before return.
+        for tensor in outputs.cls.iter().chain(outputs.obj.iter()).chain(outputs.bbox.iter()).chain(outputs.keypoints.iter()) {
+            ensure_finite(tensor)?;
+        }
+        Ok(outputs)
     }
 
     /// Preprocess, execute, decode and NMS one RGB image. Thresholds are inclusive and bounded
@@ -189,13 +212,9 @@ impl YuNet {
             match node.op.as_str() {
                 "Conv" => {
                     let x = input(0)?;
-                    let weight_init = self.float_initializer(node.inputs.get(1).ok_or_else(|| Error::Model("Conv has no weight".into()))?)?;
-                    let weight = Tensor::from_vec(weight_init.data.clone(), weight_init.dims.as_slice(), &self.device)?;
+                    let weight = self.float_tensor(node.inputs.get(1).ok_or_else(|| Error::Model("Conv has no weight".into()))?)?;
                     let bias = match node.inputs.get(2) {
-                        Some(name) => {
-                            let init = self.float_initializer(name)?;
-                            Some(Tensor::from_vec(init.data.clone(), init.dims.as_slice(), &self.device)?)
-                        }
+                        Some(name) => Some(self.float_tensor(name)?),
                         None => None,
                     };
                     let pads = node.attr_ints("pads")?;
@@ -208,7 +227,7 @@ impl YuNet {
                     if group == 0 || group > 64 {
                         return Err(Error::Model(format!("unsupported Conv group {group}")));
                     }
-                    let y = x.conv2d(&weight, pad, stride, dilation, group)?;
+                    let y = x.conv2d(weight, pad, stride, dilation, group)?;
                     match bias {
                         Some(bias) => Ok(y.broadcast_add(&bias.reshape((1, bias.dim(0)?, 1, 1))?)?),
                         None => Ok(y),
@@ -293,7 +312,6 @@ impl YuNet {
                 "Sigmoid" => Ok(candle_nn::ops::sigmoid(input(0)?)?),
                 other => Err(Error::Model(format!("unsupported YuNet operator {other}"))),
             }?;
-        ensure_finite(&result)?;
         Ok(result)
     }
 
@@ -303,6 +321,11 @@ impl YuNet {
             return Err(Error::Model(format!("initializer {name} is not FLOAT")));
         }
         Ok(initializer)
+    }
+
+    fn float_tensor(&self, name: &str) -> Result<&Tensor> {
+        self.float_initializer(name)?;
+        self.tensors.get(name).ok_or_else(|| Error::Model(format!("missing device tensor {name}")))
     }
 
     fn int_initializer(&self, name: &str) -> Result<&Initializer> {

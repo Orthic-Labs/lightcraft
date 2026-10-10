@@ -12,6 +12,7 @@
 //! lightcraft-cli cull score --predictions FILE --labels FILE [--out FILE] [--split test]
 //! lightcraft-cli cull baseline --manifest FILE [--reject-below 0..100] [--out FILE]
 //! lightcraft-cli ai personal train --manifest FILE --out NEW_MODEL
+//! lightcraft-cli ai personal extract --manifest FILE --out NEW_MANIFEST
 //! lightcraft-cli ai personal evaluate --manifest FILE --model FILE [--out NEW_REPORT]
 //! lightcraft-cli calibrate [--max N] [--out DIR] FOLDERS/FILES…
 //! ```
@@ -21,6 +22,7 @@
 mod alloc_release;
 mod cull_eval;
 mod personal_auto_eval;
+mod personal_auto_extract;
 mod photo_ai;
 
 use std::io::{BufReader, Write};
@@ -98,6 +100,8 @@ USAGE:
       Score read-only culling predictions against explicit shoot-level labels.
   lightcraft-cli cull baseline --manifest FILE [--reject-below 0..100] [--out FILE]
       Measure classical culling on explicit files in a disposable in-memory catalog.
+  lightcraft-cli ai personal extract --manifest FILE --out NEW_MANIFEST
+      Extract canonical numeric features from explicit labelled photos in disposable local state.
   lightcraft-cli ai personal train --manifest FILE --out NEW_MODEL
       Fit experimental style residuals on train shoots in an explicit numeric manifest.
   lightcraft-cli ai personal evaluate --manifest FILE --model FILE [--out NEW_REPORT]
@@ -164,6 +168,9 @@ fn main() -> ExitCode {
         Some("merge") => merge(&args[1..]),
         Some("synth-merge") => synth_merge(&args[1..]),
         Some("controls") => controls(&args[1..]),
+        Some("ai") if args.get(1).map(String::as_str) == Some("personal") && args.get(2).map(String::as_str) == Some("extract") => {
+            personal_auto_extract::run(&args[1..])
+        }
         Some("ai") if args.get(1).map(String::as_str) == Some("personal") => personal_auto_eval::run(&args[1..]),
         Some("ai") => photo_ai::run(&args[1..]),
         Some("cull") => cull_eval::run(&args[1..]),

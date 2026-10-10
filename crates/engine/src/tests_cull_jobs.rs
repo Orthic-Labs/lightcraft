@@ -51,6 +51,33 @@ fn detached_apply_params(s: &mut Session) -> (Value, PhotoId, String) {
     (params, id, flag)
 }
 
+fn rebind_proposal(proposal: &mut Value) {
+    let revision = proposal["catalogRevision"].as_u64().expect("proposal revision");
+    let reject_below = proposal["policy"]["rejectBelow"].as_f64().map(|value| value as f32);
+    let pick_best = proposal["policy"]["pickBest"].as_bool().expect("proposal pick policy");
+    let mut rows = proposal["photos"].as_array().expect("proposal photos").clone();
+    rows.sort_by_key(|row| row["id"].as_u64().expect("proposal photo ID"));
+    let mut hash = lightcraft_preview::Hasher128::new();
+    hash.str("photo.cull.v1").u64(revision);
+    hash.u64(reject_below.map(f32::to_bits).map(u64::from).unwrap_or(u64::MAX));
+    hash.u64(pick_best as u64);
+    for row in rows {
+        hash.u64(row["id"].as_u64().expect("proposal photo ID"))
+            .str(row["fileName"].as_str().expect("proposal filename"))
+            .str(row["source"].as_str().expect("proposal source"))
+            .str(row["flag"].as_str().expect("proposal flag"));
+        hash.u64((row["sharpness"].as_f64().expect("proposal sharpness") as f32).to_bits() as u64)
+            .u64((row["clipped"].as_f64().expect("proposal clipped") as f32).to_bits() as u64)
+            .u64(row["group"].as_u64().unwrap_or(0))
+            .u64(row["best"].as_bool().expect("proposal best") as u64)
+            .str(row["proposedFlag"].as_str().unwrap_or(""));
+        hash.str(&serde_json::to_string(&row["decision"]).expect("proposal decision"))
+            .str(&serde_json::to_string(&row["uncertainty"]).expect("proposal uncertainty"))
+            .str(&serde_json::to_string(&row["reasonCodes"]).expect("proposal reasons"));
+    }
+    proposal["binding"] = json!(hash.finish().to_string());
+}
+
 #[test]
 fn detached_job_runs_without_session_and_reports_bounded_progress() {
     let job = {
@@ -307,6 +334,46 @@ fn unavailable_accept_is_rejected_before_detached_worker_start() {
         assert_eq!(s.journal, before_journal, "unavailable accept adds no journal");
         assert!(s.drain_log().is_empty(), "unavailable accept adds no pending operations");
     }
+}
+
+#[test]
+fn tampered_binding_is_rejected_before_detached_worker_start() {
+    let mut s = Session::with_demo();
+    let (params, _, _) = detached_apply_params(&mut s);
+    let before_catalog = s.catalog.to_snapshot();
+    let before_undo = s.undo.len();
+    let _ = s.drain_log();
+    let before_journal = s.journal.clone();
+    for field in ["binding", "fileName"] {
+        let mut invalid = params.clone();
+        if field == "binding" {
+            invalid["proposal"]["binding"] = json!("00000000000000000000000000000000");
+        } else {
+            invalid["proposal"]["photos"][0]["fileName"] = json!("changed-name.jpg");
+        }
+        let error = s.plan_cull_apply(&invalid).err().expect("tampered binding must fail during planning").to_string();
+        assert!(error.contains("binding does not match contents"), "tampering reports binding error: {error}");
+        assert_eq!(s.catalog.to_snapshot(), before_catalog, "tampered plan leaves catalog unchanged");
+        assert_eq!(s.undo.len(), before_undo, "tampered plan adds no undo");
+        assert_eq!(s.journal, before_journal, "tampered plan adds no journal");
+        assert!(s.drain_log().is_empty(), "tampered plan adds no pending operations");
+    }
+}
+
+#[test]
+fn rebound_snapshot_mismatch_is_rejected_before_detached_worker_start() {
+    let mut s = Session::with_demo();
+    let (mut params, _, _) = detached_apply_params(&mut s);
+    params["proposal"]["photos"][0]["fileName"] = json!("rebound-tamper.jpg");
+    rebind_proposal(&mut params["proposal"]);
+    let before_catalog = s.catalog.to_snapshot();
+    let before_undo = s.undo.len();
+    let before_journal = s.journal.clone();
+    let error = s.plan_cull_apply(&params).err().expect("current snapshot mismatch must fail before worker").to_string();
+    assert!(error.contains("does not match current source or flag"), "snapshot mismatch reports validation error: {error}");
+    assert_eq!(s.catalog.to_snapshot(), before_catalog, "rebound mismatch leaves catalog unchanged");
+    assert_eq!(s.undo.len(), before_undo, "rebound mismatch adds no undo");
+    assert_eq!(s.journal, before_journal, "rebound mismatch adds no journal");
 }
 
 #[test]

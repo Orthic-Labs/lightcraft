@@ -16,13 +16,14 @@ use lightcraft_pipeline::personal_auto::{
 use serde_json::{Map, Value, json};
 
 const VERSION: u64 = 1;
-const MODEL_SCHEMA: &str = "lightcraft.personal-auto-eval.model.v1";
+const MODEL_SCHEMA: &str = "lightcraft.personal-auto-eval.model.v2";
 const REPORT_SCHEMA: &str = "lightcraft.personal-auto.report.v1";
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SHOOTS: usize = 100_000;
 const MAX_PHOTOS: usize = 1_000_000;
 const MAX_FEATURES: usize = 64;
 const MAX_CONTROLS: usize = 32;
+const MAX_LABEL_RECEIPTS: usize = 100_000;
 const STYLE_IDS: [&str; 3] = ["light.contrast", "color.vibrance", "color.saturation"];
 
 #[derive(Clone, Debug)]
@@ -55,6 +56,8 @@ struct Target {
     values: BTreeMap<String, f64>,
     confidence: BTreeMap<String, f64>,
     deltas: bool,
+    provenance_kind: String,
+    provenance_digest: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,18 +230,18 @@ fn parse_manifest(value: &Value) -> Result<Manifest, String> {
     let mut photo_count = 0usize;
     for raw in raw_shoots {
         let shoot_object = raw.as_object().ok_or("personal shoot must be an object")?;
-        let id = text(shoot_object, &["shoot_id", "shootId", "id"]).ok_or("personal shoot is missing shoot_id")?;
+        let id = text_alias(shoot_object, &["shoot_id", "shootId", "id"], "shoot_id")?.ok_or("personal shoot is missing shoot_id")?;
         valid_id(&id, "shoot_id")?;
         if !shoot_ids.insert(id.clone()) {
             return Err("duplicate shoot_id".into());
         }
-        let split = text(shoot_object, &["split", "partition"]).ok_or("personal shoot is missing split")?;
+        let split = text_alias(shoot_object, &["split", "partition"], "split")?.ok_or("personal shoot is missing split")?;
         if !matches!(split.as_str(), "train" | "validation" | "eval" | "test") {
             return Err("personal shoot has invalid split".into());
         }
-        let camera = camera_key(shoot_object.get("camera").or_else(|| shoot_object.get("camera_model")));
+        let camera = camera_key(value_alias(shoot_object, &["camera", "camera_model"], "camera")?)?;
         let raw_photos =
-            shoot_object.get("photos").or_else(|| shoot_object.get("frames")).and_then(Value::as_array).ok_or("personal shoot is missing photos")?;
+            value_alias(shoot_object, &["photos", "frames"], "photos")?.and_then(Value::as_array).ok_or("personal shoot is missing photos")?;
         if raw_photos.is_empty() {
             return Err("personal shoot has no photos".into());
         }
@@ -249,33 +252,24 @@ fn parse_manifest(value: &Value) -> Result<Manifest, String> {
                 return Err("personal manifest photo count exceeds cap".into());
             }
             let photo_object = raw_photo.as_object().ok_or("personal photo must be an object")?;
-            let photo_id = text(photo_object, &["photo_id", "photoId", "id"]).ok_or("personal photo is missing photo_id")?;
+            let photo_id = text_alias(photo_object, &["photo_id", "photoId", "id"], "photo_id")?.ok_or("personal photo is missing photo_id")?;
             valid_id(&photo_id, "photo_id")?;
             if !photo_ids.insert(photo_id.clone()) {
                 return Err("duplicate photo_id across manifest".into());
             }
             let values = photo_object.get("features").ok_or("personal photo is missing numeric features")?;
             let photo_features = parse_features(values, &features)?;
-            let baseline_value = photo_object
-                .get("baseline")
-                .or_else(|| photo_object.get("deterministicbaseline"))
-                .or_else(|| photo_object.get("deterministicBaseline"))
+            let baseline_value = value_alias(photo_object, &["baseline", "deterministicbaseline", "deterministicBaseline"], "baseline")?
                 .ok_or("personal photo is missing baseline")?;
             let baseline = baseline_map(baseline_value, &controls)?;
             let weak = parse_target(
-                photo_object
-                    .get("weakLabelColdStart")
-                    .or_else(|| photo_object.get("weaklabelcoldstart"))
-                    .or_else(|| photo_object.get("weak_label_cold_start")),
+                value_alias(photo_object, &["weakLabelColdStart", "weaklabelcoldstart", "weak_label_cold_start"], "weakLabelColdStart")?,
                 &controls,
                 false,
             )
             .map_err(|error| format!("{photo_id}: weakLabelColdStart {error}"))?;
             let ember = parse_target(
-                photo_object
-                    .get("emberGroundTruth")
-                    .or_else(|| photo_object.get("embergroundtruth"))
-                    .or_else(|| photo_object.get("ember_ground_truth")),
+                value_alias(photo_object, &["emberGroundTruth", "embergroundtruth", "ember_ground_truth"], "emberGroundTruth")?,
                 &controls,
                 true,
             )
@@ -288,17 +282,24 @@ fn parse_manifest(value: &Value) -> Result<Manifest, String> {
 }
 
 fn string_array(object: &Map<String, Value>, keys: &[&str]) -> Result<Vec<String>, String> {
-    let value = keys.iter().find_map(|key| object.get(*key)).ok_or("personal manifest is missing schema array")?;
-    let values = value.as_array().ok_or("personal schema must be an array")?;
-    let mut result = Vec::new();
-    for value in values {
-        let text = value.as_str().ok_or("personal schema names must be strings")?.trim();
-        if text.is_empty() || text.len() > 128 || text.chars().any(char::is_control) {
-            return Err("personal schema name is invalid".into());
+    let mut found = None;
+    for key in keys {
+        let Some(value) = object.get(*key) else { continue };
+        let values = value.as_array().ok_or("personal schema must be an array")?;
+        let mut result = Vec::with_capacity(values.len());
+        for value in values {
+            let text = value.as_str().ok_or("personal schema names must be strings")?.trim();
+            if text.is_empty() || text.len() > 128 || text.chars().any(char::is_control) {
+                return Err("personal schema name is invalid".into());
+            }
+            result.push(text.to_owned());
         }
-        result.push(text.to_owned());
+        if found.as_ref().is_some_and(|previous: &Vec<String>| previous != &result) {
+            return Err("personal schema aliases conflict".into());
+        }
+        found = Some(result);
     }
-    Ok(result)
+    found.ok_or_else(|| "personal manifest is missing schema array".into())
 }
 
 fn unique_strings(values: &[String]) -> bool {
@@ -370,6 +371,9 @@ fn numeric_map(value: &Value, controls: &[String], kind: &str) -> Result<BTreeMa
 
 fn baseline_map(value: &Value, controls: &[String]) -> Result<BTreeMap<String, f64>, String> {
     let object = value.as_object().ok_or("baseline must be a numeric object")?;
+    if object.contains_key("values") && object.contains_key("settings") {
+        return Err("baseline values/settings aliases conflict".into());
+    }
     if let Some(values) = object.get("values").or_else(|| object.get("settings")) {
         return numeric_map(values, controls, "baseline");
     }
@@ -385,21 +389,44 @@ fn parse_target(value: Option<&Value>, controls: &[String], ember: bool) -> Resu
     let Some(value) = value else { return Ok(None) };
     let object = value.as_object().ok_or("personal label must be an object")?;
     let provenance = object.get("provenance").ok_or("personal label requires provenance")?;
-    if ember && !valid_ember_provenance(provenance) {
-        return Err("emberGroundTruth requires accepted human-edit provenance".into());
+    let (provenance_kind, provenance_digest) = parse_provenance(provenance, ember)?;
+    let fields = ["deltas", "values", "settings"];
+    let supplied = fields.iter().filter(|field| object.contains_key(**field)).copied().collect::<Vec<_>>();
+    if supplied.len() > 1 {
+        return Err("personal label values/settings/deltas aliases conflict".into());
     }
-    if !ember && !valid_weak_provenance(provenance) {
-        return Err("weakLabelColdStart requires mapped-source provenance".into());
-    }
-    let deltas = object.get("deltas").is_some();
-    let values_value =
-        object.get("deltas").or_else(|| object.get("values")).or_else(|| object.get("settings")).ok_or("personal label requires values or deltas")?;
+    let field = supplied.first().copied().ok_or("personal label requires values or deltas")?;
+    let deltas = field == "deltas";
+    let values_value = object.get(field).ok_or("personal label requires values or deltas")?;
     let values = partial_numeric_map(values_value, controls)?;
     let confidence = partial_confidence(object.get("confidence").ok_or("personal label requires confidence for every target field")?, controls)?;
     if values.keys().any(|control| !confidence.contains_key(control)) {
         return Err("personal label requires confidence for every target field".into());
     }
-    Ok(Some(Target { values, confidence, deltas }))
+    Ok(Some(Target { values, confidence, deltas, provenance_kind, provenance_digest }))
+}
+
+/// Canonicalizes labels while retaining provenance as an opaque source receipt. The emitted
+/// provenanceSha256 is not an authenticity proof because canonical form strips original metadata.
+pub(crate) fn canonical_input_label(value: &Value, ember: bool) -> Result<Value, String> {
+    let controls = STYLE_IDS.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>();
+    let target = parse_target(Some(value), &controls, ember)?.ok_or("personal label is missing")?;
+    let deltas = target.deltas;
+    let provenance_kind = target.provenance_kind;
+    let provenance_digest = target.provenance_digest;
+    let values = target.values.into_iter().map(|(key, value)| (key, json!(value))).collect::<Map<_, _>>();
+    let confidence = target.confidence.into_iter().map(|(key, value)| (key, json!(value))).collect::<Map<_, _>>();
+    let mut provenance = Map::new();
+    provenance.insert("kind".into(), Value::String(provenance_kind));
+    provenance.insert("provenanceSha256".into(), Value::String(provenance_digest));
+    if ember {
+        provenance.insert("accepted".into(), Value::Bool(true));
+    }
+    let mut canonical = Map::new();
+    canonical.insert(if deltas { "deltas" } else { "values" }.into(), Value::Object(values));
+    canonical.insert("confidence".into(), Value::Object(confidence));
+    canonical.insert("provenance".into(), Value::Object(provenance));
+    Ok(Value::Object(canonical))
 }
 
 fn partial_numeric_map(value: &Value, controls: &[String]) -> Result<BTreeMap<String, f64>, String> {
@@ -431,31 +458,71 @@ fn partial_confidence(value: &Value, controls: &[String]) -> Result<BTreeMap<Str
     Ok(result)
 }
 
-fn valid_ember_provenance(value: &Value) -> bool {
-    let Some(object) = value.as_object() else { return false };
-    if object.get("accepted").and_then(Value::as_bool) != Some(true) {
-        return false;
+fn parse_provenance(value: &Value, ember: bool) -> Result<(String, String), String> {
+    let object = value.as_object().ok_or("personal label provenance must be an object")?;
+    let kind = canonical_provenance_kind(value, ember).ok_or_else(|| {
+        if ember {
+            "emberGroundTruth requires explicit accepted human-edit provenance".to_owned()
+        } else {
+            "weakLabelColdStart requires explicit mapped-source provenance".to_owned()
+        }
+    })?;
+    let supplied_digest = match object.get("provenanceSha256") {
+        None => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(_) => return Err("personal label provenance digest must be a string".into()),
+    };
+    let digest = provenance_digest(value)?;
+    if let Some(supplied) = supplied_digest {
+        if !valid_digest(supplied) {
+            return Err("personal label provenance digest is invalid".into());
+        }
+        let canonical_only = object.keys().all(|key| matches!(key.as_str(), "kind" | "accepted" | "provenanceSha256"));
+        // Canonical output intentionally retains only an opaque source receipt digest; original
+        // provenance metadata is unavailable there, so canonical-only digests are not proofs.
+        if !canonical_only && supplied != digest {
+            return Err("personal label provenance digest does not match source".into());
+        }
     }
-    let Ok(text) = serde_json::to_string(value) else { return false };
-    let text = text.to_ascii_lowercase();
-    let human_edit = ["origin", "source", "edit", "editor", "accepted_by", "acceptedBy"]
-        .iter()
-        .filter_map(|key| object.get(*key).and_then(Value::as_str).map(|value| (*key, value)))
-        .any(|(key, value)| {
-            let lower = value.to_ascii_lowercase();
-            ((lower.contains("human") || lower.contains("ember") || lower.contains("synthetic")) && lower.contains("edit"))
-                || ((key == "editor" || key == "accepted_by" || key == "acceptedBy") && lower.contains("human"))
-        });
-    human_edit && !["auto", "copied", "synced", "imported", "automatic"].iter().any(|word| text.contains(word))
+    let digest = supplied_digest.map(str::to_owned).unwrap_or(digest);
+    if object.len() > 16 || digest.is_empty() {
+        return Err("personal label provenance exceeds bounds".into());
+    }
+    Ok((kind, digest))
 }
 
-fn valid_weak_provenance(value: &Value) -> bool {
-    let Some(object) = value.as_object() else { return false };
-    ["source", "origin", "labelSource", "label_source"]
-        .iter()
-        .find_map(|key| object.get(*key).and_then(Value::as_str))
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
+fn canonical_provenance_kind(value: &Value, ember: bool) -> Option<String> {
+    let object = value.as_object()?;
+    if ember && object.get("accepted").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let keys: &[&str] = if ember { &["kind", "origin", "source"] } else { &["kind", "source", "origin", "labelSource", "label_source"] };
+    let mut found = None;
+    for key in keys {
+        let Some(raw) = object.get(*key) else { continue };
+        let kind = raw.as_str()?;
+        let allowed = if ember {
+            matches!(kind, "human-edit" | "synthetic-human-edit")
+        } else {
+            matches!(kind, "lightroom" | "lightroom-mapped-settings" | "mapped-lightroom-settings" | "synthetic-weak")
+        };
+        if !allowed || found.as_deref().is_some_and(|previous| previous != kind) {
+            return None;
+        }
+        found = Some(kind.to_owned());
+    }
+    found
+}
+
+fn provenance_digest(value: &Value) -> Result<String, String> {
+    let mut object = value.as_object().cloned().ok_or("personal label provenance must be an object")?;
+    object.remove("provenanceSha256");
+    let bytes = serde_json::to_vec(&Value::Object(object)).map_err(|_| "personal label provenance is not encodable".to_owned())?;
+    Ok(lightcraft_photo_ai::digest(&bytes))
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn finite_number(value: &Value, field: &str) -> Result<f64, String> {
@@ -494,25 +561,56 @@ fn eligible_control(name: &str) -> bool {
 }
 
 fn valid_id(id: &str, field: &str) -> Result<(), String> {
-    if id.is_empty() || id.len() > 256 || id.chars().any(char::is_control) {
+    if id.is_empty() || id.len() > 256 || id.chars().any(|character| character.is_control() || matches!(character, '/' | '\\')) {
         return Err(format!("invalid {field}"));
     }
     Ok(())
 }
 
-fn text(object: &Map<String, Value>, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| object.get(*key).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned))
+fn text_alias(object: &Map<String, Value>, keys: &[&str], field: &str) -> Result<Option<String>, String> {
+    let mut found = None;
+    for key in keys {
+        let Some(value) = object.get(*key) else { continue };
+        let value = value.as_str().ok_or_else(|| format!("{field} must be a string"))?.trim();
+        if value.is_empty() {
+            return Err(format!("{field} must not be empty"));
+        }
+        if found.as_deref().is_some_and(|previous| previous != value) {
+            return Err(format!("{field} aliases conflict"));
+        }
+        found = Some(value.to_owned());
+    }
+    Ok(found)
 }
 
-fn camera_key(value: Option<&Value>) -> String {
-    match value {
-        Some(Value::String(value)) if !value.trim().is_empty() => value.trim().to_owned(),
-        Some(Value::Object(object)) => {
-            let make = text(object, &["make", "manufacturer"]).unwrap_or_else(|| "unknown".into());
-            let model = text(object, &["model", "camera_model"]).unwrap_or_else(|| "unknown".into());
-            format!("{make}/{model}")
+fn value_alias<'a>(object: &'a Map<String, Value>, keys: &[&str], field: &str) -> Result<Option<&'a Value>, String> {
+    let mut found = None;
+    for key in keys {
+        let Some(value) = object.get(*key) else { continue };
+        if found.is_some_and(|previous| previous != value) {
+            return Err(format!("{field} aliases conflict"));
         }
-        _ => "unknown".into(),
+        found = Some(value);
+    }
+    Ok(found)
+}
+
+fn camera_key(value: Option<&Value>) -> Result<String, String> {
+    match value {
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            valid_id(value, "camera")?;
+            Ok(value.to_owned())
+        }
+        Some(Value::Object(object)) => {
+            let make = text_alias(object, &["make", "manufacturer"], "camera make")?.unwrap_or_else(|| "unknown".into());
+            let model = text_alias(object, &["model", "camera_model"], "camera model")?.unwrap_or_else(|| "unknown".into());
+            valid_id(&make, "camera make")?;
+            valid_id(&model, "camera model")?;
+            Ok(format!("{make}/{model}"))
+        }
+        None | Some(Value::Null) => Ok("unknown".into()),
+        Some(_) => Err("personal shoot camera must be a string or object".into()),
     }
 }
 
@@ -560,7 +658,7 @@ fn core_sample(shoot: &Shoot, photo: &Photo, variant: Variant) -> Result<Option<
             sample_id: photo.id.clone(),
             shoot_id: shoot.id.clone(),
             split: Split::Train,
-            source_ref: format!("manifest:{}", photo.id),
+            source_ref: format!("label:{}:{}", target.provenance_kind, target.provenance_digest),
         },
     }))
 }
@@ -623,6 +721,10 @@ fn train_model(manifest: &Manifest, manifest_digest: &str) -> Result<Value, Stri
         control_eligible.insert(variant.key().to_owned(), field_counts);
         excluded.insert(variant.key().to_owned(), json!(train_photos.len().saturating_sub(sample_count)));
     }
+    let mut receipts = Map::new();
+    for variant in [Variant::Weak, Variant::Ember] {
+        receipts.insert(variant.key().to_owned(), Value::Array(training_receipts(manifest, variant)?));
+    }
     Ok(json!({
         "version": VERSION,
         "schema": MODEL_SCHEMA,
@@ -635,12 +737,32 @@ fn train_model(manifest: &Manifest, manifest_digest: &str) -> Result<Value, Stri
         "variants": variants,
         "trainingErrors": errors,
         "trainingEligibility": eligibility,
+        "trainingLabelReceipts": receipts,
         "harnessOnlyReason": if weak.is_none() && ember.is_none() { json!("no variant had eligible train labels") } else { Value::Null },
         "qualificationStatus": "unqualified_no_promotion",
         "training": {"shootCount": manifest.shoots.iter().filter(|shoot| shoot.split == "train").count(), "inputPhotoCount": train_photos.len(), "labelledPhotoCount": labelled, "controlEligible": control_eligible, "excludedPhotoCount": excluded, "manifestSha256": manifest_digest},
         "provenance": {"baseline": "deterministicbaseline supplied in explicit manifest", "weakLabelColdStart": "per-photo provenance supplied in manifest", "emberGroundTruth": "accepted-human-edit provenance supplied in manifest", "provenanceCompleteness": "numericHarnessOnly"},
         "policy": {"automaticPromotion": false, "automaticApply": false, "catalogRead": false, "network": false, "render": false, "featuresMetadataFree": true, "excluded": ["masks", "sceneControls", "geometry", "cameraProfile", "calibration", "lensCorrection"]}
     }))
+}
+
+fn training_receipts(manifest: &Manifest, variant: Variant) -> Result<Vec<Value>, String> {
+    let mut receipts = Vec::new();
+    for shoot in manifest.shoots.iter().filter(|shoot| shoot.split == "train") {
+        for photo in &shoot.photos {
+            let Some(target) = variant.target(photo) else { continue };
+            receipts.push(json!({
+                "photoId": photo.id,
+                "shootId": shoot.id,
+                "kind": target.provenance_kind,
+                "provenanceSha256": target.provenance_digest
+            }));
+            if receipts.len() > MAX_LABEL_RECEIPTS {
+                return Err(format!("{} training label receipts exceed cap", variant.key()));
+            }
+        }
+    }
+    Ok(receipts)
 }
 
 fn evaluate_model(manifest: &Manifest, model: &Value, manifest_digest: &str, requested: Option<Variant>) -> Result<Value, String> {
@@ -651,11 +773,11 @@ fn evaluate_model(manifest: &Manifest, model: &Value, manifest_digest: &str, req
     for variant in variants {
         reports.insert(variant.key().to_owned(), evaluate_variant(manifest, model, variant));
     }
-    let heldout_photos = manifest.shoots.iter().filter(|shoot| shoot.split != "train").flat_map(|shoot| shoot.photos.iter()).count();
+    let numeric = reports.values().any(|report| report["status"] == "numericEvaluatedUnqualified");
     Ok(json!({
         "version": VERSION,
         "schema": REPORT_SCHEMA,
-        "status": if heldout_photos == 0 { "harness-only" } else { "numericEvaluatedUnqualified" },
+        "status": if numeric { "numericEvaluatedUnqualified" } else { "harness-only" },
         "manifestSha256": manifest_digest,
         "excludedSplits": ["train"],
         "variants": reports,
@@ -688,6 +810,13 @@ fn validate_model(model: &Value, manifest: &Manifest, manifest_digest: &str) -> 
         return Err("personal model split manifest does not match evaluation manifest".into());
     }
     let variants = object.get("variants").and_then(Value::as_object).ok_or("personal model is missing variants")?;
+    let receipts = object.get("trainingLabelReceipts").and_then(Value::as_object).ok_or("personal model is missing training label receipts")?;
+    for variant in [Variant::Weak, Variant::Ember] {
+        let expected = Value::Array(training_receipts(manifest, variant)?);
+        if receipts.get(variant.key()) != Some(&expected) {
+            return Err(format!("{} training label receipts do not match manifest", variant.key()));
+        }
+    }
     let split_manifest = core_split_manifest(manifest, manifest_digest);
     for variant in [Variant::Weak, Variant::Ember] {
         let Some(value) = variants.get(variant.key()) else { return Err("personal model is missing variant".into()) };
@@ -710,7 +839,11 @@ fn evaluate_variant(manifest: &Manifest, model: &Value, variant: Variant) -> Val
     for split in ["validation", "eval", "test"] {
         split_reports.insert(split.to_owned(), evaluate_split(manifest, core_model.as_ref(), variant, split));
     }
-    let status = if core_model.is_some() { "numericEvaluatedUnqualified" } else { "harness-only" };
+    let status = if core_model.is_some() && split_reports.values().any(|report| report["coverage"]["modelScored"].as_u64().unwrap_or(0) > 0) {
+        "numericEvaluatedUnqualified"
+    } else {
+        "harness-only"
+    };
     json!({"status": status, "coreModelSchema": CORE_MODEL_SCHEMA, "qualificationStatus": "unqualified_no_promotion", "splits": split_reports})
 }
 
@@ -719,14 +852,52 @@ fn evaluate_split(manifest: &Manifest, model: Option<&PersonalAutoModel>, varian
     let mut per_photo: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
     let mut per_shoot: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
     let mut per_camera: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
+    let mut input = 0usize;
+    let mut eligible = 0usize;
+    let mut skipped = 0usize;
+    let mut fallback = 0usize;
+    let mut model_scored = 0usize;
+    let mut fallback_scored = 0usize;
+    let mut skipped_reasons: BTreeMap<String, usize> = BTreeMap::new();
+    let mut fallback_reasons: BTreeMap<String, usize> = BTreeMap::new();
     for shoot in manifest.shoots.iter().filter(|shoot| shoot.split == split) {
         for photo in &shoot.photos {
-            let Some(target) = variant.target(photo) else { continue };
-            let Some(model) = model else { continue };
-            let Some(baseline_distance) = distance(&photo.baseline, &photo.baseline, target, &manifest.controls, &manifest.bounds) else { continue };
-            let Some(predicted) = predict(model, photo, manifest) else { continue };
-            let Some(regressor_distance) = distance(&predicted, &photo.baseline, target, &manifest.controls, &manifest.bounds) else { continue };
+            input = input.saturating_add(1);
+            let Some(target) = variant.target(photo) else {
+                skipped = skipped.saturating_add(1);
+                *skipped_reasons.entry("missingLabel".into()).or_default() += 1;
+                continue;
+            };
+            eligible = eligible.saturating_add(1);
+            let Some(baseline_distance) = distance(&photo.baseline, &photo.baseline, target, &manifest.controls, &manifest.bounds) else {
+                skipped = skipped.saturating_add(1);
+                *skipped_reasons.entry("invalidTarget".into()).or_default() += 1;
+                continue;
+            };
+            let Some(model) = model else {
+                skipped = skipped.saturating_add(1);
+                *skipped_reasons.entry("missingModel".into()).or_default() += 1;
+                continue;
+            };
+            let (predicted, used_model) = match predict(model, photo, manifest) {
+                PredictionValues::Model(values) => (values, true),
+                PredictionValues::Fallback { values, reason } => {
+                    fallback = fallback.saturating_add(1);
+                    *fallback_reasons.entry(reason.into()).or_default() += 1;
+                    (values, false)
+                }
+            };
+            let Some(regressor_distance) = distance(&predicted, &photo.baseline, target, &manifest.controls, &manifest.bounds) else {
+                skipped = skipped.saturating_add(1);
+                *skipped_reasons.entry("invalidPrediction".into()).or_default() += 1;
+                continue;
+            };
             pairs.push((baseline_distance, regressor_distance));
+            if used_model {
+                model_scored = model_scored.saturating_add(1);
+            } else {
+                fallback_scored = fallback_scored.saturating_add(1);
+            }
             per_photo.insert(photo.id.clone(), vec![(baseline_distance, regressor_distance)]);
             per_shoot.entry(shoot.id.clone()).or_default().push((baseline_distance, regressor_distance));
             per_camera.entry(shoot.camera.clone()).or_default().push((baseline_distance, regressor_distance));
@@ -735,27 +906,58 @@ fn evaluate_split(manifest: &Manifest, model: Option<&PersonalAutoModel>, varian
     let shoots = per_shoot.iter().map(|(id, pairs)| (id.clone(), metric(pairs))).collect::<Map<String, Value>>();
     let cameras = per_camera.iter().map(|(id, pairs)| (id.clone(), metric(pairs))).collect::<Map<String, Value>>();
     let photos = per_photo.iter().map(|(id, pairs)| (id.clone(), metric(pairs))).collect::<Map<String, Value>>();
-    json!({"photos": metric(&pairs), "perPhoto": photos, "shoots": shoots, "byCamera": cameras})
+    json!({
+        "photos": metric(&pairs),
+        "perPhoto": photos,
+        "shoots": shoots,
+        "byCamera": cameras,
+        "coverage": {
+            "input": input,
+            "eligible": eligible,
+            "scored": pairs.len(),
+            "modelScored": model_scored,
+            "fallbackScored": fallback_scored,
+            "skipped": skipped,
+            "fallback": fallback,
+            "skippedReasons": skipped_reasons,
+            "fallbackReasons": fallback_reasons
+        }
+    })
 }
 
-fn predict(model: &PersonalAutoModel, photo: &Photo, manifest: &Manifest) -> Option<BTreeMap<String, f64>> {
-    let values: [f64; FEATURE_COUNT] = photo.features.clone().try_into().ok()?;
-    let features = FeatureVector::new(values).ok()?;
+enum PredictionValues {
+    Model(BTreeMap<String, f64>),
+    Fallback { values: BTreeMap<String, f64>, reason: &'static str },
+}
+
+fn predict(model: &PersonalAutoModel, photo: &Photo, manifest: &Manifest) -> PredictionValues {
+    let fallback = |reason| PredictionValues::Fallback { values: photo.baseline.clone(), reason };
+    let values: [f64; FEATURE_COUNT] = match photo.features.clone().try_into() {
+        Ok(values) => values,
+        Err(_) => return fallback("invalidFeatures"),
+    };
+    let features = match FeatureVector::new(values) {
+        Ok(features) => features,
+        Err(_) => return fallback("invalidFeatures"),
+    };
     let mut baseline = DevelopSettings::default();
     for control in STYLE_IDS {
         if !controls::set(&mut baseline, control, photo.baseline[control]) {
-            return None;
+            return fallback("invalidBaseline");
         }
     }
     let prediction = model.predict(&baseline, &features);
     if !prediction.used_model {
-        return None;
+        return fallback("modelFallback");
     }
     let mut result = photo.baseline.clone();
     for control in &manifest.controls {
-        result.insert(control.clone(), controls::get(&prediction.settings, control)?);
+        let Some(value) = controls::get(&prediction.settings, control) else {
+            return fallback("invalidPrediction");
+        };
+        result.insert(control.clone(), value);
     }
-    Some(result)
+    PredictionValues::Model(result)
 }
 
 fn distance(
@@ -820,6 +1022,7 @@ mod tests {
     fn trains_only_train_shoots_and_evaluates_holdouts() {
         let parsed = parse_manifest(&manifest()).unwrap();
         let model = train_model(&parsed, "fixture").unwrap();
+        assert_eq!(model["schema"], MODEL_SCHEMA);
         assert_eq!(model["trainingSplit"], "train");
         assert_eq!(model["training"]["shootCount"], 1);
         let report = evaluate_model(&parsed, &model, "fixture", None).unwrap();
@@ -861,5 +1064,102 @@ mod tests {
         value["shoots"][0]["photos"][0]["emberGroundTruth"]["provenance"] = json!({"accepted": true, "origin": "automatic-edit"});
         let error = parse_manifest(&value).expect_err("automatic edit is not Ember ground truth");
         assert!(error.contains("accepted human-edit provenance"));
+
+        let mut value = manifest();
+        value["shoots"][0]["photos"][0]["emberGroundTruth"]["provenance"] = json!({"accepted": true, "origin": "invented-human-edit"});
+        assert!(parse_manifest(&value).is_err(), "arbitrary provenance text must not qualify");
+
+        let mut value = manifest();
+        value["shoots"][0]["photos"][0]["emberGroundTruth"]["provenance"] =
+            json!({"accepted": true, "origin": "human-edit", "source": "synthetic-human-edit"});
+        assert!(parse_manifest(&value).is_err(), "conflicting provenance aliases must not qualify");
+    }
+
+    #[test]
+    fn canonical_labels_reject_wrong_digest_type_and_conflicting_value_aliases() {
+        let mut value = manifest();
+        value["shoots"][0]["photos"][0]["emberGroundTruth"]["provenance"]["provenanceSha256"] = json!(true);
+        assert!(parse_manifest(&value).is_err(), "wrong provenance digest type must fail");
+
+        let mut value = manifest();
+        value["shoots"][0]["photos"][0]["emberGroundTruth"]["settings"] = json!({"light.contrast": 10.0});
+        assert!(parse_manifest(&value).is_err(), "values/settings aliases must not coexist");
+
+        let mut value = manifest();
+        let baseline = value["shoots"][0]["photos"][0]["baseline"].clone();
+        value["shoots"][0]["photos"][0]["baseline"] = json!({"values": baseline.clone(), "settings": baseline});
+        assert!(parse_manifest(&value).is_err(), "baseline values/settings aliases must not coexist");
+
+        let mut value = manifest();
+        value["featureNames"] = value["feature_schema"].clone();
+        value["featureNames"][0] = json!("different.feature");
+        assert!(parse_manifest(&value).is_err(), "schema aliases must not conflict");
+
+        let mut value = manifest();
+        value["shoots"][0]["shootId"] = json!("different-shoot");
+        assert!(parse_manifest(&value).is_err(), "shoot ID aliases must not conflict");
+    }
+
+    #[test]
+    fn camera_strata_validate_components_before_joining() {
+        assert_eq!(camera_key(Some(&json!({"make": "Ember", "model": "Synthetic"}))).unwrap(), "Ember/Synthetic");
+        assert!(camera_key(Some(&json!("/private/path"))).is_err());
+        assert!(camera_key(Some(&json!({"make": "Ember", "model": "private/path"}))).is_err());
+        assert!(camera_key(Some(&json!({"make": "Ember", "manufacturer": "Other"}))).is_err());
+    }
+
+    #[test]
+    fn sample_provenance_is_digest_only_and_bound_to_identity() {
+        let parsed = parse_manifest(&manifest()).unwrap();
+        let shoot = parsed.shoots.first().unwrap();
+        let photo = shoot.photos.first().unwrap();
+        let sample = core_sample(shoot, photo, Variant::Ember).unwrap().unwrap();
+        assert_eq!(sample.provenance.sample_id, photo.id);
+        assert_eq!(sample.provenance.shoot_id, shoot.id);
+        assert!(sample.provenance.source_ref.starts_with("label:human-edit:"));
+        assert!(!sample.provenance.source_ref.contains("accepted"));
+    }
+
+    #[test]
+    fn missing_model_has_no_comparison_or_numeric_status() {
+        let parsed = parse_manifest(&manifest()).unwrap();
+        let mut model = train_model(&parsed, "fixture").unwrap();
+        model["variants"]["emberGroundTruth"] = Value::Null;
+        let report = evaluate_model(&parsed, &model, "fixture", Some(Variant::Ember)).unwrap();
+        assert_eq!(report["status"], "harness-only");
+        let coverage = &report["variants"]["emberGroundTruth"]["splits"]["validation"]["coverage"];
+        assert_eq!(coverage["input"], 1);
+        assert_eq!(coverage["eligible"], 1);
+        assert_eq!(coverage["scored"], 0);
+        assert_eq!(coverage["skipped"], 1);
+        assert_eq!(coverage["skippedReasons"]["missingModel"], 1);
+    }
+
+    #[test]
+    fn altered_training_receipt_is_rejected_during_evaluation() {
+        let parsed = parse_manifest(&manifest()).unwrap();
+        let mut model = train_model(&parsed, "fixture").unwrap();
+        model["trainingLabelReceipts"]["emberGroundTruth"][0]["provenanceSha256"] = json!("00");
+        let error = evaluate_model(&parsed, &model, "fixture", Some(Variant::Ember)).expect_err("receipt must bind model to manifest");
+        assert!(error.contains("training label receipts"));
+    }
+
+    #[test]
+    fn rejected_prediction_scores_explicit_baseline_fallback() {
+        let mut parsed = parse_manifest(&manifest()).unwrap();
+        parsed.shoots[1].photos[0].features[0] = f64::NAN;
+        let model_value = train_model(&parsed, "fixture").unwrap();
+        let core_value = model_value["variants"]["emberGroundTruth"].clone();
+        let core: PersonalAutoModel = serde_json::from_value(core_value).unwrap();
+        let report = evaluate_split(&parsed, Some(&core), Variant::Ember, "validation");
+        assert_eq!(report["coverage"]["eligible"], 1);
+        assert_eq!(report["coverage"]["scored"], 1);
+        assert_eq!(report["coverage"]["modelScored"], 0);
+        assert_eq!(report["coverage"]["fallbackScored"], 1);
+        assert_eq!(report["coverage"]["fallback"], 1);
+        assert_eq!(report["coverage"]["fallbackReasons"]["invalidFeatures"], 1);
+        assert_eq!(report["photos"]["baselineMean"], report["photos"]["regressorMean"]);
+        let variant_report = evaluate_variant(&parsed, &model_value, Variant::Ember);
+        assert_eq!(variant_report["status"], "harness-only", "fallback-only split cannot claim numeric model evaluation");
     }
 }

@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -26,7 +26,10 @@ const MAX_PPM_BYTES: usize = 100 * 1024 * 1024;
 const MAX_IMAGE_PIXELS: usize = 64_000_000;
 const MAX_IMAGES: usize = 100_000;
 const MAX_ID_BYTES: usize = 512;
-const MAX_REPEATS: usize = 3;
+const MAX_REPEATS: usize = 30;
+/// Bounded cross-device repeat tolerance; count, order, and detection cardinality remain exact.
+const DETECTION_ABS_TOLERANCE: f32 = 1e-4;
+const DETECTION_REL_TOLERANCE: f32 = 1e-4;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,7 +132,8 @@ struct MetricReport {
     labelled_images: usize,
     unknown_images_excluded: usize,
     ground_truth_boxes: usize,
-    detections: usize,
+    detections_total: usize,
+    metric_eligible_detections: usize,
     true_positive: usize,
     false_positive: usize,
     false_negative: usize,
@@ -214,6 +218,7 @@ struct ConfigReceipt {
     input: &'static str,
     box_space: &'static str,
     preprocess: &'static str,
+    preprocess_status: &'static str,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -272,7 +277,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             repeats: cli.repeats,
             input: "RGB8 PPM P6",
             box_space: "normalized-to-supplied-PPM",
-            preprocess: "YuNet::detect_rgb default RGB-to-BGR 0..255 letterbox",
+            preprocess: "YuNet::detect_rgb custom Rust 640x640 RGB-to-BGR 0..255 letterbox",
+            preprocess_status: "EXPERIMENTAL_NON_OPENCV_PARITY_UNQUALIFIED",
         },
         model_load_us,
         model_load_cache_state: "single-process-start; filesystem-cache-state-unspecified",
@@ -333,7 +339,7 @@ fn parse_args() -> Result<Cli, String> {
 }
 
 fn usage() -> String {
-    "usage: yunet_qualify --weights PATH --manifest PATH --device cpu|metal --out NEW.json --hardware DESCRIPTOR --score-threshold 0..1 --nms-threshold 0..1 --match-iou-threshold 0..1 [--repeats 2..3] [--source-revision REV]".into()
+    "usage: yunet_qualify --weights PATH --manifest PATH --device cpu|metal --out NEW.json --hardware DESCRIPTOR --score-threshold 0..1 --nms-threshold 0..1 --match-iou-threshold 0..1 [--repeats 2..30] [--source-revision REV]".into()
 }
 
 fn next_arg(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
@@ -519,8 +525,8 @@ fn detect_repeated(model: &YuNet, ppm: &Ppm, cli: &Cli) -> Result<(Vec<Detection
         let detections = model.detect_rgb(&ppm.rgb, ppm.width, ppm.height, cli.score_threshold, cli.nms_threshold)?;
         let elapsed = elapsed_us(start);
         if let Some(previous) = &reference {
-            if previous != &detections {
-                return Err(std::io::Error::other("repeated YuNet detections were not deterministic").into());
+            if !detections_equivalent(previous, &detections) {
+                return Err(std::io::Error::other("repeated YuNet detections changed count/order/content beyond bounded numeric tolerance").into());
             }
         } else {
             reference = Some(detections);
@@ -546,6 +552,24 @@ fn detect_repeated(model: &YuNet, ppm: &Ppm, cli: &Cli) -> Result<(Vec<Detection
             stage: "detect_rgb_total (preprocess+inference+decode+NMS)",
         },
     ))
+}
+
+/// Metal can vary by a few ulps while output count, order, and cardinality must stay identical.
+fn detections_equivalent(left: &[Detection], right: &[Detection]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            approximately_equal(left.score, right.score)
+                && left.bbox.iter().zip(right.bbox.iter()).all(|(left, right)| approximately_equal(*left, *right))
+                && left
+                    .keypoints
+                    .iter()
+                    .zip(right.keypoints.iter())
+                    .all(|(left, right)| approximately_equal(left[0], right[0]) && approximately_equal(left[1], right[1]))
+        })
+}
+
+fn approximately_equal(left: f32, right: f32) -> bool {
+    left.is_finite() && right.is_finite() && (left - right).abs() <= DETECTION_ABS_TOLERANCE + DETECTION_REL_TOLERANCE * left.abs().max(right.abs())
 }
 
 fn elapsed_us(start: Instant) -> u64 {
@@ -620,32 +644,55 @@ fn iou(left: &[f32; 4], right: &[f32; 4]) -> f32 {
     if union <= 0.0 || !union.is_finite() { 0.0 } else { intersection / union }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct MetricAccumulator {
+    images_total: usize,
+    labelled_images: usize,
+    ground_truth_boxes: usize,
+    detections_total: usize,
+    metric_eligible_detections: usize,
+    counts: Counts,
+}
+
+impl MetricAccumulator {
+    fn add(&mut self, image: &ImageReport) {
+        self.images_total = self.images_total.saturating_add(1);
+        self.detections_total = self.detections_total.saturating_add(image.detections);
+        if image.labelled {
+            self.labelled_images = self.labelled_images.saturating_add(1);
+            self.ground_truth_boxes = self.ground_truth_boxes.saturating_add(image.ground_truth_boxes);
+            self.metric_eligible_detections = self.metric_eligible_detections.saturating_add(image.detections);
+            self.counts.true_positive = self.counts.true_positive.saturating_add(image.true_positive);
+            self.counts.false_positive = self.counts.false_positive.saturating_add(image.false_positive);
+            self.counts.false_negative = self.counts.false_negative.saturating_add(image.false_negative);
+        }
+    }
+
+    fn finish(self) -> MetricReport {
+        MetricReport {
+            images_total: self.images_total,
+            labelled_images: self.labelled_images,
+            unknown_images_excluded: self.images_total.saturating_sub(self.labelled_images),
+            ground_truth_boxes: self.ground_truth_boxes,
+            detections_total: self.detections_total,
+            metric_eligible_detections: self.metric_eligible_detections,
+            true_positive: self.counts.true_positive,
+            false_positive: self.counts.false_positive,
+            false_negative: self.counts.false_negative,
+            precision: ratio(self.counts.true_positive, self.counts.true_positive.saturating_add(self.counts.false_positive)),
+            recall: ratio(self.counts.true_positive, self.counts.true_positive.saturating_add(self.counts.false_negative)),
+        }
+    }
+}
+
 fn metric_report(images: &[ImageReport], split: Option<Split>, crop: Option<CropSlice>) -> MetricReport {
-    let selected: Vec<&ImageReport> =
-        images.iter().filter(|image| split.is_none_or(|value| value == image.split) && crop.is_none_or(|value| value == image.crop_slice)).collect();
-    let labelled_images = selected.iter().filter(|image| image.labelled).count();
-    let mut counts = Counts::default();
-    let mut boxes = 0usize;
-    let mut detections = 0usize;
-    for image in selected.iter().filter(|image| image.labelled) {
-        counts.true_positive += image.true_positive;
-        counts.false_positive += image.false_positive;
-        counts.false_negative += image.false_negative;
-        boxes += image.ground_truth_boxes;
-        detections += image.detections;
+    let mut aggregate = MetricAccumulator::default();
+    for image in images {
+        if split.is_none_or(|value| value == image.split) && crop.is_none_or(|value| value == image.crop_slice) {
+            aggregate.add(image);
+        }
     }
-    MetricReport {
-        images_total: selected.len(),
-        labelled_images,
-        unknown_images_excluded: selected.len().saturating_sub(labelled_images),
-        ground_truth_boxes: boxes,
-        detections,
-        true_positive: counts.true_positive,
-        false_positive: counts.false_positive,
-        false_negative: counts.false_negative,
-        precision: ratio(counts.true_positive, counts.true_positive.saturating_add(counts.false_positive)),
-        recall: ratio(counts.true_positive, counts.true_positive.saturating_add(counts.false_negative)),
-    }
+    aggregate.finish()
 }
 
 fn ratio(numerator: usize, denominator: usize) -> Option<f64> {
@@ -653,26 +700,19 @@ fn ratio(numerator: usize, denominator: usize) -> Option<f64> {
 }
 
 fn stratum_reports(images: &[ImageReport]) -> Vec<StratumReport> {
-    let mut keys = BTreeSet::new();
+    let mut grouped = BTreeMap::<(Split, CropSlice), MetricAccumulator>::new();
     for image in images {
-        keys.insert((image.split, image.crop_slice));
+        grouped.entry((image.split, image.crop_slice)).or_default().add(image);
     }
-    keys.into_iter()
-        .map(|(split, crop_slice)| StratumReport { split, crop_slice, metrics: metric_report(images, Some(split), Some(crop_slice)) })
-        .collect()
+    grouped.into_iter().map(|((split, crop_slice), aggregate)| StratumReport { split, crop_slice, metrics: aggregate.finish() }).collect()
 }
 
 fn shoot_reports(images: &[ImageReport]) -> Vec<ShootReport> {
-    let mut keys = BTreeSet::new();
+    let mut grouped = BTreeMap::<(String, Split), MetricAccumulator>::new();
     for image in images {
-        keys.insert((image.shoot_id.clone(), image.split));
+        grouped.entry((image.shoot_id.clone(), image.split)).or_default().add(image);
     }
-    keys.into_iter().map(|(shoot_id, split)| ShootReport { shoot_id, split, metrics: metric_report_for_shoot(images, &shoot_id, split) }).collect()
-}
-
-fn metric_report_for_shoot(images: &[ImageReport], shoot_id: &str, split: Split) -> MetricReport {
-    let selected: Vec<ImageReport> = images.iter().filter(|image| image.shoot_id == shoot_id && image.split == split).cloned().collect();
-    metric_report(&selected, None, None)
+    grouped.into_iter().map(|((shoot_id, split), aggregate)| ShootReport { shoot_id, split, metrics: aggregate.finish() }).collect()
 }
 
 fn write_create_new_json(path: &Path, receipt: &Receipt) -> Result<(), Box<dyn std::error::Error>> {

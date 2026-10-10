@@ -3,6 +3,8 @@
 Checked 2026-10-10 against `Orthic-Labs/lightcraft` at main revision
 `2fef37a4c466acd8c0ae88a1ac5a1d0e1218dbc0`.
 
+Rechecked after source snapshot `3036f57cd1ee7bae8fd0183d29be34ced46335a9` was pushed to fork main: exact-revision run listing is empty & refreshed Actions page still displays same fork-usage suspension banner. Hidden browser is signed out; no maintainer re-enable control is available in current session. No restoration calls were repeated during this check.
+
 GitHub reports repository Actions enabled, all actions allowed, workflow
 permissions `read`, and both `lightcraft-desktop-workspace-ci` and
 `release-candidate` active. Repository metadata also reports `disabled:false`,

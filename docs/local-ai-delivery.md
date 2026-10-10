@@ -8,9 +8,9 @@ Status, 2026-10-10: source implementation & static review only. No current-revis
 | --- | --- | --- |
 | CI restoration | Fork usage suspension confirmed; API toggles/dispatch attempts recorded | Maintainer re-enable at [fork Actions](https://github.com/Orthic-Labs/lightcraft/actions), then generated CI & exact-artifact hidden Mac/Windows QA |
 | Culling decisions & evaluation | Detached cancellable desktop jobs, paged React review, explicit acceptance/undo, CLI baseline/scorer & synthetic regression source | Generated gates & exact-artifact hidden RightKit review/apply/undo journey; lock human-labelled shoot-level test corpus |
-| Face/eye & similarity weights | YuNet bytes pinned & static graph inventoried; experimental Candle port; DINOv2 candidate pinned; no model qualified | Exact port/reference agreement, larger-crop accuracy/abstention & named-platform latency; choose eye-state weights |
+| Face/eye & similarity weights | Exact YuNet, DINOv2 & MediaPipe v1 bytes/SHA pinned; graph/container inventories recorded; experimental YuNet Candle port; no model qualified | Convert remaining candidates, prove port/reference agreement, measure larger-crop accuracy/abstention & named-platform latency |
 | Cloud BYOK comparison | Strict bounded multi-image OpenRouter contract/transport in source, unknown blur/blink & reviewable outputs | Shared transport qualification, real provider credentials & controlled ambiguous-burst evaluation |
-| Personal Auto | Deterministic style-residual learner, real pipeline feature extraction & offline train/evaluate CLI in source | Shoot-disjoint rendered/preference comparison against deterministic Auto; numeric distance alone cannot promote a model |
+| Personal Auto | Deterministic style-residual learner; explicit-file extract/train/evaluate CLI; private provenance digests, coverage & fallback receipts in source | Shoot-disjoint rendered/preference comparison against deterministic Auto; numeric distance alone cannot promote a model |
 | ChatGPT-plan OAuth | Researched spec retained | Login convenience after useful photo workflows qualify |
 
 ## Reviewable culling commands
@@ -29,7 +29,7 @@ Pass returned proposal unchanged, with only explicitly accepted suggestions:
 {"command":"photo.cullApply","params":{"proposal":"<returned proposal object>","accept":[{"id":1,"flag":"reject"}]}}
 ```
 
-Replace placeholder string with actual JSON proposal object. Apply verifies catalog revision, source identity, measurements & accepted flags before one undoable batch. Stale/tampered proposals, unknown/duplicate IDs or mismatched flags fail before flag operations are committed. Empty acceptance changes no catalog flags. No original file is deleted.
+Replace placeholder string with actual JSON proposal object. Apply verifies catalog revision, source identity, measurements & accepted flags before one undoable batch. Proposal content binding & accepted actions are checked before launching remeasurement; source measurements are still rechecked before commit. Stale/tampered proposals, unknown/duplicate IDs or mismatched flags fail before flag operations are committed. Empty acceptance changes no catalog flags. No original file is deleted.
 
 Desktop `photo.cullSuggest` returns `{taskId,kind,total}` immediately. Detached workers decode without holding Session; `snapshot.status.jobs` reports progress & `completedJobs.result` contains validated proposal. `task.cancel` cancels analysis. React culling review defaults to no selected acceptance, protects existing flags, pages 50 rows at a time & cancels on close. Engine/CLI/MCP direct command dispatch retains synchronous read-only result shape.
 
@@ -56,14 +56,15 @@ Evidence protocols:
 ## Personal Auto source harness
 
 ```text
+lightcraft-cli ai personal extract --manifest EXPLICIT_LABELLED_FILES.json --out NEW_NUMERIC_MANIFEST.json
 lightcraft-cli ai personal train --manifest tests/fixtures/personal-auto/minimal.json --out NEW_MODEL.json
 lightcraft-cli ai personal evaluate --manifest tests/fixtures/personal-auto/minimal.json --model NEW_MODEL.json --out NEW_REPORT.json
 ```
 
-Fixture contains synthetic numeric labels only. Learner fits train shoots, checks frozen split/provenance, skips missing per-control labels & predicts bounded contrast/vibrance/saturation residuals. Lightroom weak labels & accepted Ember labels produce separate experimental variants. Extraction uses 16 fixed pipeline features, including `baseline.exposure`; it excludes camera identifiers. Reports separate validation/test shoot & camera aggregates. No production Auto replacement, render-quality claim or automatic model promotion exists.
+Fixture contains synthetic numeric labels only. Explicit-file extraction requires supplied consent & labels, uses disposable local state with sidecar writes disabled, emits canonical numeric features & omits file paths/EXIF/editor fields. Learner fits train shoots, checks frozen split/provenance, skips missing per-control labels & predicts bounded contrast/vibrance/saturation residuals. Lightroom weak labels & accepted Ember labels produce separate experimental variants. Extraction uses 16 fixed pipeline features, including `baseline.exposure`; camera identifiers are excluded from model features, while supplied opaque camera strata may remain in reports. Reports retain label-provenance digests, separate validation/test shoot & camera aggregates, input/eligible/scored/skipped counts & baseline fallback comparisons. No production Auto replacement, render-quality claim or automatic model promotion exists.
 
 ## Detector qualification source
 
 `crates/segment/examples/yunet_qualify.rs` reads explicit consented P6 RGB8 PPM manifests with normalized face boxes. It records known-negative vs unknown labels, shoot/split/crop slices, threshold configuration, supplied hardware, exact weight hash, model-load timing, first-per-image detection & repeated timings. First pass is not claimed as a cold-process or cold-filesystem benchmark. Metrics remain `UNQUALIFIED` until independent reference parity & held-out quality gates pass.
 
-Run this example only through generated Actions. Required arguments: `--weights`, `--manifest`, `--device cpu|metal`, `--hardware`, `--out`, `--score-threshold`, `--nms-threshold`, `--match-iou-threshold`; optional bounded `--repeats` & `--source-revision`. It does not run eye-state inference, cull photos, change catalogs or publish private input paths.
+Run this example only through generated Actions. Required arguments: `--weights`, `--manifest`, `--device cpu|metal`, `--hardware`, `--out`, `--score-threshold`, `--nms-threshold`, `--match-iou-threshold`; optional `--repeats 2..30` & bounded `--source-revision`. Model tensors are cached on selected device; graph execution validates input/weights/final heads without per-layer host readbacks. Receipt records custom 640px preprocessing as experimental, numeric repeat tolerance, all detections vs metric-eligible detections & one-pass shoot aggregation. It does not run eye-state inference, cull photos, change catalogs or publish private input paths.

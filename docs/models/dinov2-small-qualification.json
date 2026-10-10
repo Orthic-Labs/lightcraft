@@ -1,7 +1,18 @@
 {
   "schema": "ember.model-qualification/v1",
-  "status": "research-only-unqualified",
+  "status": "artifact-pinned-conversion-unqualified",
   "observed_at": "2026-10-10",
+  "qualification_state": {
+    "source_revision": "ACHIEVED",
+    "artifact_size": "ACHIEVED",
+    "artifact_sha256": "ACHIEVED_FOR_OUTSIDE_REPO_SCRATCH_COPY",
+    "container_inspection": "ACHIEVED_STATIC_ONLY",
+    "conversion": "UNQUALIFIED",
+    "reference_parity": "UNMEASURED",
+    "heldout_quality": "UNMEASURED",
+    "mac_metal": "UNMEASURED",
+    "windows_cpu": "UNMEASURED"
+  },
   "candidate": {
     "family": "DINOv2",
     "variant": "dinov2_vits14",
@@ -31,11 +42,27 @@
     "headers_observed_at": "2026-10-10",
     "last_modified": "2023-04-13T22:01:20Z",
     "etag": "0bd1417efc23bdb1d69200156f5a22bc-11",
-    "sha256": null,
-    "sha256_status": "not published by pinned repository or observed artifact headers",
-    "pin_rule": "ETag and Last-Modified are transport metadata, not immutable byte pins; capture SHA-256 before any use or packaging",
+    "sha256": "b938bf1bc15cd2ec0feacfe3a1bb553fe8ea9ca46a7e1d8d00217f29aef60cd9",
+    "sha256_status": "computed locally from exact official bytes on 2026-10-10; no upstream SHA-256 publication found",
+    "sha256_method": "shasum -a 256",
+    "pin_rule": "captured SHA-256 pins this scratch copy; re-verify same digest at conversion or packaging; ETag and Last-Modified remain transport metadata, not immutable pins",
+    "container": {
+      "format": "PyTorch zip serialization",
+      "entries": 177,
+      "compression": "stored",
+      "total_uncompressed_bytes": 88248135,
+      "data_pickle_bytes": 21829,
+      "data_pickle_sha256": "4acb2d8ac6c93ebfe4122584fe1e8c0691a44cb1bf71cd33d4666d927dc1adf6",
+      "tensor_storage_entries": 175,
+      "tensor_storage_global": "torch FloatStorage",
+      "state_key_summary": "175 tensor keys; cls_token, pos_embed, mask_token, patch_embed.proj, blocks.0 through blocks.11, norm; no head or register keys observed",
+      "version": "3\\n",
+      "static_inspection": "data.pkl opcode and container metadata only; no pickle unpickling or model execution"
+    },
     "training_data": "LVD-142M; not shipped with Ember",
-    "saved_for_this_record": false
+    "saved_for_this_record": true,
+    "scratch_path": "/tmp/weights_aesthetic_dinov2/dinov2_vits14_pretrain.pth",
+    "repository_committed": false
   },
   "licensing": {
     "model_and_weight_notice": "Apache-2.0",
@@ -43,7 +70,7 @@
     "license_source": "https://github.com/facebookresearch/dinov2/blob/7764ea0f912e53c92e82eb78a2a1631e92725fc8/LICENSE",
     "separate_binary_notice": "not found in pinned model card or repository source reviewed",
     "data_terms": "LVD-142M training data terms are separate and no training data is redistributed",
-    "attribution_gate": "retain pinned model card, repository license, artifact URL, byte count and captured SHA-256 in attribution before packaging"
+    "attribution_gate": "retain pinned model card, repository license, artifact URL, byte count and captured SHA-256 in attribution before packaging; scratch receipt does not clear redistribution"
   },
   "input_contract": {
     "channels": "RGB",
@@ -117,7 +144,14 @@
       "existing segment safetensors VarBuilder and verified-weight plumbing",
       "existing Metal feature path on macOS and CPU fallback path"
     ],
-    "checkpoint_boundary": "official artifact is PyTorch .pth; existing segment loader expects safetensors, so conversion and tensor-name/shape audit are qualification work; no conversion was performed here",
+    "checkpoint_boundary": "official artifact is PyTorch .pth; existing segment loader expects safetensors, so conversion and tensor-name/shape audit are qualification work; this record only inspected container and pickle opcodes statically",
+    "conversion_status": "UNQUALIFIED_NOT_RUN",
+    "conversion_plan": [
+      "Use an offline converter against pinned source metadata; never execute pickle globals or load an unverified artifact",
+      "Map 175 FloatStorage-backed state keys to Candle VarBuilder names while preserving float32 dtype and recorded shapes",
+      "Emit safetensors plus manifest containing source URL, source revision, byte count, artifact SHA-256, data.pkl SHA-256 and key count",
+      "Compare reference tensors and CLS outputs for 224 and 518 preprocessing separately before evaluator use"
+    ],
     "operator_inventory": [
       "Conv2d patch projection",
       "class token and learned position table",
@@ -137,10 +171,10 @@
     }
   },
   "qualification_gate": {
-    "state": "blocked_pending_artifact_hash_and_measurement",
+    "state": "artifact_hash_achieved_pending_conversion_reference_quality_platform",
     "required_before_use": [
       "obtain artifact under approved license review",
-      "capture SHA-256 and verify exact 88283115-byte artifact",
+      "verify captured b938bf1bc15cd2ec0feacfe3a1bb553fe8ea9ca46a7e1d8d00217f29aef60cd9 SHA-256 against exact 88283115-byte artifact",
       "convert or obtain an equivalent safetensors representation without adding runtime dependencies",
       "compare reference outputs for 224 and 518 preprocessing separately",
       "label held-out bursts for technical keeper, intentional-style keeper and tie/uncertain",
@@ -158,6 +192,6 @@
       "emit final-normalized 384-D CLS embedding and cosine pair scores for 224 and 518 conditions",
       "compare against existing 8x8 luma signature on held-out bursts; expose score and uncertainty as review evidence only"
     ],
-    "acceptance": "reference parity, artifact hash, license record and platform measurements are recorded before any consideration of shipping"
+    "acceptance": "reference parity, artifact hash, license record and platform measurements are recorded before any consideration of shipping; current record has only source pin, size, SHA-256 and static container inspection"
   }
 }
