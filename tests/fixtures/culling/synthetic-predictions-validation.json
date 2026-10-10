@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "fixture_kind": "SYNTHETIC",
+  "dataset_id": "synthetic-culling-v1",
+  "split": "validation",
+  "predictions": [
+    {"photo_id": "photo-validation-001-a", "decision": "unknown"},
+    {"photo_id": "photo-validation-001-b", "decision": "keep"},
+    {"photo_id": "photo-validation-001-c", "decision": "unknown"},
+    {"photo_id": "photo-validation-001-d", "decision": "unknown"},
+    {"photo_id": "photo-validation-002-a", "decision": "unknown"},
+    {"photo_id": "photo-validation-002-b", "decision": "unknown"}
+  ],
+  "winner_predictions": [
+    {"burst_id": "burst-validation-001", "selected_winner_id": "photo-validation-001-b"}
+  ],
+  "expected": {
+    "winnerAgreement": 1.0,
+    "winnerCoverage": 1.0,
+    "decisionCoverage": 0.3333333333
+  }
+}

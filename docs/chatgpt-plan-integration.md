@@ -1,6 +1,6 @@
 # Ember: ChatGPT plan integration spec
 
-Status: proposed implementation; researched 9 October 2026. No provider connection or paid inference performed for this spec.
+Status: deferred implementation; researched 9 October 2026. Local culling qualification, cloud BYOK comparison & Personal Auto evaluation take priority per [local AI delivery](local-ai-delivery.md). No provider connection or paid inference performed for this spec.
 
 ## Decision & scope
 

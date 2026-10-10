@@ -15,15 +15,17 @@ React/Tauri targets **macOS & Windows**. Existing egui, Linux, web/WASM & CLI ho
 
 ## Auto, masks & AI
 
-Local Auto uses image statistics & deterministic processing; Adobe Auto quality parity is not established. Culling work uses local focus/burst heuristics. Denoise is classical processing. Optional [SAM 3 masking](docs/ai-masks.md) requires separately acquired model weights under Meta’s licence.
+Local Auto uses image statistics & deterministic processing; Adobe Auto quality parity is not established. Local culling uses focus/burst heuristics, with read-only proposals & explicit undoable acceptance through engine commands. [Culling evaluation](docs/culling-evaluation.md) defines shoot-level labels, CLI scoring & proposed qualification targets. Denoise is classical processing. Optional [SAM 3 masking](docs/ai-masks.md) requires separately acquired model weights under Meta’s licence.
 
 [OpenRouter photo assessment](crates/photo-ai/README.md) is an opt-in experiment for bounded, read-only model comparisons. It produces proposals, does not apply edits or delete/reject photos, & has no validated provider winner. Credentials & real-photo evaluation are separate from this branding change.
+
+[Local AI delivery](docs/local-ai-delivery.md) records current source work & remaining gates: local culling first, qualified face/eye/similarity weights next, then cloud comparison & Personal Auto. ChatGPT-plan OAuth remains deferred.
 
 ## Release status
 
 This fork is under active development. Fork `main` includes merged [React/Tauri PR #1](https://github.com/Orthic-Labs/lightcraft/pull/1), [OpenRouter PR #2](https://github.com/Orthic-Labs/lightcraft/pull/2) & [Ember branding PR #3](https://github.com/Orthic-Labs/lightcraft/pull/3). No React/Tauri PR has been submitted to upstream LightCraft.
 
-Public builds, Rust tests & native qualification run through generated **RightKit GitHub Actions** (`.rightgit.json`). Local work is source/static-only. Only qualified green artifacts are promoted to desktop default. GitHub currently rejects workflow dispatch for this fork; merged Ember source awaits native qualification. Source merges do not promote installed artifacts.
+Public builds, Rust tests & native qualification run through generated **RightKit GitHub Actions** (`.rightgit.json`). Local work is source/static-only. Only qualified green artifacts are promoted to desktop default. GitHub suspended this fork’s workflows for usage scale; [CI restoration](docs/ci-restoration.md) records API attempts & required maintainer re-enable control. Current source awaits native qualification. Source merges do not promote installed artifacts.
 
 ## Development
 

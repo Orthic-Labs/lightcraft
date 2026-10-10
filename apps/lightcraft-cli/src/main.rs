@@ -9,12 +9,15 @@
 //! lightcraft-cli synth-merge hdr|panorama -o DIR
 //! lightcraft-cli commands [--json]
 //! lightcraft-cli controls [--json]
+//! lightcraft-cli cull score --predictions FILE --labels FILE [--out FILE] [--split test]
+//! lightcraft-cli cull baseline --manifest FILE [--reject-below 0..100] [--out FILE]
 //! lightcraft-cli calibrate [--max N] [--out DIR] FOLDERS/FILES…
 //! ```
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod alloc_release;
+mod cull_eval;
 mod photo_ai;
 
 use std::io::{BufReader, Write};
@@ -88,6 +91,10 @@ USAGE:
       Write synthetic merge inputs (procedural scene; bracketed DNGs or overlapping PNG views).
   lightcraft-cli commands [--json]   list every command id with its parameters
   lightcraft-cli controls [--json]   list every develop control id with its range
+  lightcraft-cli cull score --predictions FILE --labels FILE [--out FILE] [--split test]
+      Score read-only culling predictions against explicit shoot-level labels.
+  lightcraft-cli cull baseline --manifest FILE [--reject-below 0..100] [--out FILE]
+      Measure classical culling on explicit files in a disposable in-memory catalog.
   lightcraft-cli ai compare --demo|FILES… --out NEW_DIR [--model ID]… [--repeat 1..3] [--budget-usd N] [--prepare-only]
       Read-only OpenRouter experiment. Renders input/current Auto/model candidates, with JSON &
       HTML receipts. Uses OPENROUTER_API_KEY from environment; no key enters files or output.
@@ -151,6 +158,7 @@ fn main() -> ExitCode {
         Some("synth-merge") => synth_merge(&args[1..]),
         Some("controls") => controls(&args[1..]),
         Some("ai") => photo_ai::run(&args[1..]),
+        Some("cull") => cull_eval::run(&args[1..]),
         Some("calibrate") => calibrate(&args[1..]),
         Some("--version" | "-V" | "version") => {
             println!("lightcraft-cli {}", env!("CARGO_PKG_VERSION"));

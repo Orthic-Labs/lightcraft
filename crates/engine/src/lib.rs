@@ -325,7 +325,8 @@ impl Session {
         (spec.enabled)(self).map_err(|why| EngineError::Disabled(id.to_string(), why))?;
         let empty = Value::Object(Default::default());
         let params = if params.is_null() { &empty } else { params };
-        self.run_command(id, spec.journal.then_some(params), |s| (spec.run)(s, params))
+        let read_only_cull = id == "photo.analyze" && params.get("dryRun").and_then(Value::as_bool) == Some(true);
+        self.run_command(id, (spec.journal && !read_only_cull).then_some(params), |s| (spec.run)(s, params))
     }
 
     /// Run `f` as command `id` with what [`Session::execute`] does around every command: the
@@ -809,6 +810,8 @@ pub fn json_delta(old: &Value, new: &Value) -> Option<Value> {
 mod tests;
 #[cfg(test)]
 mod tests_color;
+#[cfg(test)]
+mod tests_cull_review;
 #[cfg(test)]
 mod tests_export;
 #[cfg(test)]
