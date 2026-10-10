@@ -163,7 +163,7 @@ fn tampered_proposal_and_valid_then_unknown_accept_are_atomic() {
 fn burst_ordering_uses_real_seconds_across_month_boundary() {
     let mut s = Session::with_demo();
     let first = s.visible_cloned()[0];
-    let mut clone = s.catalog.photo(first).expect("demo photo").clone();
+    let mut clone = s.catalog.photo(first).expect("demo photo").as_ref().clone();
     let second = s.catalog.alloc_photo_id();
     clone.id = second;
     clone.file_name = "month-boundary-copy.jpg".into();
@@ -192,7 +192,7 @@ fn invalid_capture_clock_is_treated_as_unknown_time() {
 fn timezone_equivalent_capture_times_join_burst() {
     let mut s = Session::with_demo();
     let first = s.visible_cloned()[0];
-    let mut clone = s.catalog.photo(first).expect("demo photo").clone();
+    let mut clone = s.catalog.photo(first).expect("demo photo").as_ref().clone();
     let second = s.catalog.alloc_photo_id();
     clone.id = second;
     clone.file_name = "timezone-copy.jpg".into();
@@ -252,7 +252,7 @@ fn changed_decoded_file_pixels_invalidate_cached_cull_proposal() {
 fn tied_burst_members_are_review_only_without_best_or_pick() {
     let mut s = Session::with_demo();
     let first = s.visible_cloned()[0];
-    let mut clone = s.catalog.photo(first).expect("demo photo").clone();
+    let mut clone = s.catalog.photo(first).expect("demo photo").as_ref().clone();
     let second = s.catalog.alloc_photo_id();
     clone.id = second;
     clone.file_name = "tie-copy.jpg".into();
