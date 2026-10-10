@@ -1567,15 +1567,8 @@ mod tests {
         let Some(task_id) = started.get("taskId").and_then(Value::as_str) else { return };
         assert_eq!(started.get("total").and_then(Value::as_u64), Some(expected_total as u64));
         assert!(tasks.statuses().iter().any(|job| job.id == task_id && job.kind == "cull"));
-        for _ in 0..2_000 {
-            tasks.poll(&mut session);
-            if !tasks.running() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        let terminal = wait_for_terminal(&mut tasks, &mut session, task_id, Duration::from_secs(10), "cull suggestion");
         assert!(!tasks.running(), "cull worker must reach terminal state");
-        let terminal = tasks.completed_jobs().into_iter().find(|job| job.id == task_id).expect("cull terminal record");
         assert_eq!(terminal.state, "done");
         assert!(terminal.result.as_ref().and_then(|value| value.get("proposal")).is_some(), "terminal result carries proposal");
         assert_eq!(session.catalog.to_snapshot(), before, "suggestion does not mutate catalog");

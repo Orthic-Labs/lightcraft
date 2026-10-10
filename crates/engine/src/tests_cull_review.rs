@@ -132,7 +132,10 @@ fn duplicate_ids_nonfinite_thresholds_unknown_accepts_and_unpicked_are_rejected(
 
     let p = proposal(&mut s, &ids);
     let unknown = s.execute("photo.cullApply", &json!({"proposal": p, "accept": [{"id": u64::MAX, "flag": "reject"}]})).unwrap_err().to_string();
-    assert!(unknown.contains("not in proposal"), "unknown accepted photo is distinct: {unknown}");
+    assert!(
+        unknown.contains(&format!("accepted flag for photo {} does not match an available proposal", u64::MAX)),
+        "unknown accepted photo is rejected during planning: {unknown}"
+    );
     assert_eq!(s.catalog.to_snapshot(), before);
 }
 
@@ -155,7 +158,10 @@ fn tampered_proposal_and_valid_then_unknown_accept_are_atomic() {
         .execute("photo.cullApply", &json!({"proposal": p, "accept": [{"id": accepted.0, "flag": "reject"}, {"id": u64::MAX, "flag": "reject"}]}))
         .unwrap_err()
         .to_string();
-    assert!(mixed_error.contains("not in proposal"), "unknown after valid accept is rejected: {mixed_error}");
+    assert!(
+        mixed_error.contains(&format!("accepted flag for photo {} does not match an available proposal", u64::MAX)),
+        "unknown after valid accept is rejected during planning: {mixed_error}"
+    );
     assert_eq!(s.catalog.to_snapshot(), before, "valid prefix is not committed before unknown ID");
 }
 
