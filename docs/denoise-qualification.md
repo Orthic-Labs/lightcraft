@@ -1,6 +1,6 @@
 # Offline denoise qualification
 
-Status, 2026-10-10: procedural CPU baseline measured through generated CI. Production Ember has classical RGB luminance/chroma noise reduction; no learned denoiser is qualified.
+Status, 2026-10-10: procedural CPU baseline measured through generated CI. Production Ember has classical RGB luminance/chroma noise reduction plus a per-photo noise estimate & Auto Noise Reduction ([`noise-reduction.md`](noise-reduction.md)); no learned denoiser is qualified.
 
 ## Procedural baseline
 

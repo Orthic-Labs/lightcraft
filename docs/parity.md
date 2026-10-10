@@ -260,7 +260,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 | LR-EDIT-EFFECTS-VIGNETTE | Post-crop vignette | P0 | ✅ | `ctl:vignette.*`, `crates/pipeline/src/finish.rs`, `crates/ui-egui/src/panels/edit.rs` | style picker (Highlight / Color / Paint) in the Effects section |
 | LR-EDIT-EFFECTS-GRAIN | Grain | P1 | ✅ | `ctl:grain.*` | |
 | LR-EDIT-DETAIL-SHARPEN | Sharpening | P0 | ✅ | `ctl:detail.sharpenAmount`, `ctl:detail.sharpenRadius`, `ctl:detail.sharpenDetail`, `ctl:detail.sharpenMasking` | no Alt-drag mask preview |
-| LR-EDIT-DETAIL-NR | Luminance noise reduction | P0 | ✅ | `ctl:detail.nrLuminance`, `ctl:detail.nrDetail`, `ctl:detail.nrContrast` | |
+| LR-EDIT-DETAIL-NR | Luminance noise reduction | P0 | ✅ | `ctl:detail.nrLuminance`, `ctl:detail.nrDetail`, `ctl:detail.nrContrast`, `cmd:develop.autoNoise`, `crates/pipeline/src/noise.rs` | guided filter of log luminance (CPU + GPU); Photo ▸ Auto Noise Reduction measures the photo's noise (signal-dependent model fitted on flat tiles of the original, [`docs/noise-reduction.md`](noise-reduction.md)) & sets luminance + colour NR deterministically, ISO as fallback; `dryRun` returns the estimate |
 | LR-EDIT-DETAIL-CNR | Colour noise reduction | P0 | ✅ | `ctl:detail.nrColor`, `ctl:detail.nrColorDetail`, `ctl:detail.nrColorSmoothness` | |
 | LR-EDIT-DETAIL-DENOISE | AI denoise | P2 | ⬜ | | settings field reserved, not rendered |
 | LR-EDIT-DETAIL-RAWDETAILS | Improved demosaic toggle | P2 | ⬜ | | |
@@ -601,7 +601,7 @@ visible menu bar yet: the menu model is only exposed through the control channel
 | MENU-PHOTO-STACK | Stack submenu | P1 | ✅ | `cmd:stack.group`, `cmd:stack.ungroup`, `cmd:dialog.autoStack` | |
 | MENU-PHOTO-MERGE | Photo merge submenu | P2 | ✅ | `cmd:dialog.mergeHdr`, `cmd:dialog.mergePanorama`, `cmd:dialog.mergeHdrPanorama`, `cmd:merge.hdrLast` | |
 | MENU-PHOTO-ENHANCE | Enhance… | P2 | ⬜ | | |
-| MENU-PHOTO-AUTO | Auto settings | P0 | ✅ | `cmd:develop.auto` | |
+| MENU-PHOTO-AUTO | Auto settings | P0 | ✅ | `cmd:develop.auto` | followed by Auto Noise Reduction (`cmd:develop.autoNoise`, Ember-only) |
 | MENU-PHOTO-BW | Convert to B&W | P0 | ✅ | `cmd:develop.treatment` | |
 | MENU-PHOTO-RESET | Reset edits / crop | P0 | ✅ | `cmd:develop.reset`, `cmd:crop.reset` | |
 | MENU-PHOTO-UPDATEAI | Update AI settings | P2 | ⬜ | | |

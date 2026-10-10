@@ -32,6 +32,7 @@ pub mod geometry;
 pub mod local;
 pub mod lut;
 pub mod masks;
+pub mod noise;
 pub mod optics;
 pub mod output;
 pub mod personal_auto;

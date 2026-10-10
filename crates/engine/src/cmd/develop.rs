@@ -308,6 +308,23 @@ pub fn specs() -> Vec<CommandSpec> {
             })?;
             Ok(serde_json::to_value(a).unwrap_or_default())
         }),
+        cmd!("develop.autoNoise", "Auto Noise Reduction", ["Photo"], None, "{dryRun?: bool}", has_active, |s, p| {
+            // Reads the original at native resolution: a proxy has already averaged the noise away.
+            let c = "develop.autoNoise";
+            let id = active(s, c)?;
+            let (iso, raw) = s.catalog.photo(id).map(|p| (p.meta.iso, p.develops_raw())).unwrap_or((None, false));
+            let src = s.source_now(id, SourceLevel::Full).map_err(|e| bad(c, e))?;
+            let estimate = lightcraft_pipeline::noise::estimate(&src, 1.0);
+            let nr = lightcraft_pipeline::noise::auto_noise_reduction(estimate, iso, raw);
+            if !bool_or(p, "dryRun", false) {
+                edit(s, c, "Auto Noise Reduction", |d| {
+                    d.detail.nr_luminance = nr.luminance;
+                    d.detail.nr_color = nr.color;
+                    Ok(())
+                })?;
+            }
+            Ok(json!({"estimate": estimate, "luminance": nr.luminance, "color": nr.color, "iso": iso, "raw": raw}))
+        }),
         cmd!(
             "develop.wb",
             "White Balance",

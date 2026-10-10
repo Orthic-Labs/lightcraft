@@ -530,6 +530,23 @@ fn filter_presets_save_and_apply() {
 }
 
 #[test]
+fn auto_noise_reduction_measures_then_applies_in_one_undo_step() {
+    let mut s = demo();
+    let before = active_dev(&s);
+    let r = s.execute("develop.autoNoise", &json!({"dryRun": true})).unwrap();
+    let (lum, col) = (r["luminance"].as_f64().unwrap(), r["color"].as_f64().unwrap());
+    assert!((0.0..=80.0).contains(&lum) && (0.0..=100.0).contains(&col), "{r}");
+    assert_eq!(active_dev(&s).detail, before.detail, "a dry run edits nothing");
+    let again = s.execute("develop.autoNoise", &json!({"dryRun": true})).unwrap();
+    assert_eq!(r, again, "repeat stable");
+    s.execute("develop.autoNoise", &json!({})).unwrap();
+    let d = active_dev(&s);
+    assert_eq!((d.detail.nr_luminance, d.detail.nr_color), (lum, col));
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(active_dev(&s).detail, before.detail, "one undo step");
+}
+
+#[test]
 fn auto_bw_mix_separates_colours() {
     let mut s = demo();
     s.execute("develop.autoBwMix", &json!({})).unwrap();
