@@ -450,13 +450,14 @@ pub(crate) fn decode(bytes: &[u8], mode: Mode) -> Result<RawImage> {
     let info = raw.image()?;
     let (w, h) = (info.width as usize, info.height as usize);
     let sample_count = w.checked_mul(h).filter(|&n| n > 0 && n <= crate::MAX_SAMPLES).ok_or(RawError::Limit("image too large"))?;
+    let sample_count_u64 = sample_count as u64;
     let bits = info.bits() as u32;
     let linear_rgb = info.compression == 7 && info.photometric == photometric::YCBCR;
     let chunks = info.chunks(bytes.len() as u64);
     let strip_len = chunks.iter().try_fold(0u64, |total, c| total.checked_add(c.len)).ok_or(RawError::Limit("raw image data too large"))?;
     // This ARW2 layout stores exactly one byte per sample in one strip; other packed layouts
     // must use preview fallback instead of decoding with the wrong layout.
-    let one_byte_per_sample = chunks.len() == 1 && strip_len == sample_count as u64;
+    let one_byte_per_sample = chunks.len() == 1 && strip_len == sample_count_u64;
     let (data, out_bits) = match info.compression {
         7 if linear_rgb => (RawData::U16(read_ycbcr_tiles(bytes, &info, raw, mode)?), 14),
         32767 if one_byte_per_sample && mode == Mode::Header => {
