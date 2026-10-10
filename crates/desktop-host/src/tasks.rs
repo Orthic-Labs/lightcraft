@@ -293,12 +293,13 @@ impl Tasks {
         let tx = self.tx.clone();
         let id_for_worker = task_id.clone();
         let worker_cancel = cancel.clone();
+        let worker_total = total.clone();
         let worker = std::thread::Builder::new()
             .name("lightcraft-cull".into())
             .spawn(move || {
                 let result = lightcraft_engine::guard::catch("cull suggestion", || {
                     job.run(&|fraction, _stage| {
-                        let terminal = total.load(Ordering::Relaxed).saturating_sub(1);
+                        let terminal = worker_total.load(Ordering::Relaxed).saturating_sub(1);
                         completed.store((fraction.clamp(0.0, 1.0) * terminal as f32).round() as usize, Ordering::Relaxed);
                         !worker_cancel.load(Ordering::Relaxed)
                     })
@@ -339,13 +340,14 @@ impl Tasks {
         let tx = self.tx.clone();
         let id_for_worker = task_id.clone();
         let worker_cancel = cancel.clone();
+        let worker_total = total.clone();
         let params_for_event = params.clone();
         let worker = std::thread::Builder::new()
             .name("lightcraft-cull-apply".into())
             .spawn(move || {
                 let result = lightcraft_engine::guard::catch("cull apply", || {
                     prepared.job.run(&|fraction, _stage| {
-                        let terminal = total.load(Ordering::Relaxed).saturating_sub(1);
+                        let terminal = worker_total.load(Ordering::Relaxed).saturating_sub(1);
                         completed.store((fraction.clamp(0.0, 1.0) * terminal as f32).round() as usize, Ordering::Relaxed);
                         !worker_cancel.load(Ordering::Relaxed)
                     })
