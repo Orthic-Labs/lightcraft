@@ -51,10 +51,8 @@ copy_docs() {
   for f in README.md LICENSE LICENSE-MIT LICENSE-APACHE COPYRIGHT NOTICE; do
     if [ -f "$ROOT/$f" ]; then cp "$ROOT/$f" "$dest/"; fi
   done
-  if [ -f "$ROOT/docs/licenses/pytorch-bicubic-LICENSE.txt" ]; then
-    mkdir -p "$dest/docs/licenses"
-    cp "$ROOT/docs/licenses/pytorch-bicubic-LICENSE.txt" "$dest/docs/licenses/"
-  fi
+  mkdir -p "$dest/docs/licenses"
+  cp "$ROOT/docs/licenses/pytorch-bicubic-LICENSE.txt" "$dest/docs/licenses/"
   copy_font_licences "$dest"
 }
 
