@@ -530,6 +530,37 @@ fn filter_presets_save_and_apply() {
 }
 
 #[test]
+fn auto_writes_region_masks_once_and_undoes_them_with_the_values() {
+    let mut s = demo();
+    s.execute("mask.add", &json!({"kind": "radial", "center": [0.3, 0.3], "name": "mine"})).unwrap();
+    let before = active_dev(&s);
+    let r = s.execute("develop.auto", &json!({"dryRun": true})).unwrap();
+    assert!(r.get("exposure").is_some() && r.get("regions").is_some(), "{r}");
+    assert_eq!(active_dev(&s), before, "dry run changes nothing");
+    s.execute("develop.auto", &json!({})).unwrap();
+    let d = active_dev(&s);
+    let auto_masks = |d: &lightcraft_develop::DevelopSettings| d.masks.iter().filter(|m| lightcraft_pipeline::auto::regions::is_auto_mask(m)).count();
+    let n = auto_masks(&d);
+    assert!(d.masks.iter().any(|m| m.name == "mine"), "the user's mask stays");
+    // every Auto mask carries an adjustment and a semantic shape; ids are unique
+    let mut ids: Vec<u32> = d.masks.iter().map(|m| m.id).collect();
+    ids.dedup();
+    assert_eq!(ids.len(), d.masks.len());
+    // running Auto again replaces, never stacks
+    s.execute("develop.auto", &json!({})).unwrap();
+    assert_eq!(auto_masks(&active_dev(&s)), n);
+    assert!(active_dev(&s).masks.iter().any(|m| m.name == "mine"));
+    // one undo step removes the values and the masks together
+    s.execute("edit.undo", &json!({})).unwrap();
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(active_dev(&s), before);
+    // regions off: the global values only, no masks added
+    s.execute("develop.auto", &json!({"regions": false})).unwrap();
+    assert_eq!(auto_masks(&active_dev(&s)), 0);
+    assert_ne!(active_dev(&s).light, before.light);
+}
+
+#[test]
 fn auto_noise_reduction_measures_then_applies_in_one_undo_step() {
     let mut s = demo();
     let before = active_dev(&s);
