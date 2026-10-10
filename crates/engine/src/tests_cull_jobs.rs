@@ -17,9 +17,16 @@ fn tampered_result(base: &CullJobResult, job: &CullJob, mutate: impl FnOnce(&mut
     CullJobResult { catalog_revision: job.catalog_revision, value }
 }
 
+fn expect_error<T, E>(result: std::result::Result<T, E>, message: &str) -> E {
+    match result {
+        Ok(_) => panic!("{message}"),
+        Err(error) => error,
+    }
+}
+
 fn assert_tamper_rejected(session: &Session, job: &CullJob, base: &CullJobResult, label: &str, mutate: impl FnOnce(&mut serde_json::Value)) {
     let tampered = tampered_result(base, job, mutate);
-    let error = session.validate_cull_job_result(job, &tampered).err().expect("tampered worker result must be rejected").to_string();
+    let error = expect_error(session.validate_cull_job_result(job, &tampered), "tampered worker result must be rejected").to_string();
     assert!(!error.is_empty(), "tampered {label} result reports a reason");
 }
 
@@ -123,18 +130,18 @@ fn cancelled_worker_stops_before_decode_and_after_partial_progress() {
     let job = s.plan_cull_job(&ids, Some(100.0), true).unwrap();
 
     let before = s.catalog.to_snapshot();
-    let immediate = job.run(&|_, _| false).err().expect("immediate cancellation");
+    let immediate = expect_error(job.run(&|_, _| false), "immediate cancellation");
     assert_eq!(immediate, "cancelled");
     assert_eq!(s.catalog.to_snapshot(), before, "cancellation does not mutate session catalog");
 
     let calls = AtomicUsize::new(0);
-    let partial = job
-        .run(&|_, _| {
+    let partial = expect_error(
+        job.run(&|_, _| {
             let count = calls.fetch_add(1, Ordering::Relaxed) + 1;
             count < 4
-        })
-        .err()
-        .expect("partial cancellation");
+        }),
+        "partial cancellation",
+    );
     assert_eq!(partial, "cancelled");
     assert!(calls.load(Ordering::Relaxed) >= 2, "worker observes cancellation during bounded work");
     assert_eq!(s.catalog.to_snapshot(), before, "partial cancellation does not mutate session catalog");
@@ -268,7 +275,7 @@ fn cancelled_detached_apply_worker_cannot_reach_finish_or_mutate_session() {
     let _ = s.drain_log();
     let before_journal = s.journal.clone();
     let prepared = s.plan_cull_apply(&params).expect("valid detached apply plan");
-    let error = prepared.job.run(&|_, _| false).err().expect("cancelled detached apply");
+    let error = expect_error(prepared.job.run(&|_, _| false), "cancelled detached apply");
     assert_eq!(error, "cancelled");
     assert_eq!(s.catalog.to_snapshot(), before_catalog, "cancelled worker leaves catalog unchanged");
     assert_eq!(s.undo.len(), before_undo, "cancelled worker adds no undo");
@@ -307,7 +314,7 @@ fn malformed_accept_is_rejected_before_detached_worker_start() {
     let _ = s.drain_log();
     let before_journal = s.journal.clone();
 
-    let error = s.plan_cull_apply(&params).err().expect("malformed accept must fail during planning").to_string();
+    let error = expect_error(s.plan_cull_apply(&params), "malformed accept must fail during planning").to_string();
     assert!(error.contains("unknown flag"), "malformed accept reports validation error: {error}");
     assert_eq!(s.catalog.to_snapshot(), before_catalog, "malformed accept leaves catalog unchanged");
     assert_eq!(s.undo.len(), before_undo, "malformed accept adds no undo");
@@ -327,7 +334,7 @@ fn unavailable_accept_is_rejected_before_detached_worker_start() {
     for accept in [json!([{"id": u64::MAX, "flag": flag}]), json!([{"id": id.0, "flag": "none"}]), json!([{"id": id.0, "flag": other_flag}])] {
         let mut invalid = params.clone();
         invalid["accept"] = accept;
-        let error = s.plan_cull_apply(&invalid).err().expect("unavailable accept must fail during planning").to_string();
+        let error = expect_error(s.plan_cull_apply(&invalid), "unavailable accept must fail during planning").to_string();
         assert!(error.contains("does not match an available proposal"), "unavailable accept reports validation error: {error}");
         assert_eq!(s.catalog.to_snapshot(), before_catalog, "unavailable accept leaves catalog unchanged");
         assert_eq!(s.undo.len(), before_undo, "unavailable accept adds no undo");
@@ -351,7 +358,7 @@ fn tampered_binding_is_rejected_before_detached_worker_start() {
         } else {
             invalid["proposal"]["photos"][0]["fileName"] = json!("changed-name.jpg");
         }
-        let error = s.plan_cull_apply(&invalid).err().expect("tampered binding must fail during planning").to_string();
+        let error = expect_error(s.plan_cull_apply(&invalid), "tampered binding must fail during planning").to_string();
         assert!(error.contains("binding does not match contents"), "tampering reports binding error: {error}");
         assert_eq!(s.catalog.to_snapshot(), before_catalog, "tampered plan leaves catalog unchanged");
         assert_eq!(s.undo.len(), before_undo, "tampered plan adds no undo");
@@ -369,7 +376,7 @@ fn rebound_snapshot_mismatch_is_rejected_before_detached_worker_start() {
     let before_catalog = s.catalog.to_snapshot();
     let before_undo = s.undo.len();
     let before_journal = s.journal.clone();
-    let error = s.plan_cull_apply(&params).err().expect("current snapshot mismatch must fail before worker").to_string();
+    let error = expect_error(s.plan_cull_apply(&params), "current snapshot mismatch must fail before worker").to_string();
     assert!(error.contains("does not match current source or flag"), "snapshot mismatch reports validation error: {error}");
     assert_eq!(s.catalog.to_snapshot(), before_catalog, "rebound mismatch leaves catalog unchanged");
     assert_eq!(s.undo.len(), before_undo, "rebound mismatch adds no undo");
@@ -381,12 +388,12 @@ fn detached_job_rejects_malformed_policy_duplicate_and_unknown_ids() {
     let mut s = Session::with_demo();
     let id = demo_ids(&mut s, 1)[0];
     for threshold in [f32::NAN, -1.0, 101.0] {
-        let error = s.plan_cull_job(&[id], Some(threshold), false).err().expect("invalid threshold").to_string();
+        let error = expect_error(s.plan_cull_job(&[id], Some(threshold), false), "invalid threshold").to_string();
         assert!(error.contains("rejectBelow"), "invalid threshold is rejected: {error}");
     }
-    let duplicate = s.plan_cull_job(&[id, id], None, false).err().expect("duplicate ID").to_string();
+    let duplicate = expect_error(s.plan_cull_job(&[id, id], None, false), "duplicate ID").to_string();
     assert!(duplicate.contains("duplicate photo id"), "duplicate IDs are rejected: {duplicate}");
-    let unknown = s.plan_cull_job(&[PhotoId(u64::MAX)], None, false).err().expect("unknown ID").to_string();
+    let unknown = expect_error(s.plan_cull_job(&[PhotoId(u64::MAX)], None, false), "unknown ID").to_string();
     assert!(unknown.contains("unknown photo id"), "unknown IDs are rejected: {unknown}");
 }
 
@@ -396,6 +403,6 @@ fn detached_job_constructor_rejects_duplicate_snapshots() {
     let id = demo_ids(&mut s, 1)[0];
     let job = s.plan_cull_job(&[id], None, false).unwrap();
     let duplicate =
-        CullJob::new(job.catalog_revision, vec![job.photos[0].clone(), job.photos[0].clone()], None, false).err().expect("duplicate snapshot");
+        expect_error(CullJob::new(job.catalog_revision, vec![job.photos[0].clone(), job.photos[0].clone()], None, false), "duplicate snapshot");
     assert!(duplicate.contains("duplicate photo id"), "detached constructor rejects duplicate snapshots: {duplicate}");
 }
